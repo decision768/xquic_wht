@@ -9,7 +9,8 @@ set(CMAKE_SYSTEM_PROCESSOR aarch64)
 # set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
 
 # === SIM8810 SDK ===
-set(CMAKE_SYSROOT "/opt/crosstools/sysroot")
+set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
+set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
 
 # toolchain（跟 sdk.mk 一致）
 set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
