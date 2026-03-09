@@ -1,0 +1,8 @@
+/home/admin123/xquic_test/build/CMakeFiles/xquic-static.dir
+/home/admin123/xquic_test/build/CMakeFiles/xquic.dir
+/home/admin123/xquic_test/build/CMakeFiles/edit_cache.dir
+/home/admin123/xquic_test/build/CMakeFiles/rebuild_cache.dir
+/home/admin123/xquic_test/build/mini/CMakeFiles/mini_server.dir
+/home/admin123/xquic_test/build/mini/CMakeFiles/mini_client.dir
+/home/admin123/xquic_test/build/mini/CMakeFiles/edit_cache.dir
+/home/admin123/xquic_test/build/mini/CMakeFiles/rebuild_cache.dir
