@@ -56,6 +56,10 @@ typedef enum h3_hdr_type {
     H3_HDR_SCHEME,
     H3_HDR_HOST,
     H3_HDR_PATH,
+    H3_HDR_STREAM_INDEX,
+    H3_HDR_STREAM_COUNT,
+    H3_HDR_STREAM_OFFSET,
+    H3_HDR_TOTAL_LENGTH,
 
     H3_HDR_CNT
 } H3_HDR_TYPE;

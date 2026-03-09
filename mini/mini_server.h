@@ -158,6 +158,8 @@ typedef struct xqc_mini_svr_user_conn_s {
     struct sockaddr_in     *peer_addr;
     socklen_t               peer_addrlen;
 
+    uint64_t                last_mp_state_log_us;
+
 } xqc_mini_svr_user_conn_t;
 
 

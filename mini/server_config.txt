@@ -1,0 +1,14 @@
+listen_addr=10.12.54.143
+listen_port=8443
+
+# data directory and default file
+data_dir=.
+default_send_file=server_data.bin
+
+# kernel socket buffers (bytes)
+kernel_sndbuf=16777216
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+user_send_buf_size=65536
+user_recv_buf_size=65536

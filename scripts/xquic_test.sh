@@ -2,7 +2,7 @@
 
 #!/bin/bash
 
-function generate_cert() {
+generate_cert() {
     if [[ ! -f "server.key" || ! -f "server.crt" ]]; then
         keyfile=server.key
         certfile=server.crt
@@ -10,31 +10,31 @@ function generate_cert() {
     fi
 }
 
-function install_gcov_tool() {
+install_gcov_tool() {
     #install gcovr which can output code coverage summary
     sudo yum -y install python3-pip > /dev/null
     sudo yum -y install python3-lxml > /dev/null
     sudo pip3 install gcovr > /dev/null
 }
 
-function install_cunit() {
+install_cunit() {
     sudo yum -y install CUnit > /dev/null
 }
 
-function install_go() {
+install_go() {
     sudo yum -y install golang
 }
 
-function build_babassl() {
+build_babassl() {
     git clone https://github.com/Tongsuo-Project/Tongsuo.git ../third_party/babassl
-    cd ../third_party/babassl/
+    cd ../../third_party/babassl/Tongsuo-8.3.0
     ./config --prefix=/usr/local/babassl --api=1.1.1 no-deprecated
     make -j
     SSL_PATH_STR="${PWD}"
     cd -
 }
 
-function build_boringssl() {
+build_boringssl() {
     git clone https://github.com/google/boringssl.git ../third_party/boringssl
     mkdir -p ../third_party/boringssl/build
     cd ../third_party/boringssl/build
@@ -45,7 +45,7 @@ function build_boringssl() {
     cd ../../build/
 }
 
-function do_compile() {
+do_compile() {
     rm -f CMakeCache.txt
     if [[ $1 == "boringssl" ]]; then
         build_boringssl
@@ -67,7 +67,7 @@ function do_compile() {
     rm -f CMakeCache.txt
 }
 
-function run_test_case() {
+run_test_case() {
     # "unit test..."
     ./tests/run_tests | tee -a xquic_test.log
 
@@ -76,12 +76,12 @@ function run_test_case() {
 
 }
 
-function run_gcov() {
+run_gcov() {
     #output coverage summary
     gcovr -r .. | tee -a xquic_test.log
 }
 
-function output_summary() {
+output_summary() {
     echo "=============summary=============="
     echo -e "unit test:"
     cat xquic_test.log | grep "Test:"

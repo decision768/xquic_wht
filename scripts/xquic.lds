@@ -70,6 +70,7 @@ XQUIC_VERS_1.0 {
         xqc_minrtt_scheduler_cb;
         xqc_interop_scheduler_cb;
         xqc_backup_scheduler_cb;
+        xqc_balanced_scheduler_cb;
         xqc_backup_fec_scheduler_cb;
         xqc_rap_scheduler_cb;
         xqc_conn_is_ready_to_send_early_data;
@@ -128,7 +129,6 @@ XQUIC_VERS_1.0 {
         xqc_reed_solomon_code_cb;
         xqc_xor_code_cb;
         xqc_packet_mask_code_cb;
-        xqc_conn_set_init_idle_timeout;
     local:
         *;
 };

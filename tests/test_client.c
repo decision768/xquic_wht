@@ -13,10 +13,13 @@
 #include <stdio.h>
 #include <time.h>
 #include <inttypes.h>
+#include <net/if.h>
+#include <ifaddrs.h>
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
 #include <xquic/xqc_http3.h>
 #include "platform.h"
+
 #ifndef XQC_SYS_WINDOWS
 #include <unistd.h>
 #include <sys/socket.h>
@@ -53,7 +56,7 @@ printf_null(const char *format, ...)
 
 
 #define XQC_PACKET_TMP_BUF_LEN 1500
-#define MAX_BUF_SIZE (100*1024*1024)
+#define MAX_BUF_SIZE (1024*1024*1024)
 
 #define XQC_MAX_TOKEN_LEN 256
 
@@ -277,9 +280,6 @@ int g_multi_interface_cnt = 0;
 int mp_has_recved = 0;
 char g_priority[64] = {'\0'};
 
-unsigned char g_token[XQC_MAX_TOKEN_LEN];
-int g_token_len = 0;
-
 /* 用于路径增删debug */
 int g_debug_path = 0;
 
@@ -293,7 +293,6 @@ int g_periodically_request = 0;
 
 static uint64_t last_recv_ts = 0;
 
-static int g_timeout_flag = 0;
 /*
  CDF file format:
  N (N lines)
@@ -1142,10 +1141,11 @@ xqc_client_write_socket_ex(uint64_t path_id,
     if (g_test_case == 46) {
         /* drop all initial packets to make server buffer 0rtt packets */
         header_type = send_buf[0] & 0x80;
+
         /* initial packet */
         uint8_t fixed_bit = send_buf[0] & 0x40;
         xqc_uint_t type = (send_buf[0] & 0x30) >> 4;
-        if (type == 0 && g_timeout_flag == 0) { //do not drop conn close frame
+        if (type == 0) {
             printf("... drop initial pkt, len: %zd\n", size);
             return size;
         }
@@ -1548,6 +1548,21 @@ xqc_client_create_path(xqc_user_path_t *path,
     memcpy(path->peer_addr, user_conn->peer_addr, user_conn->peer_addrlen);
     path->peer_addrlen = user_conn->peer_addrlen;
     
+    /*
+    在下面添加一段内容用于打印对应
+    */
+
+    // printf("\n[MultiPath] Creating path for interface: %s\n", path_interface);
+    // if (!xqc_client_check_interface_exists(path_interface)) {
+    //     printf("[ERROR] Network interface '%s' does not exist!\n", path_interface);
+    //     xqc_client_print_interface_info(NULL); // 显示所有可用接口
+    //     return XQC_ERROR;
+    // }
+    
+    // // 显示指定接口的详细信息
+    // xqc_client_print_interface_info(path_interface);
+    //上面部分就是添加的新的代码
+
     if (xqc_client_create_path_socket(path, path_interface) < 0) {
         printf("xqc_client_create_path_socket error\n");
         return XQC_ERROR;
@@ -1564,6 +1579,90 @@ xqc_client_create_path(xqc_user_path_t *path,
     }
 
     return XQC_OK;
+}
+
+// 添加网卡信息查询和输出函数
+void xqc_client_print_interface_info(const char *interface_name)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    int found = 0;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        return;
+    }
+
+    printf("=== Network Interface Info: %s ===\n", interface_name ? interface_name : "ALL");
+    
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;
+
+        // 如果指定了接口名，只显示该接口
+        if (interface_name && strcmp(ifa->ifa_name, interface_name) != 0)
+            continue;
+
+        int family = ifa->ifa_addr->sa_family;
+        
+        // 只显示IPv4和IPv6接口
+        if (family == AF_INET || family == AF_INET6) {
+            found = 1;
+            char host[NI_MAXHOST];
+            
+            printf("Interface: %s\n", ifa->ifa_name);
+            printf("  Family: %s\n", 
+                   (family == AF_INET) ? "IPv4" : "IPv6");
+            
+            // 获取IP地址
+            int s = getnameinfo(ifa->ifa_addr,
+                    (family == AF_INET) ? sizeof(struct sockaddr_in) :
+                    sizeof(struct sockaddr_in6),
+                    host, NI_MAXHOST, NULL, 0, NI_NUMERICHOST);
+            
+            if (s == 0) {
+                printf("  Address: %s\n", host);
+            }
+            
+            printf("  Status: %s\n", 
+                   (ifa->ifa_flags & IFF_UP) ? "UP" : "DOWN");
+            printf("  Running: %s\n", 
+                   (ifa->ifa_flags & IFF_RUNNING) ? "YES" : "NO");
+            printf("  Flags: 0x%x\n", ifa->ifa_flags);
+            printf("  ---\n");
+        }
+    }
+
+    if (!found) {
+        if (interface_name) {
+            printf("Interface '%s' not found or has no IP address!\n", interface_name);
+        } else {
+            printf("No network interfaces found!\n");
+        }
+    }
+
+    printf("===================================\n");
+    freeifaddrs(ifaddr);
+}
+
+// 检查接口是否存在
+int xqc_client_check_interface_exists(const char *interface_name)
+{
+    struct ifaddrs *ifaddr, *ifa;
+    int exists = 0;
+
+    if (getifaddrs(&ifaddr) == -1) {
+        return 0;
+    }
+
+    for (ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (strcmp(ifa->ifa_name, interface_name) == 0) {
+            exists = 1;
+            break;
+        }
+    }
+
+    freeifaddrs(ifaddr);
+    return exists;
 }
 
 user_conn_t * 
@@ -2206,7 +2305,7 @@ xqc_client_bytestream_send(xqc_h3_ext_bytestream_t *h3_bs, user_stream_t *user_s
         user_stream->start_time = xqc_now();
     }
     ssize_t ret = 0;
-    char content_len[10];
+    char content_len[32];
 
     if (g_test_case == 302 || g_test_case == 310) {
         //send pure fin on bytestream
@@ -2394,7 +2493,7 @@ xqc_client_request_send(xqc_h3_request_t *h3_request, user_stream_t *user_stream
         user_stream->start_time = xqc_now();
     }
     ssize_t ret = 0;
-    char content_len[10];
+    char content_len[32];
 
     if (user_stream->send_body == NULL && !g_is_get /* POST */) {
         user_stream->send_body_max = MAX_BUF_SIZE;
@@ -2500,7 +2599,7 @@ xqc_client_request_send(xqc_h3_request_t *h3_request, user_stream_t *user_stream
         }
         xqc_http_header_t priority_hdr = {
             .name   = {.iov_base = "priority", .iov_len = 8},
-            .value  = {.iov_base = g_priority, .iov_len = ret},
+            .value  = {.iov_base = g_priority, .iov_len = 63},
             .flags  = 0,
         };
         header[header_size] = priority_hdr;
@@ -2515,7 +2614,6 @@ xqc_client_request_send(xqc_h3_request_t *h3_request, user_stream_t *user_stream
             .schedule = 1,
             .reinject = 1,
             .fec = XQC_DEFAULT_SIZE_REQ,
-            .fastpath = 1,
         };
         xqc_h3_request_set_priority(h3_request, &h3_prio);
 
@@ -2528,7 +2626,7 @@ xqc_client_request_send(xqc_h3_request_t *h3_request, user_stream_t *user_stream
 
         xqc_http_header_t priority_hdr = {
             .name   = {.iov_base = "priority", .iov_len = 8},
-            .value  = {.iov_base = g_priority, .iov_len = ret},
+            .value  = {.iov_base = g_priority, .iov_len = 63},
             .flags  = 0,
         };
         header[header_size] = priority_hdr;
@@ -3432,7 +3530,6 @@ conn_close:
         printf("[dgram]|echo_check|same_content:%s|\n", !memcmp(user_conn->dgram_blk->data, user_conn->dgram_blk->recv_data, user_conn->dgram_blk->data_len) ? "yes" : "no");
     }
     printf("xqc_client_timeout_callback | conn_close\n");
-    g_timeout_flag = 1;
     rc = xqc_conn_close(ctx.engine, &user_conn->cid);
     if (rc) {
         printf("xqc_conn_close error\n");
@@ -3888,10 +3985,6 @@ static void xqc_client_concurrent_callback(int fd, short what, void *arg){
         if (user_conn == NULL) {
             printf("xqc_client_user_conn_multi_process_create error\n");
             return;
-        }
-        if (g_token_len > 0){
-            user_conn->token = g_token;
-            user_conn->token_len = g_token_len;
         }
 
         xqc_conn_ssl_config_t conn_ssl_config;
@@ -4517,8 +4610,6 @@ int main(int argc, char *argv[]) {
     xqc_client_open_keylog_file(&ctx);
     xqc_client_open_log_file(&ctx);
 
-    g_token_len = xqc_client_read_token(g_token, XQC_MAX_TOKEN_LEN);
- 
     xqc_platform_init_env();
 
     xqc_engine_ssl_config_t  engine_ssl_config;
@@ -5041,9 +5132,12 @@ int main(int argc, char *argv[]) {
         conn_settings.scheduler_callback = xqc_backup_fec_scheduler_cb;
     }
 
-   if (g_token_len > 0) {
-        user_conn->token = g_token;
-        user_conn->token_len = g_token_len;
+    unsigned char token[XQC_MAX_TOKEN_LEN];
+    int token_len = XQC_MAX_TOKEN_LEN;
+    token_len = xqc_client_read_token(token, token_len);
+    if (token_len > 0) {
+        user_conn->token = token;
+        user_conn->token_len = token_len;
     }
 
     xqc_conn_ssl_config_t conn_ssl_config;

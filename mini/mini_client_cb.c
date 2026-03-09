@@ -728,6 +728,19 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
 
+     if (user_conn->handshake_finished
+        && user_conn->requests_launched
+        && user_conn->active_path_cnt > 1)
+    {
+        xqc_int_t ping_ret = xqc_h3_conn_send_ping(user_conn->ctx->engine,
+                                                   &user_conn->cid, NULL);
+        if (ping_ret != XQC_OK) {
+            printf("[warn] periodic mp ping failed, ret=%d\n", ping_ret);
+        }
+    }
+
+
+
      if (user_conn->handshake_finished && !user_conn->requests_launched) {
         int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
         if (target_paths <= 0) {

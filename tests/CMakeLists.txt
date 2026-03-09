@@ -8,7 +8,7 @@ if(HAVE_CUNIT)
 endif()
 
 # find LibEvent include and library path
-find_package(LibEvent 2.0.21)
+find_package(LibEvent REQUIRED)
 if(NOT LIBEVENT_FOUND)
     message(FATAL_ERROR "libevent with required version not found")
 endif()

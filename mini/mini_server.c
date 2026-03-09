@@ -348,7 +348,7 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
     } else {
     /* disable log/keylog output for the mini server */
         callback.log_callbacks = (xqc_log_callbacks_t){0};
-        // callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
+        //callback.log_callbacks.xqc_qlog_event_write = xqc_mini_svr_write_qlog_file;
         callback.keylog_cb = NULL;
     }
 
@@ -479,9 +479,10 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .adaptive_ack_frequency = 1,
         .anti_amplification_limit = 4,
         .recv_rate_bytes_per_sec = 0,
-        .mp_ack_on_any_path = 1,
+        //.mp_ack_on_any_path = 1,
         .mp_enable_reinjection = 1,
         // .enable_stream_rate_limit = 1,
+        .mp_ping_on = 1,
         .init_recv_window =  64 * 1024 * 1024,  // ✅ 2GB 接收窗口
     };
 

@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
+#include <net/if.h>
 
 #include "platform.h"
 
@@ -28,6 +29,21 @@
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib, "Iphlpapi.lib")
 #endif
+
+//添加的代码
+#define MAX_IP_LEN 64
+
+typedef struct {
+    char ip[MAX_IP_LEN];
+    size_t bytes;
+} ip_stat_t;
+
+#define MAX_CLIENTS 128
+static ip_stat_t ip_stats[MAX_CLIENTS];
+static int ip_stat_count = 0;
+static time_t last_log_time = 0;
+static int my_total_bytes = 0;
+//添加的代码
 
 #define XQC_FIRST_OCTET 1
 int
@@ -43,7 +59,7 @@ printf_null(const char *format, ...)
 #define TEST_PORT 8443
 
 #define XQC_PACKET_TMP_BUF_LEN 1500
-#define MAX_BUF_SIZE (100*1024*1024)
+#define MAX_BUF_SIZE (1024*1024*1024)
 
 #define XQC_ALPN_TRANSPORT "transport"
 
@@ -945,7 +961,14 @@ xqc_server_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, v
 int
 xqc_server_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, void *conn_user_data)
 {
-
+    //添加的代码
+    //写入总字节发送
+    FILE *fp = fopen("net_stats.txt", "a");
+    if (fp) {
+        fprintf(fp, "===send total_bytes: %d ===\n", my_total_bytes);
+        my_total_bytes = 0;
+    }
+    //添加的代码
     DEBUG;
     user_conn_t *user_conn = (user_conn_t*)conn_user_data;
     xqc_conn_stats_t stats = xqc_conn_get_stats(ctx.engine, cid);
@@ -969,7 +992,7 @@ xqc_server_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, vo
         event_base_loopbreak(eb);
         printf("xqc_server_h3_conn_close_notify\n");
     }
-
+    
     return 0;
 }
 
@@ -1649,8 +1672,115 @@ xqc_server_socket_read_handler(xqc_server_ctx_t *ctx)
 #endif
 
     do {
+        //添加的代码
+    //     struct msghdr msg;
+    //     struct iovec  iov;
+    //     unsigned char ctrl[256];
+    //     unsigned char dummy; /* 只为取 cmsg，不需要负载 */
+
+    //     memset(&msg, 0, sizeof(msg));
+    //     iov.iov_base = &dummy;
+    //     iov.iov_len  = sizeof(dummy);
+    //     msg.msg_iov      = &iov;
+    //     msg.msg_iovlen   = 1;
+    //     msg.msg_control  = ctrl;
+    //     msg.msg_controllen = sizeof(ctrl);
+
+    //     ssize_t pr = recvmsg(ctx->fd, &msg, MSG_PEEK | MSG_DONTWAIT);
+    //     if (pr >= 0) {
+    //         int ifindex = -1;
+    //         char ifname[IF_NAMESIZE] = {0};
+    //         char lip[INET6_ADDRSTRLEN] = {0};
+
+    //         for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+    // #ifdef IP_PKTINFO
+    //             if (c->cmsg_level == IPPROTO_IP && c->cmsg_type == IP_PKTINFO) {
+    //                 struct in_pktinfo *pi = (struct in_pktinfo*)CMSG_DATA(c);
+    //                 //打印自己服务器接收数据的ip地址
+    //                 ifindex = pi->ipi_ifindex;
+    //                 if_indextoname(ifindex, ifname);
+    //                 inet_ntop(AF_INET, &pi->ipi_addr, lip, sizeof(lip));
+
+    //                 //
+    //             }
+    // #endif
+    // #ifdef IPV6_PKTINFO
+    //             if (c->cmsg_level == IPPROTO_IPV6 && c->cmsg_type == IPV6_PKTINFO) {
+    //                 struct in6_pktinfo *pi6 = (struct in6_pktinfo*)CMSG_DATA(c);
+    //                 ifindex = pi6->ipi6_ifindex;
+    //                 if_indextoname(ifindex, ifname);
+    //                 inet_ntop(AF_INET6, &pi6->ipi6_addr, lip, sizeof(lip));
+    //             }
+    // #endif
+    //         }
+
+    //         if (ifindex > 0) {
+    //             printf("[NIC] if=%s (index=%d) local_ip=%s\n",
+    //                 ifname[0] ? ifname : "?", ifindex, lip[0] ? lip : "?");
+    //         }
+    //     }
+        //添加的代码
+        
         recv_size = recvfrom(ctx->fd, packet_buf, sizeof(packet_buf), 0, (struct sockaddr *) &peer_addr,
                              &peer_addrlen);
+        //添加的代码
+        if (recv_size > 0) {
+            my_total_bytes+= recv_size;
+            struct sockaddr_in* temp_addr = (struct sockaddr_in*)&peer_addr;
+            char client_ip[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(temp_addr->sin_addr), client_ip, sizeof(client_ip));
+            int src_port = ntohs(peer_addr.sin6_port);
+
+            printf(">>> Received IPv4 packet from client %s:%d (%zd bytes)\n", client_ip, src_port, recv_size);
+
+            /* === 更新统计 统计每秒内某个网口发送了多少字节数据=== */
+            int found = 0;
+            for (int i = 0; i < ip_stat_count; i++) {
+                if (strcmp(ip_stats[i].ip, client_ip) == 0) {
+                    
+                    ip_stats[i].bytes += recv_size;
+                    found = 1;
+                    break;
+                }
+            }
+            if (!found && ip_stat_count < MAX_CLIENTS) {
+                strncpy(ip_stats[ip_stat_count].ip, client_ip, sizeof(ip_stats[ip_stat_count].ip));
+                ip_stats[ip_stat_count].bytes = recv_size;
+                ip_stat_count++;
+            }
+
+            /* === 检查时间、写文件 === */
+            time_t now = time(NULL);
+            if (last_log_time == 0) {
+                last_log_time = now;
+            }
+            if (now - last_log_time >= 1) {
+                FILE *fp = fopen("net_stats.txt", "a");
+                if (fp) {
+                    char time_str[64];
+                    struct tm *tm_info = localtime(&last_log_time);
+                    strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", tm_info);
+
+                    fprintf(fp, "=== %s ===\n", time_str);
+                    size_t each_second_bytes = 0;
+                    for (int i = 0; i < ip_stat_count; i++) {
+                        each_second_bytes+=ip_stats[i].bytes;
+                        double mbps = (ip_stats[i].bytes * 8.0) / 1000000.0;
+                        fprintf(fp, "%s: %zu bytes, %.2f Mbps\n", ip_stats[i].ip, ip_stats[i].bytes, mbps);
+                    }
+                    double mbps = (each_second_bytes * 8.0) / 1000000.0;
+                    fprintf(fp, "total: %zu bytes, %.2f Mbps\n", each_second_bytes, mbps);
+                    fprintf(fp, "\n");
+                    fclose(fp);
+                }
+                /* 清空本轮统计 */
+                ip_stat_count = 0;
+                memset(ip_stats, 0, sizeof(ip_stats));
+                last_log_time = now;
+            }
+            
+        }
+        //添加的代码
         if (recv_size < 0 && get_sys_errno() == EAGAIN) {
             break;
         }
@@ -1800,6 +1930,17 @@ xqc_server_create_socket(const char *addr, unsigned int port)
         printf("setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
     }
+
+    //添加代码部分
+// #ifdef IP_PKTINFO
+//     int on = 1;
+//     setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &on, sizeof(on));
+// #endif
+// #ifdef IPV6_RECVPKTINFO
+//     int on6 = 1;
+//     setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &on6, sizeof(on6));
+// #endif
+    //添加代码部分
 
     if (type == AF_INET6) {
         memset(saddr, 0, sizeof(struct sockaddr_in6));
@@ -2009,13 +2150,6 @@ xqc_keylog_cb(const xqc_cid_t *scid, const char *line, void *user_data)
     }
 }
 
-void xqc_server_conn_ssl_msg_cb(int msg_type, 
-    const void *msg, size_t msg_len, void *user_data)
-{
-    user_conn_t *user_conn = (user_conn_t *)user_data;
-    printf("user_conn:%p , scid:%s, msg_type:%d, msg_len:%d\n", user_conn, xqc_scid_str(ctx.engine, &user_conn->cid), msg_type, (int)msg_len);
-}
-
 #if defined(XQC_SUPPORT_SENDMMSG) && !defined(XQC_SYS_WINDOWS)
 ssize_t xqc_server_write_mmsg(const struct iovec *msg_iov, unsigned int vlen,
                                 const struct sockaddr *peer_addr,
@@ -2028,8 +2162,6 @@ ssize_t xqc_server_write_mmsg(const struct iovec *msg_iov, unsigned int vlen,
     struct mmsghdr mmsg[MAX_SEG];
     memset(&mmsg, 0, sizeof(mmsg));
     for (int i = 0; i < vlen; i++) {
-        mmsg[i].msg_hdr.msg_name = (void *)peer_addr;
-        mmsg[i].msg_hdr.msg_namelen = peer_addrlen;
         mmsg[i].msg_hdr.msg_iov = (struct iovec *)&msg_iov[i];
         mmsg[i].msg_hdr.msg_iovlen = 1;
     }
@@ -2053,19 +2185,6 @@ ssize_t xqc_server_mp_write_mmsg(uint64_t path_id,
     return xqc_server_write_mmsg(msg_iov, vlen, peer_addr, peer_addrlen, user);
 }
 #endif
-
-int
-xqc_retry_packet_check(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid, void * user_data)
-{
-    (void *)engine;
-    (void *)conn;
-    (void *)cid;
-    (void *)user_data;
-    if (g_test_case == 601) { /* 601 for test retry packet */
-        return XQC_TRUE;
-    }
-    return XQC_FALSE; 
-}
 
 void
 stop(int signo)
@@ -2416,9 +2535,6 @@ int main(int argc, char *argv[]) {
         .conn_peer_addr_changed_notify = xqc_server_conn_peer_addr_changed_notify,
         .path_peer_addr_changed_notify = xqc_server_path_peer_addr_changed_notify,
         .path_removed_notify = xqc_server_path_removed_notify,
-        .conn_ssl_msg_cb = xqc_server_conn_ssl_msg_cb,
-        .conn_retry_packet_condition_check = xqc_retry_packet_check,
-        .conn_send_packet_before_accept = xqc_server_write_socket, 
     };
 
     xqc_cong_ctrl_callback_t cong_ctrl;
@@ -2776,6 +2892,6 @@ int main(int argc, char *argv[]) {
     xqc_server_close_keylog_file(&ctx);
     xqc_server_close_log_file(&ctx);
     destroy_cdf();
-
+    
     return 0;
 }

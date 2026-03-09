@@ -1,6 +1,6 @@
 # Copyright (c) 2022, Alibaba Group Holding Limited
 
-cmake_minimum_required (VERSION 3.5)
+cmake_minimum_required (VERSION 2.6)
 project (xquic)
 
 set (xquic_VERSION_MAJOR 0)
@@ -205,6 +205,7 @@ set(
     "src/transport/scheduler/xqc_scheduler_backup.c"
     "src/transport/scheduler/xqc_scheduler_backup_fec.c"
     "src/transport/scheduler/xqc_scheduler_rap.c"
+    "src/transport/scheduler/xqc_scheduler_balanced.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)
@@ -344,6 +345,16 @@ if(XQC_ENABLE_UNLIMITED)
     )
 endif()
 
+# add tunnel
+if(XQC_ENABLE_TH3 OR XQC_ENABLE_TUNNEL)
+    set(
+        XQC_SOURCE
+    )
+    if(XQC_ENABLE_TNL_DG)
+        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -DXQC_ENABLE_TNL_DG ")
+    endif()
+    add_subdirectory(tunnel)
+endif()
 
 if (XQC_NO_SHARED)
     set(XQC_BINARY_TYPE STATIC)

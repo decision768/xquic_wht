@@ -649,10 +649,12 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
             }
 
             stats->paths_info[paths_num].path_id = path->path_id;
+            stats->paths_info[paths_num].path_state = path->path_state;
             stats->paths_info[paths_num].path_pkt_recv_count = path->path_send_ctl->ctl_recv_count;
             stats->paths_info[paths_num].path_pkt_send_count = path->path_send_ctl->ctl_send_count;
             stats->paths_info[paths_num].path_send_bytes = path->path_send_ctl->ctl_app_bytes_send;
             stats->paths_info[paths_num].path_recv_bytes = path->path_send_ctl->ctl_app_bytes_recv;
+            stats->paths_info[paths_num].path_srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
             stats->paths_info[paths_num].path_app_status = path->app_path_status;
 
             if (path->app_path_status == XQC_APP_PATH_STATUS_STANDBY) {

@@ -7,8 +7,13 @@
 typedef struct {
     xqc_bool_t  has_last_path;
     uint64_t    last_path_id;
+    uint64_t    pick_count;
 } xqc_balanced_scheduler_t;
 
+#define XQC_BALANCED_SCORE_SHIFT          10
+#define XQC_BALANCED_UTIL_SCALE           1024
+#define XQC_BALANCED_UTIL_BOOST_CEIL      1536
+#define XQC_BALANCED_HIGH_SRTT_FACTOR     4
 
 static size_t
 xqc_balanced_scheduler_size()
@@ -19,6 +24,15 @@ xqc_balanced_scheduler_size()
 static void
 xqc_balanced_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *params)
 {
+    xqc_balanced_scheduler_t *balanced = (xqc_balanced_scheduler_t *) scheduler;
+    if (balanced == NULL) {
+        return;
+    }
+
+    balanced->has_last_path = XQC_FALSE;
+    balanced->last_path_id = 0;
+    balanced->pick_count = 0;
+
     return;
 }
 
@@ -34,6 +48,52 @@ xqc_balanced_scheduler_available_bytes(xqc_path_ctx_t *path)
     }
 
     return cwnd - bytes_on_path;
+}
+static uint64_t
+xqc_balanced_scheduler_get_effective_srtt(xqc_send_ctl_t *ctl)
+{
+    uint64_t srtt = xqc_send_ctl_get_srtt(ctl);
+    uint64_t min_rtt = ctl->ctl_minrtt;
+
+    if (srtt == 0) {
+        srtt = ctl->ctl_conn->conn_settings.initial_rtt;
+    }
+
+    if (min_rtt != 0 && min_rtt != XQC_MAX_UINT32_VALUE
+        && srtt > min_rtt * XQC_BALANCED_HIGH_SRTT_FACTOR)
+    {
+        srtt = min_rtt * XQC_BALANCED_HIGH_SRTT_FACTOR;
+    }
+
+    return srtt ? srtt : 1;
+}
+
+static uint64_t
+xqc_balanced_scheduler_compute_score(xqc_path_ctx_t *path, uint64_t avail_bytes,
+    uint64_t effective_srtt)
+{
+    xqc_send_ctl_t *ctl = path->path_send_ctl;
+    uint64_t bytes_on_path = path->path_schedule_bytes + ctl->ctl_bytes_in_flight;
+    uint64_t cwnd = ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(ctl->ctl_cong);
+    uint64_t utilization = XQC_BALANCED_UTIL_SCALE;
+    __uint128_t capacity = 0;
+    __uint128_t score = 0;
+
+    if (cwnd > 0) {
+        utilization = (bytes_on_path << XQC_BALANCED_SCORE_SHIFT) / cwnd;
+    }
+
+    utilization = xqc_min(utilization, XQC_BALANCED_UTIL_BOOST_CEIL);
+
+    capacity = ((__uint128_t)avail_bytes << XQC_BALANCED_SCORE_SHIFT) / effective_srtt;
+    score = (capacity * (2 * XQC_BALANCED_UTIL_SCALE - utilization))
+            / XQC_BALANCED_UTIL_SCALE;
+
+    if (score == 0 && avail_bytes > 0) {
+        score = 1;
+    }
+
+    return (uint64_t)score;
 }
 
 static xqc_path_ctx_t *
@@ -80,9 +140,7 @@ xqc_balanced_scheduler_pick_path(xqc_balanced_scheduler_t *scheduler,
             best_srtt = candidate_srtt;
 
         } else if (candidate_score == selected_score) {
-            if (candidate_srtt < best_srtt
-                || (candidate_srtt == best_srtt
-                    && candidates[idx]->path_id < candidates[best_idx]->path_id))
+            if (candidate_srtt < best_srtt)
             {
                 best_idx = idx;
                 selected_score = candidate_score;
@@ -162,17 +220,10 @@ xqc_balanced_scheduler_get_path(void *scheduler,
             continue;
         }
 
-        path_srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
-        if (path_srtt == 0) {
-            path_srtt = 1;
-        }
+        path_srtt = xqc_balanced_scheduler_get_effective_srtt(path->path_send_ctl);
 
         avail_bytes = xqc_balanced_scheduler_available_bytes(path);
-        score = (avail_bytes << 10) / path_srtt;
-        if (score == 0 && avail_bytes > 0) {
-            score = 1;
-        }
-
+        score = xqc_balanced_scheduler_compute_score(path, avail_bytes, path_srtt);
         if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
             if (available_cnt < XQC_MAX_PATHS_COUNT) {
                 available_paths[available_cnt] = path;
@@ -221,10 +272,10 @@ xqc_balanced_scheduler_get_path(void *scheduler,
     }
 
     xqc_log(conn->log, XQC_LOG_DEBUG,
-            "|balanced scheduler|best path:%ui|frame_type:%s|score:%ui|",
+            "|balanced scheduler|best path:%ui|frame_type:%s|score:%ui|pick_cnt:%ui|",
             best_path->path_id,
             xqc_frame_type_2_str(conn->engine, packet_out->po_frame_types),
-            best_score);
+            best_score, ++balanced->pick_count);
 
     return best_path;
 }

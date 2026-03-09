@@ -1178,6 +1178,12 @@ xqc_demo_svr_create_socket(xqc_demo_svr_ctx_t *ctx, xqc_demo_svr_net_config_t* c
     ctx->local_addrlen = sizeof(ctx->local_addr);
     ctx->fd = xqc_demo_svr_init_socket(AF_INET, cfg->port, (struct sockaddr*)&ctx->local_addr, 
         ctx->local_addrlen);
+    struct sockaddr_in *addr4 = &ctx->local_addr;
+	char ip_str[INET_ADDRSTRLEN] = {0};
+	inet_ntop(AF_INET, &(addr4->sin_addr), ip_str, sizeof(ip_str));
+
+	printf("[DEBUG][server] bind addr = %s\n", ip_str);
+	printf("[DEBUG][server] bind port = %d\n", ntohs(addr4->sin_port));
     printf("create ipv4 socket fd: %d\n", ctx->fd);
 
     /* ipv6 socket */
@@ -1411,16 +1417,6 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
     }
 }
 
-int
-xqc_demo_svr_retry_packet_condition_check(xqc_engine_t *engine, xqc_connection_t *conn,
-    const xqc_cid_t *cid, void *user_data)
-{
-    if (svr_ctx.args && svr_ctx.args->quic_cfg.retry_on) {
-        return XQC_TRUE;
-    }
-    return XQC_FALSE;
-}
-
 void
 xqc_demo_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *transport_cbs,
     xqc_demo_svr_args_t* args)
@@ -1441,8 +1437,6 @@ xqc_demo_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         .write_socket = xqc_demo_svr_write_socket,
         .write_socket_ex = xqc_demo_svr_write_socket_ex,
         .conn_update_cid_notify = xqc_demo_svr_conn_update_cid_notify,
-        .conn_send_packet_before_accept = xqc_demo_svr_write_socket,
-        .conn_retry_packet_condition_check = xqc_demo_svr_retry_packet_condition_check,
     };
 
     *cb = callback;

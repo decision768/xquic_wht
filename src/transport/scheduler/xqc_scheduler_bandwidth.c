@@ -142,9 +142,7 @@ xqc_bandwidth_scheduler_pick_path(xqc_bandwidth_scheduler_t *scheduler,
             uint64_t r = srtt[i];
 
             if (b > best_bytes
-                || (b == best_bytes && (r < best_srtt
-                    || (r == best_srtt
-                        && candidates[i]->path_id < candidates[best_idx]->path_id))))
+                || (b == best_bytes && r < best_srtt))
             {
                 best_idx = i;
                 best_bytes = b;
@@ -210,9 +208,7 @@ xqc_bandwidth_scheduler_pick_path(xqc_bandwidth_scheduler_t *scheduler,
         } else if (candidate_score == selected_score) {
             if (candidate_bytes > selected_bytes
                 || (candidate_bytes == selected_bytes
-                    && (candidate_srtt < best_srtt
-                    || (candidate_srtt == best_srtt
-                        && candidates[idx]->path_id < candidates[best_idx]->path_id))))
+                    && candidate_srtt < best_srtt))
             {
                 best_idx = idx;
                 selected_score = candidate_score;

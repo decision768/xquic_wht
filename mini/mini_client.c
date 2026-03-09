@@ -391,7 +391,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->adaptive_ack_frequency = 1;
     // settings->ack_frequency = 4;      
     // settings->max_ack_delay = 5;
-    settings->mp_ack_on_any_path = 1;
+    //settings->mp_ack_on_any_path = 1;
 
     settings->enable_multipath = args->quic_cfg.multipath;
     //settings->enable_stream_rate_limit = 1;
@@ -399,8 +399,8 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->multipath_version = XQC_MULTIPATH_10;
     settings->recv_rate_bytes_per_sec = 0;
     settings->max_datagram_frame_size = 1350;
-    //settings->pacing_on = 1;
-    settings->mp_enable_reinjection = 0x7;
+    settings->mp_ping_on = 1;
+    settings->mp_enable_reinjection = 1;
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -1854,6 +1854,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     xqc_mini_cli_user_path_t *path0 = &user_conn->paths[0];
     
     ret = xqc_mini_cli_init_user_path(user_conn, path0, 0);
+    
     // printf("path_id: %"PRIu64", address_path: %s,peer_address:%s\n",
     //            path0->path_id,inet_ntoa(((struct sockaddr_in*)path0->local_addr)->sin_addr),inet_ntoa(((struct sockaddr_in*)path0->peer_addr)->sin_addr));
     if (ret < 0) {
@@ -1958,6 +1959,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     for (int i = 1; i < target_prepare; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         ret = xqc_mini_cli_prepare_user_path(user_conn, path);
+        //ret = xqc_mini_cli_init_user_path(user_conn, path, i);
         if (ret != XQC_OK) {
             printf("[warn] pre-bind for path[%d] failed, ret:%d\n", i, ret);
         }

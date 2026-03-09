@@ -12,6 +12,7 @@
 #include <stdarg.h>
 
 
+
 #define XQC_MINI_SVR_MAX_STREAMS 16
 #define SERVER_OUTPUT_FILE "server_received.txt"
 /* engine callbacks */
@@ -51,6 +52,8 @@ static void xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *reso
     size_t resolved_len);
 static int xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
     size_t *file_size);
+static void xqc_mini_svr_log_mp_active_state(xqc_mini_svr_user_conn_t *user_conn,
+    const char *scene);
 
 
 static void
@@ -79,6 +82,77 @@ xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
 
     user_stream->send_logged = 1;
 }
+
+static uint64_t
+xqc_mini_svr_now_us(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000 * 1000 + (uint64_t)tv.tv_usec;
+}
+
+static void
+xqc_mini_svr_log_mp_active_state(xqc_mini_svr_user_conn_t *user_conn, const char *scene)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL || user_conn->ctx->engine == NULL) {
+        return;
+    }
+
+    uint64_t now_us = xqc_mini_svr_now_us();
+    if (user_conn->last_mp_state_log_us != 0
+        && now_us - user_conn->last_mp_state_log_us < 500 * 1000)
+    {
+        return;
+    }
+
+    user_conn->last_mp_state_log_us = now_us;
+
+    xqc_conn_stats_t stats = xqc_conn_get_stats(user_conn->ctx->engine, &user_conn->cid);
+    int active_path_cnt = 0;
+
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        if (stats.paths_info[i].path_id == UINT64_MAX) {
+            continue;
+        }
+
+        /* xqc_path_state_t: ACTIVE == 2 */
+        if (stats.paths_info[i].path_state == 2) {
+            active_path_cnt++;
+        }
+    }
+
+    int both_active = (active_path_cnt >= 2);
+
+    if (both_active && scene != NULL && strcmp(scene, "h3_write") == 0) {
+        xqc_int_t ping_ret = xqc_h3_conn_send_ping(user_conn->ctx->engine,
+                                                   &user_conn->cid, NULL);
+        if (ping_ret != XQC_OK) {
+            printf("[warn] mini server periodic mp ping failed, ret=%d\n", ping_ret);
+        }
+    }
+
+    printf("[mini_mp][%s] both_active=%d, active_path_cnt=%d, mp_state=%d, enable_mp=%d, conn_info=%s\n",
+           scene ? scene : "unknown", both_active, active_path_cnt,
+           stats.mp_state, stats.enable_multipath, stats.conn_info);
+
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        if (stats.paths_info[i].path_id == UINT64_MAX) {
+            continue;
+        }
+
+        printf("[mini_mp][%s] path=%" PRIu64 ", state=%u, app_status=%u, srtt=%" PRIu64
+               ", send_bytes=%" PRIu64 ", recv_bytes=%" PRIu64 "\n",
+               scene ? scene : "unknown",
+               stats.paths_info[i].path_id,
+               stats.paths_info[i].path_state,
+               stats.paths_info[i].path_app_status,
+               stats.paths_info[i].path_srtt,
+               stats.paths_info[i].path_send_bytes,
+               stats.paths_info[i].path_recv_bytes);
+    }
+}
+
+
 
 static int
 xqc_mini_svr_time_cmp(const struct timeval *a, const struct timeval *b)
@@ -922,6 +996,9 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
     unsigned char fin = 0;
     xqc_http_headers_t *headers = NULL;
     xqc_mini_svr_user_stream_t *user_stream = (xqc_mini_svr_user_stream_t *)strm_user_data;
+    xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+    xqc_mini_svr_log_mp_active_state(user_conn, "h3_read");
+
 
     read = read_sum = 0;
     recv_buff_size = sizeof(recv_buff);
@@ -1334,6 +1411,10 @@ xqc_mini_svr_h3_request_write_notify(xqc_h3_request_t *h3_request, void *strm_us
     if (!user_stream->response_prepared) {
         return XQC_OK;
     }
+
+    xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+    xqc_mini_svr_log_mp_active_state(user_conn, "h3_write");
+
 
     int ret = xqc_mini_svr_send_body(user_stream);
 
