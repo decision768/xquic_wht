@@ -9,8 +9,7 @@ set(CMAKE_SYSTEM_PROCESSOR aarch64)
 # set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
 
 # === SIM8810 SDK ===
-set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
-set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
+set(CMAKE_SYSROOT "/opt/crosstools/sysroot")
 
 # toolchain（跟 sdk.mk 一致）
 set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
@@ -57,7 +56,7 @@ if(${SSL_TYPE} MATCHES "babassl")
     # PATH of ssl, by default XQUIC will use babassl installed in
     # /usr/local/babassl if SSL_PATH is not set
     if(NOT SSL_PATH)
-        set(SSL_PATH "/usr/local/babassl")
+        set(SSL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Tongsuo-8.3.0)
         message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
     endif()
 
@@ -156,7 +155,7 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
-set(LIBEVENT_ROOT /home/admin123/libevent_aarch64/libevent-2.1.12-stable)
+set(LIBEVENT_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libevent_aarch64/libevent-2.1.12-stable)
 
 set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_ROOT}/include)
 set(LIBEVENT_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent.a)
