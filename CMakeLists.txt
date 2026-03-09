@@ -28,6 +28,7 @@ set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
 set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+
 option (XQC_ENABLE_BBR2 "enable bbr2" OFF)
 option (XQC_ENABLE_COPA "enable copa" OFF)
 option (XQC_ENABLE_RENO "enable reno" OFF)
@@ -47,80 +48,44 @@ endif()
 
 
 # SSL lib type, xquic support babassl and boringssl interfaces
+# SSL lib type, xquic support babassl and boringssl interfaces
 if(NOT SSL_TYPE)
     set(SSL_TYPE "babassl")
     message(NOTICE "-- SSL_TYPE not set, use default babassl")
 endif()
 
 if(${SSL_TYPE} MATCHES "babassl")
-    # PATH of ssl, by default XQUIC will use babassl installed in
-    # /usr/local/babassl if SSL_PATH is not set
-    if(NOT SSL_PATH)
-        set(SSL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/third_party/Tongsuo-8.3.0)
-        message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
-    endif()
-
-elseif(${SSL_TYPE} MATCHES "boringssl")
-    add_definitions(-DNOCRYPT=1)
-    # PATH of ssl, by default XQUIC will use boringssl in third_party
-    if(NOT SSL_PATH)
-        set(SSL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/third_party/boringssl)
-        message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
-    endif()
-endif()
-
-# Users can use both SSL_DIR or SSL_PATH to specify the ssl path to find the ssl
-# module, if both are defined, SSL_DIR will be used.
-if(NOT SSL_DIR)
-    if(NOT SSL_PATH)
-        # at least SSL_DIR or SSL_PATH shall be set
-        message(FATAL_ERROR "SSL_PATH not set")
-    else()
-        set(SSL_DIR ${SSL_PATH})
-    endif()
-endif()
-
-
-# find ssl module from SSL_DIR if SSL_INC_PATH AND SSL_LIB_PATH not set.
-if(NOT SSL_INC_PATH AND NOT SSL_LIB_PATH)
-    # find_package(SSL)
-    # if(NOT SSL_FOUND)
-    #     message(FATAL_ERROR "ssl module not found")
-    # endif(NOT SSL_FOUND)
-
+    set(SSL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/Tongsuo-8.3.0")
     set(SSL_INC_PATH "${SSL_PATH}/include")
     set(SSL_LIB_PATH
         "${SSL_PATH}/libssl.a"
         "${SSL_PATH}/libcrypto.a"
     )
 
-    # compat with elder macros
-    # if(SSL_DYNAMIC)
-    #     message(NOTICE "-- Building with dynamic libssl")
-    #     set(SSL_LIB_PATH ${SSL_LIBRARIES})
-    # else()
-    #     message(NOTICE "-- Building with static libssl")
-    #     set(SSL_LIB_PATH ${SSL_LIBRARIES_STATIC})
-    # endif()
-    # set(SSL_INC_PATH ${SSL_INCLUDE_DIR})
-
-else()
-    if(NOT EXISTS ${SSL_INC_PATH})
-        message(FATAL_ERROR "ssl include path not found")
-    endif()
-
-    foreach(LIB IN LISTS SSL_LIB_PATH)
-        if(NOT EXISTS ${LIB})
-            message(FATAL_ERROR "ssl lib not found ${LIB}")
-        endif()
-    endforeach()
-
+elseif(${SSL_TYPE} MATCHES "boringssl")
+    add_definitions(-DNOCRYPT=1)
+    set(SSL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/boringssl")
+    set(SSL_INC_PATH "${SSL_PATH}/include")
+    set(SSL_LIB_PATH
+        "${SSL_PATH}/ssl/libssl.a"
+        "${SSL_PATH}/crypto/libcrypto.a"
+    )
 endif()
 
-MESSAGE("-- SSL_TYPE: ${SSL_TYPE}")
-MESSAGE("-- SSL_PATH: ${SSL_PATH}")
-MESSAGE("-- SSL_LIB_PATH: ${SSL_LIB_PATH}")
-MESSAGE("-- SSL_INC_PATH: ${SSL_INC_PATH}")
+if(NOT EXISTS "${SSL_INC_PATH}")
+    message(FATAL_ERROR "ssl include path not found: ${SSL_INC_PATH}")
+endif()
+
+foreach(LIB IN LISTS SSL_LIB_PATH)
+    if(NOT EXISTS "${LIB}")
+        message(FATAL_ERROR "ssl lib not found: ${LIB}")
+    endif()
+endforeach()
+
+message(STATUS "SSL_TYPE     = ${SSL_TYPE}")
+message(STATUS "SSL_PATH     = ${SSL_PATH}")
+message(STATUS "SSL_INC_PATH = ${SSL_INC_PATH}")
+message(STATUS "SSL_LIB_PATH = ${SSL_LIB_PATH}")
 
 
 # C_FLAGS
@@ -148,6 +113,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Windows")
     set(CMAKE_C_FLAGS_OPTION " ")
 endif()
 
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -isystem ${SSL_INC_PATH}")
 
 # configure file
 configure_file (
@@ -161,12 +127,7 @@ set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_ROOT}/include)
 set(LIBEVENT_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent.a)
 set(LIBEVENT_PTHREADS_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent_pthreads.a)
 
-include_directories(include
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${SSL_INC_PATH}
-    ${CMAKE_SOURCE_DIR}
-    ${LIBEVENT_INCLUDE_DIR}
-)
+
 
 
 
@@ -434,6 +395,22 @@ add_library(
     SHARED
     ${XQC_SOURCE}
 )
+target_include_directories(xquic-static BEFORE PRIVATE
+    ${SSL_INC_PATH}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBEVENT_INCLUDE_DIR}
+)
+
+target_include_directories(xquic BEFORE PRIVATE
+    ${SSL_INC_PATH}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LIBEVENT_INCLUDE_DIR}
+)
+
+target_compile_options(xquic-static PRIVATE -UOPENSSL_API_COMPAT)
+target_compile_options(xquic PRIVATE -UOPENSSL_API_COMPAT)
 
 if(PLATFORM MATCHES "mac")
     target_link_libraries(
