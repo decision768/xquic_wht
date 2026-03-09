@@ -63,7 +63,7 @@ To run test cases, you need
 
 ## QuickStart Guide
 
-XQUIC can be built with BabaSSL(Tongsuo) or BoringSSL.
+使用./build.sh可以快速生成交叉编译的可执行程序
 
 ### Build with BoringSSL
 
