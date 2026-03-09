@@ -1,6 +1,6 @@
 ### hq mini client/server ###
-    set(ZLOG_INCLUDE_DIR "${CMAKE_SYSROOT}/usr/include")
-    set(ZLOG_STATIC_LIB  "${CMAKE_SYSROOT}/usr/lib/libzlog.a")
+    set(ZLOG_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zlog-1.2.18/src")
+    set(ZLOG_STATIC_LIB  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/zlog-1.2.18/build_aarch64/lib/libzlog.a")
     set(
         HQ_SOURCES
         "../demo/xqc_hq_ctx.c"
