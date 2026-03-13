@@ -75,7 +75,14 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
             memset(args->env_cfg.data_dir, 0, sizeof(args->env_cfg.data_dir));
             strncpy(args->env_cfg.data_dir, value, sizeof(args->env_cfg.data_dir) - 1);
 
-        } else if (strcmp(key, "default_send_file") == 0) {
+        }else if (strcmp(key, "stream_range_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.stream_range_size = (size_t)size;
+            }
+        }
+        else if (strcmp(key, "default_send_file") == 0) {
             memset(args->env_cfg.default_send_file, 0,
                 sizeof(args->env_cfg.default_send_file));
             strncpy(args->env_cfg.default_send_file, value,
@@ -188,6 +195,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     args->net_cfg.kernel_revbuf = 16 * 1024 * 1024;
     args->net_cfg.user_send_buf_size = XQC_PACKET_BUF_LEN;
     args->net_cfg.user_recv_buf_size = XQC_PACKET_BUF_LEN;
+    args->net_cfg.stream_range_size = 4 * 1024 * 1024;
 
 
     /**
@@ -476,11 +484,12 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .enable_multipath = args->quic_cfg.multipath,
         .scheduler_callback = sched,
         .standby_path_probe_timeout = 1000,
-        .adaptive_ack_frequency = 1,
+        .adaptive_ack_frequency = 0,
         .anti_amplification_limit = 4,
         .recv_rate_bytes_per_sec = 0,
-        //.mp_ack_on_any_path = 1,
-        .mp_enable_reinjection = 1,
+        .mp_ack_on_any_path = 0,
+        .mp_enable_reinjection = 0,
+        .ack_frequency = 1,
         // .enable_stream_rate_limit = 1,
         .mp_ping_on = 1,
         .init_recv_window =  64 * 1024 * 1024,  // ✅ 2GB 接收窗口
@@ -645,6 +654,7 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
     //static size_t total_recv = 0;   // 累计接收字节数
     ssize_t recv_size;
     struct sockaddr_storage peer_addr;
+    size_t packet_cnt = 0;
     socklen_t peer_addrlen = sizeof(peer_addr);
     xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
 
@@ -661,6 +671,10 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
     ctx->current_fd = fd;
 
     for (;;) {
+        if (packet_cnt >= XQC_SOCKET_READ_BUDGET_PER_EVENT) {
+            break;
+        }
+
         recv_size = recvfrom(fd, packet_buf, sizeof(packet_buf), 0,
                              (struct sockaddr *)&peer_addr, &peer_addrlen);
 
@@ -693,7 +707,7 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
                         &user_conn->local_addrlen) != 0) {
             perror("[server recv] getsockname error");
         }
-
+        packet_cnt++;
         // 🚀 核心：将 UDP 包交给 XQUIC 引擎
         xqc_int_t ret = xqc_engine_packet_process(
             ctx->engine,

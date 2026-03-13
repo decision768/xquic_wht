@@ -4,8 +4,12 @@
 #include <netdb.h>
 #include <ctype.h>
 #include <strings.h>
+#include <poll.h>
+#include <fcntl.h>
+#include <limits.h>
 
 #define CHUNK_SIZE (8 * 1024)
+#define XQC_STREAM_RANGE_SIZE_DEFAULT (4 * 1024 * 1024)
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
@@ -23,6 +27,59 @@ static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
 static int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
+static void *xqc_mini_cli_rx_thread_main(void *arg);
+static int xqc_mini_cli_start_path_rx_thread(xqc_mini_cli_user_path_t *path);
+static void xqc_mini_cli_stop_path_rx_thread(xqc_mini_cli_user_path_t *path);
+static void xqc_mini_cli_rx_queue_event_callback(int fd, short what, void *arg);
+
+
+static size_t
+xqc_mini_cli_get_stream_range_size(const xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn != NULL && user_conn->ctx != NULL
+        && user_conn->ctx->args != NULL
+        && user_conn->ctx->args->net_cfg.stream_range_size > 0) {
+        return user_conn->ctx->args->net_cfg.stream_range_size;
+    }
+
+    return XQC_STREAM_RANGE_SIZE_DEFAULT;
+}
+
+
+int
+xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn)
+{
+    int ret;
+
+    if (user_conn == NULL || user_conn->ctx == NULL) {
+        return XQC_ERROR;
+    }
+
+    while (user_conn->active_requests < user_conn->max_concurrent_requests
+        && user_conn->next_stream_index < user_conn->target_requests)
+    {
+        int stream_index = user_conn->next_stream_index;
+        xqc_mini_cli_user_stream_t *user_stream = calloc(1, sizeof(xqc_mini_cli_user_stream_t));
+        if (user_stream == NULL) {
+            printf("[error] calloc user_stream failed for stream %d\n", stream_index);
+            return XQC_ERROR;
+        }
+
+        ret = xqc_mini_cli_send_h3_req(user_conn, user_stream, stream_index);
+        if (ret < 0) {
+            free(user_stream);
+            return XQC_ERROR;
+        }
+
+        user_conn->next_stream_index++;
+        user_conn->active_requests++;
+    }
+
+    return XQC_OK;
+}
+
+
+
 
 //统计并输出所有流上传完成的汇总信息
 static void
@@ -57,9 +114,9 @@ xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
     int stream_index, size_t *offset, size_t *length)
 {
     size_t total_size = user_conn->send_file_size;
-    int stream_total = user_conn->target_requests;
+    size_t stream_range_size = xqc_mini_cli_get_stream_range_size(user_conn);
 
-    if (stream_total <= 0) {
+    if (stream_index < 0 ) {
         if (offset) {
             *offset = 0;
         }
@@ -69,7 +126,8 @@ xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
         return;
     }
 
-    if (stream_index >= stream_total) {
+    size_t start = (size_t)stream_index * stream_range_size;
+    if (start >= total_size) {
         if (offset) {
             *offset = total_size;
         }
@@ -79,20 +137,23 @@ xqc_mini_cli_compute_stream_segment(const xqc_mini_cli_user_conn_t *user_conn,
         return;
     }
 
-    size_t base = stream_total > 0 ? total_size / (size_t)stream_total : 0;
-    size_t remainder = stream_total > 0 ? total_size % (size_t)stream_total : 0;
+    // size_t base = stream_total > 0 ? total_size / (size_t)stream_total : 0;
+    // size_t remainder = stream_total > 0 ? total_size % (size_t)stream_total : 0;
 
-    size_t start = base * (size_t)stream_index;
-    if (stream_index < (int)remainder) {
-        start += (size_t)stream_index;
-    } else {
-        start += remainder;
-    }
+    // size_t start = base * (size_t)stream_index;
+    // if (stream_index < (int)remainder) {
+    //     start += (size_t)stream_index;
+    // } else {
+    //     start += remainder;
+    // }
 
-    size_t len = base;
-    if (stream_index < (int)remainder) {
-        len += 1;
-    }
+    // size_t len = base;
+    // if (stream_index < (int)remainder) {
+    //     len += 1;
+    // }
+    size_t remaining = total_size - start;
+    size_t len = remaining < stream_range_size ? remaining : stream_range_size;
+
 
     if (offset) {
         *offset = start;
@@ -211,6 +272,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     args->net_cfg.kernel_revbuf = 16 * 1024 * 1024;
     args->net_cfg.user_send_buf_size = CHUNK_SIZE;
     args->net_cfg.user_recv_buf_size = XQC_PACKET_BUF_LEN;
+    args->net_cfg.stream_range_size = XQC_STREAM_RANGE_SIZE_DEFAULT;
 
     strncpy(args->net_cfg.server_addr, DEFAULT_IP, sizeof(args->net_cfg.server_addr) - 1);
     args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
@@ -388,8 +450,8 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
-    settings->adaptive_ack_frequency = 1;
-    // settings->ack_frequency = 4;      
+    settings->adaptive_ack_frequency = 0;
+    settings->ack_frequency = 1;      
     // settings->max_ack_delay = 5;
     //settings->mp_ack_on_any_path = 1;
 
@@ -398,9 +460,9 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->init_recv_window = 64*1024*1024;
     settings->multipath_version = XQC_MULTIPATH_10;
     settings->recv_rate_bytes_per_sec = 0;
-    settings->max_datagram_frame_size = 1350;
+    //settings->max_datagram_frame_size = 1350;
     settings->mp_ping_on = 1;
-    settings->mp_enable_reinjection = 1;
+    settings->mp_enable_reinjection = 0;
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -795,10 +857,11 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         user_stream->recv_file_path[0] = '\0';
     }
     
-
-    printf("[stream %d] segment offset=%zu length=%zu of total %zu bytes\n",
-        stream_index, user_stream->chunk_offset, user_stream->file_size,
-        user_conn->send_file_size);
+    if (req_cfg->method == REQUEST_METHOD_POST) {
+        printf("[stream %d] segment offset=%zu length=%zu of total %zu bytes\n",
+            stream_index, user_stream->chunk_offset, user_stream->file_size,
+            user_conn->send_file_size);
+    }
 
     ret = xqc_mini_cli_format_h3_req(header, req_cfg, user_stream->file_size, user_stream);
     if (ret > 0) {
@@ -810,8 +873,10 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         if (user_stream->start_time == 0) {
             user_stream->start_time = xqc_now();
         }
-        /* send header */
-        ret = xqc_h3_request_send_headers(user_stream->h3_request, &user_stream->h3_hdrs, 0);
+        /* send header: GET has no request body, send FIN with headers */
+        uint8_t hdr_fin = (req_cfg->method == REQUEST_METHOD_GET) ? 1 : 0;
+        ret = xqc_h3_request_send_headers(user_stream->h3_request, &user_stream->h3_hdrs, hdr_fin);
+
         if (ret < 0) {
             printf("[error] xqc_mini_cli_h3_request_send error %d\n", ret);
             return -1;
@@ -1096,74 +1161,195 @@ xqc_mini_cli_socket_write_handler(xqc_mini_cli_user_path_t *user_path, int fd)
 
 //实际接收QUIC数据包的函数，是传输层和QUIC层的交付，
 // 后面回调里面xqc_mini_cli_h3_request_read_notify仅是对接收的包进行处理，不需要再读取socket了，是QUIC层和应用层的交互
-void
-xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
+static int
+xqc_mini_cli_enqueue_rx_packet(xqc_mini_cli_user_path_t *user_path,
+    const unsigned char *packet_buf, size_t recv_size, xqc_usec_t recv_time)
 {
-    DEBUG
-    ssize_t recv_size, recv_sum;
-    uint64_t recv_time;
-    xqc_int_t ret;
-    
-    xqc_mini_cli_ctx_t *ctx;
-    xqc_mini_cli_user_conn_t *user_conn;
 
-    recv_size = recv_sum = 0;
-    user_conn = user_path->user_conn;
-    ctx = user_conn->ctx;
+    xqc_mini_cli_user_conn_t *user_conn = user_path->user_conn;
+    xqc_mini_cli_rx_packet_t *pkt = malloc(sizeof(*pkt) + recv_size);
+    if (pkt == NULL) {
+        return 0;
+    }
+    pkt->path_index = (int)(user_path - user_conn->paths);
+    pkt->data_len = recv_size;
+    pkt->recv_time = recv_time;
+    pkt->next = NULL;
+    memcpy(pkt->data, packet_buf, recv_size);
+
+    int need_notify = 0;
+    pthread_mutex_lock(&user_conn->rx_queue_lock);
+    if (user_conn->rx_queue_tail != NULL) {
+        user_conn->rx_queue_tail->next = pkt;
+    } else {
+        user_conn->rx_queue_head = pkt;
+    }
+    user_conn->rx_queue_tail = pkt;
+    if (!user_conn->rx_notify_pending) {
+        user_conn->rx_notify_pending = 1;
+        need_notify = 1;
+    }
+    pthread_mutex_unlock(&user_conn->rx_queue_lock);
+
+    return need_notify;
+}
+
+static void *
+xqc_mini_cli_rx_thread_main(void *arg)
+{
+    xqc_mini_cli_user_path_t *user_path = (xqc_mini_cli_user_path_t *)arg;
+    xqc_mini_cli_user_conn_t *user_conn = user_path->user_conn;
+    xqc_mini_cli_ctx_t *ctx = user_conn->ctx;
+
     size_t buffer_capacity = ctx->args->net_cfg.user_recv_buf_size > 0
         ? ctx->args->net_cfg.user_recv_buf_size
         : XQC_PACKET_BUF_LEN;
-    unsigned char packet_buf[buffer_capacity];
+    unsigned char *packet_buf = malloc(buffer_capacity);
     if (packet_buf == NULL) {
-        printf("[error] allocate recv buffer failed\n");
-        return;
+        return NULL;
     }
 
 
-    do {
-        /* recv quic packet from server */
-        recv_size = recvfrom(fd, packet_buf, buffer_capacity, 0,
-                             NULL, NULL);
-        
-        if (recv_size < 0 && get_sys_errno() == EAGAIN) {
-            break;
+    while (user_conn->rx_threads_running && user_path->rx_thread_running && user_path->fd >= 0) {
+        struct pollfd pfd = { .fd = user_path->fd, .events = POLLIN };
+        int pr = poll(&pfd, 1, 100);
+        if (pr <= 0) {
+            continue;
         }
-
-        if (recv_size < 0) {
-            printf("recvfrom: recvmsg = %zd err=%s\n", recv_size, strerror(get_sys_errno()));
-            break;
+        if (!(pfd.revents & POLLIN)) {
+            continue;
         }
-
-        if (user_path->get_local_addr == 0) {
-            user_path->get_local_addr = 1;
-            user_path->local_addrlen = sizeof(struct sockaddr_storage);
-            ret = getsockname(fd, (struct sockaddr*)user_path->local_addr,
-                                        &user_path->local_addrlen);
-            if (ret != 0) {
-                printf("getsockname error, errno: %d\n", get_sys_errno());
-                user_path->local_addrlen = 0;
+        int need_notify_batch = 0;
+        while (user_conn->rx_threads_running && user_path->rx_thread_running) {
+            ssize_t recv_size = recvfrom(user_path->fd, packet_buf, buffer_capacity, 0, NULL, NULL);
+            if (recv_size < 0) {
+                if (get_sys_errno() == EAGAIN || get_sys_errno() == EWOULDBLOCK) {
+                    break;
+                }
                 break;
+            }
+            if (recv_size == 0) {
+                break;
+            }
+
+            if (user_path->get_local_addr == 0) {
+                user_path->get_local_addr = 1;
+                user_path->local_addrlen = sizeof(struct sockaddr_storage);
+                if (getsockname(user_path->fd, (struct sockaddr *)user_path->local_addr,
+                    &user_path->local_addrlen) != 0)
+                {
+                    user_path->local_addrlen = 0;
+                }
+            }
+
+            xqc_usec_t recv_time = xqc_now();
+            ctx->args->net_cfg.last_socket_time = recv_time;
+            if (xqc_mini_cli_enqueue_rx_packet(user_path, packet_buf, (size_t)recv_size, recv_time)) {
+                need_notify_batch = 1;
+            }
+
+        }
+        if (need_notify_batch && user_conn->rx_notify_fds[1] >= 0) {
+            uint64_t one = 1;
+            (void)write(user_conn->rx_notify_fds[1], &one, sizeof(one));
+        }
+    }
+        /* recv quic packet from server */
+    free(packet_buf);
+    return NULL;
+}
+static int
+xqc_mini_cli_start_path_rx_thread(xqc_mini_cli_user_path_t *path)
+{
+    if (path == NULL || path->fd < 0) {
+        return XQC_ERROR;
+    }
+    if (path->rx_thread_running) {
+        return XQC_OK;
+    }
+
+    path->rx_thread_running = 1;
+    if (pthread_create(&path->rx_thread, NULL, xqc_mini_cli_rx_thread_main, path) != 0) {
+        path->rx_thread_running = 0;
+        return XQC_ERROR;
+    }
+    return XQC_OK;
+}
+static void
+xqc_mini_cli_stop_path_rx_thread(xqc_mini_cli_user_path_t *path)
+{
+    if (path == NULL || !path->rx_thread_running) {
+        return;
+    }
+
+    path->rx_thread_running = 0;
+    pthread_join(path->rx_thread, NULL);
+}
+
+
+static void
+xqc_mini_cli_drain_rx_queue(xqc_mini_cli_user_conn_t *user_conn)
+{
+    xqc_mini_cli_ctx_t *ctx = user_conn->ctx;
+    int processed = 0;
+    for (;;) {
+        pthread_mutex_lock(&user_conn->rx_queue_lock);
+        xqc_mini_cli_rx_packet_t *pkt = user_conn->rx_queue_head;
+        if (pkt != NULL) {
+            user_conn->rx_queue_head = pkt->next;
+            if (user_conn->rx_queue_head == NULL) {
+                user_conn->rx_queue_tail = NULL;
+            }
+        }
+        pthread_mutex_unlock(&user_conn->rx_queue_lock);
+        if (pkt == NULL) {
+            break;
+        }
+
+        if (pkt->path_index >= 0 && pkt->path_index < MAX_PATH_CNT) {
+            xqc_mini_cli_user_path_t *path = &user_conn->paths[pkt->path_index];
+            if (path->peer_addr != NULL && path->local_addr != NULL) {
+                xqc_int_t ret = xqc_engine_packet_process(ctx->engine, pkt->data, pkt->data_len,
+                    path->local_addr, path->local_addrlen,
+                    path->peer_addr, path->peer_addrlen,
+                    pkt->recv_time, user_conn);
+                if (ret != XQC_OK) {
+                    printf("[error] process packet from queue failed, ret:%d\n", ret);
+                } else {
+                    processed = 1;
+                }
             }
         }
 
-        recv_sum += recv_size;
-        recv_time = xqc_now();
-        ctx->args->net_cfg.last_socket_time = recv_time;
+        free(pkt);
+    }
 
-        /* process quic packet with xquic engine */
-        ret = xqc_engine_packet_process(ctx->engine, packet_buf, recv_size,
-                                        user_path->local_addr, user_path->local_addrlen,
-                                        user_path->peer_addr, user_path->peer_addrlen,
-                                        (xqc_usec_t)recv_time, user_conn);
-        if (ret != XQC_OK) {
-            printf("[error] client_read_handler: packet process err, ret: %d\n", ret);
-            return;
-        }
-    } while (recv_size > 0);
 
-finish_recv:
-    // printf("[stats] xqc_mini_cli_socket_read_handler, recv size:%zu\n", recv_sum);
-    xqc_engine_finish_recv(ctx->engine);
+    if (processed) {
+        xqc_engine_finish_recv(ctx->engine);
+    }
+}
+
+
+static void
+xqc_mini_cli_rx_queue_event_callback(int fd, short what, void *arg)
+{
+    (void)what;
+    xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)arg;
+    uint64_t cnt = 0;
+    while (read(fd, &cnt, sizeof(cnt)) > 0) {
+    }
+    xqc_mini_cli_drain_rx_queue(user_conn);
+}
+
+//实际接收QUIC数据包的函数，是传输层和QUIC层的交付，
+// 后面回调里面xqc_mini_cli_h3_request_read_notify仅是对接收的包进行处理，不需要再读取socket了，是QUIC层和应用层的交互
+void
+xqc_mini_cli_socket_read_handler(xqc_mini_cli_user_path_t *user_path, int fd)
+{
+    (void)fd;
+    xqc_mini_cli_drain_rx_queue(user_path->user_conn);
+
 }
 
 // 去除字符串首尾空白字符
@@ -1270,7 +1456,15 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
                 args->req_stream_cnt = (int)stream_cnt;
             }
 
-        }else if (strcmp(key, "send_data_len") == 0) {
+        }
+        else if (strcmp(key, "stream_range_size") == 0) {
+            char *endptr = NULL;
+            unsigned long long size = strtoull(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && size > 0) {
+                args->net_cfg.stream_range_size = (size_t)size;
+            }
+        }
+        else if (strcmp(key, "send_data_len") == 0) {
             char *endptr = NULL;
             unsigned long long size = strtoull(value, &endptr, 10);
             if (endptr != value && *endptr == '\0') {
@@ -1621,6 +1815,23 @@ xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_us
     path->path_id = path_id;
     path->is_active = 1;
 
+    if (xqc_mini_cli_start_path_rx_thread(path) != XQC_OK) {
+        printf("[error] start rx thread failed for path[%d]\n", path_index);
+        path->is_active = 0;
+        if (path->ev_socket) {
+            event_del(path->ev_socket);
+            event_free(path->ev_socket);
+            path->ev_socket = NULL;
+        }
+        if (path->fd >= 0) {
+            close(path->fd);
+            path->fd = -1;
+        }
+        path->prepared = 0;
+        return XQC_ERROR;
+    }
+
+
     if (path->interface_name[0] != '\0') {
         printf("[stats] path[%d] interface %s bound fd %d\n", path_index,
             path->interface_name, path->fd);
@@ -1712,6 +1923,7 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         if (path->is_active && path->path_id == path_id) {
             path->is_active = 0;
+            xqc_mini_cli_stop_path_rx_thread(path);
             if (user_conn->active_path_cnt > 0) {
                 user_conn->active_path_cnt--;
             }
@@ -1772,35 +1984,12 @@ xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn)
         return XQC_OK;
     }
 
-    /*
-     * For short flows (e.g. mini GET), proactively trigger multipath
-     * creation before request streams are launched, instead of only relying
-     * on ready_to_create_path_notify timing.
-     */
-    
+    printf("[stats] launch requests, max concurrency=%d\n",
+        user_conn->max_concurrent_requests);
 
 
-    int stream_total = user_conn->target_requests;
-    printf("[stats] launch %d concurrent request streams\n", stream_total);
-    
-    
-
-    for (int i = 0; i < stream_total; i++) {
-        xqc_mini_cli_user_stream_t *user_stream = calloc(1, sizeof(xqc_mini_cli_user_stream_t));
-
-        if (user_stream == NULL) {
-            printf("[error] calloc user_stream failed for stream %d\n", i);
-            return XQC_ERROR;
-        }
-        
-        ret = xqc_mini_cli_send_h3_req(user_conn, user_stream, i);
-        if (ret < 0) {
-            free(user_stream);
-            return XQC_ERROR;
-        }
-    }
     user_conn->requests_launched = 1;
-    return XQC_OK;
+    return xqc_mini_cli_try_schedule_requests(user_conn);
 }
 int
 xqc_mini_cli_main_process(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_ctx_t *ctx)
@@ -1830,12 +2019,39 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     xqc_mini_cli_user_conn_t *user_conn = calloc(1, sizeof(xqc_mini_cli_user_conn_t));
 
     user_conn->ctx = ctx;
+    user_conn->rx_notify_fds[0] = -1;
+    user_conn->rx_notify_fds[1] = -1;
+    user_conn->rx_threads_running = 1;
+    pthread_mutex_init(&user_conn->rx_queue_lock, NULL);
+
+    if (pipe(user_conn->rx_notify_fds) != 0) {
+        printf("[error] create rx notify pipe failed\n");
+        free(user_conn);
+        return NULL;
+    }
+    fcntl(user_conn->rx_notify_fds[0], F_SETFL, O_NONBLOCK);
+    fcntl(user_conn->rx_notify_fds[1], F_SETFL, O_NONBLOCK);
+    user_conn->ev_rx_queue = event_new(ctx->eb, user_conn->rx_notify_fds[0], EV_READ | EV_PERSIST,
+        xqc_mini_cli_rx_queue_event_callback, user_conn);
+    if (user_conn->ev_rx_queue == NULL || event_add(user_conn->ev_rx_queue, NULL) != 0) {
+        printf("[error] create rx queue event failed\n");
+        if (user_conn->ev_rx_queue) {
+            event_free(user_conn->ev_rx_queue);
+        }
+        close(user_conn->rx_notify_fds[0]);
+        close(user_conn->rx_notify_fds[1]);
+        pthread_mutex_destroy(&user_conn->rx_queue_lock);
+        free(user_conn);
+        return NULL;
+    }
+
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         user_conn->paths[i].fd = -1;
         user_conn->paths[i].user_conn = user_conn;
         user_conn->paths[i].is_active = 0;
         user_conn->paths[i].prepared = 0;
         user_conn->paths[i].path_id = XQC_MINI_PATH_ID_INVALID;
+        user_conn->paths[i].rx_thread_running = 0;
     }
     /* set connection timeout */
     struct timeval tv;
@@ -1881,6 +2097,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->handshake_finished = 0;
     user_conn->requests_launched = 0;
     user_conn->path_wait_rounds_after_handshake = 0;
+    user_conn->last_path_probe_ping_time = 0;
 
    
     memset(user_conn->send_file_path, 0, sizeof(user_conn->send_file_path));
@@ -1927,32 +2144,65 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
        
     }
 
-    int stream_target = ctx->args->req_stream_cnt;
-    if (stream_target <= 0) {
-        stream_target = 1;
+    int stream_concurrency = ctx->args->req_stream_cnt;
+    if (stream_concurrency <= 0) {
+        stream_concurrency = 1;
     }
-    if (stream_target > XQC_MINI_MAX_STREAMS) {
-        printf("[warn] exceed max stream count %d, clamp to limit\n", XQC_MINI_MAX_STREAMS);
-        stream_target = XQC_MINI_MAX_STREAMS;
-    }
-     if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
-        if (user_conn->send_file_size == 0 && stream_target != 1) {
-            printf("[warn] send file is empty, forcing single stream\n");
+    int stream_target = stream_concurrency;
+    // if (stream_target > XQC_MINI_MAX_STREAMS) {
+    //     printf("[warn] exceed max stream count %d, clamp to limit\n", XQC_MINI_MAX_STREAMS);
+    //     stream_target = XQC_MINI_MAX_STREAMS;
+    // }
+    //  if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
+    //     if (user_conn->send_file_size == 0 && stream_target != 1) {
+    //         printf("[warn] send file is empty, forcing single stream\n");
+    if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
+        if (user_conn->send_file_size == 0) {
             stream_target = 1;
         }
-        if (user_conn->send_file_size > 0
-            && (size_t)stream_target > user_conn->send_file_size) {
-            printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
-                stream_target, user_conn->send_file_size);
-            stream_target = (int)user_conn->send_file_size;
-            if (stream_target <= 0) {
-                stream_target = 1;
-            }
-        }
+        // if (user_conn->send_file_size > 0
+        //     && (size_t)stream_target > user_conn->send_file_size) {
+        //     printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
+        //         stream_target, user_conn->send_file_size);
+        //     stream_target = (int)user_conn->send_file_size;
+        //     if (stream_target <= 0) {
+        //         stream_target = 1;
+        //     }
+        // }
+        else {
+            size_t stream_range_size = xqc_mini_cli_get_stream_range_size(user_conn);
+            size_t required = (user_conn->send_file_size + stream_range_size - 1)
+                / stream_range_size;
+            if (required > (size_t)INT_MAX) {
+                stream_target = INT_MAX;
+            } else {
+                stream_target = (int)required;
     }
-    ctx->args->req_stream_cnt = stream_target;
+        }
+        printf("[stats] POST upload uses fixed stream range %zu bytes, stream count=%d\n",
+            xqc_mini_cli_get_stream_range_size(user_conn), stream_target);
+
+    }
+    if (stream_concurrency > XQC_MINI_MAX_STREAMS) {
+        stream_concurrency = XQC_MINI_MAX_STREAMS;
+    }
+    if (stream_concurrency > stream_target) {
+        stream_concurrency = stream_target;
+    }
+    if (stream_concurrency <= 0) {
+        stream_concurrency = 1;
+    }
+
+    ctx->args->req_stream_cnt = stream_concurrency;
+    user_conn->max_concurrent_requests = stream_concurrency;
+
     user_conn->target_requests = stream_target;
+    user_conn->next_stream_index = 0;
+    user_conn->active_requests = 0;
+
     user_conn->completed_requests = 0;
+    user_conn->total_requests_known =
+        (ctx->args->req_cfg.method == REQUEST_METHOD_POST) ? 1 : 0;
 
 
     int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
@@ -1981,9 +2231,10 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         fclose(user_conn->download_fp);
         user_conn->download_fp = NULL;
     }
-
+    user_conn->rx_threads_running = 0;
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        xqc_mini_cli_stop_path_rx_thread(path);
         if (path->ev_socket) {
             event_del(path->ev_socket);
             event_free(path->ev_socket);
@@ -2001,6 +2252,34 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         path->is_active = 0;
         path->path_id = XQC_MINI_PATH_ID_INVALID;
     }
+
+    
+    if (user_conn->ev_rx_queue) {
+        event_del(user_conn->ev_rx_queue);
+        event_free(user_conn->ev_rx_queue);
+        user_conn->ev_rx_queue = NULL;
+    }
+    if (user_conn->rx_notify_fds[0] >= 0) {
+        close(user_conn->rx_notify_fds[0]);
+        user_conn->rx_notify_fds[0] = -1;
+    }
+    if (user_conn->rx_notify_fds[1] >= 0) {
+        close(user_conn->rx_notify_fds[1]);
+        user_conn->rx_notify_fds[1] = -1;
+    }
+    xqc_mini_cli_rx_packet_t *pkt = NULL;
+    pthread_mutex_lock(&user_conn->rx_queue_lock);
+    pkt = user_conn->rx_queue_head;
+    user_conn->rx_queue_head = NULL;
+    user_conn->rx_queue_tail = NULL;
+    pthread_mutex_unlock(&user_conn->rx_queue_lock);
+    while (pkt) {
+        xqc_mini_cli_rx_packet_t *next = pkt->next;
+        free(pkt);
+        pkt = next;
+    }
+    pthread_mutex_destroy(&user_conn->rx_queue_lock);
+
     if (user_conn->ev_timeout) {
         event_del(user_conn->ev_timeout);
         event_free(user_conn->ev_timeout);
@@ -2034,9 +2313,10 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
         user_conn->ev_path_retry = NULL;
     }
 
-
+    user_conn->rx_threads_running = 0;
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        xqc_mini_cli_stop_path_rx_thread(path);
         if (path->ev_socket) {
             event_del(path->ev_socket);
             event_free(path->ev_socket);
@@ -2046,7 +2326,22 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
             close(path->fd);
             path->fd = -1;
         }
+        
     }
+    if (user_conn->ev_rx_queue) {
+        event_del(user_conn->ev_rx_queue);
+        event_free(user_conn->ev_rx_queue);
+        user_conn->ev_rx_queue = NULL;
+    }
+    if (user_conn->rx_notify_fds[0] >= 0) {
+        close(user_conn->rx_notify_fds[0]);
+        user_conn->rx_notify_fds[0] = -1;
+    }
+    if (user_conn->rx_notify_fds[1] >= 0) {
+        close(user_conn->rx_notify_fds[1]);
+        user_conn->rx_notify_fds[1] = -1;
+    }
+
 }
 
 // int main(int argc, char *argv[])

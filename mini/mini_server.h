@@ -23,6 +23,7 @@
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define XQC_PACKET_BUF_LEN 65536
+#define XQC_SOCKET_READ_BUDGET_PER_EVENT 32
 
 /**
  * net config definition
@@ -43,6 +44,7 @@ typedef struct xqc_mini_svr_net_config_s
     int     kernel_revbuf;
     size_t  user_send_buf_size;
     size_t  user_recv_buf_size;
+    size_t  stream_range_size;
 
 } xqc_mini_svr_net_config_t;
 

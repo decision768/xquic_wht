@@ -180,17 +180,17 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     user_conn->handshake_finished = 1;
     user_conn->path_wait_rounds_after_handshake = 0;
     printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
-    int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
-    if (target_paths <= 0) {
-        target_paths = MAX_PATH_CNT;
-    }
-    if (target_paths > MAX_PATH_CNT) {
-        target_paths = MAX_PATH_CNT;
-    }
-    if (user_conn->active_path_cnt < target_paths) {
-        printf("[stats] waiting for additional path ids from peer, path retry timer continues\n");
-        return;
-    }
+    // int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
+    // if (target_paths <= 0) {
+    //     target_paths = MAX_PATH_CNT;
+    // }
+    // if (target_paths > MAX_PATH_CNT) {
+    //     target_paths = MAX_PATH_CNT;
+    // }
+    // if (user_conn->active_path_cnt < target_paths) {
+    //     printf("[stats] waiting for additional path ids from peer, path retry timer continues\n");
+    //     return;
+    // }
 
     if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
         printf("[error] launch requests after handshake failed\n");
@@ -248,11 +248,25 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     user_stream->send_buffer = NULL;
 
     user_conn->completed_requests++;
-    printf("[stats] stream %d close notify, completed %d/%d, cwnd_blocked:%"PRIu64"\n",
-        user_stream->stream_index, user_conn->completed_requests,
-        user_conn->target_requests, stats.cwnd_blocked_ms);
+    if (!user_stream->slot_released && user_conn->active_requests > 0) {
+        user_conn->active_requests--;
+        user_stream->slot_released = 1;
+    }
 
-    if (user_conn->completed_requests >= user_conn->target_requests) {
+
+    if (user_conn->completed_requests < user_conn->target_requests) {
+        if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+            printf("[error] schedule next request round failed\n");
+        }
+    }
+
+    printf("[stats] stream %d close notify, completed %d/%d, active=%d, cwnd_blocked:%"PRIu64"\n",
+        user_stream->stream_index, user_conn->completed_requests,
+        user_conn->target_requests, user_conn->active_requests, stats.cwnd_blocked_ms);
+
+     if (user_conn->completed_requests >= user_conn->target_requests
+        && user_conn->active_requests == 0)
+    {
         xqc_h3_conn_close(conn_ctx->engine, &user_conn->cid);
     }
 
@@ -314,11 +328,40 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                     len = sizeof(total_buf) - 1;
                 }
                 memcpy(total_buf, headers->headers[i].value.iov_base, len);
-                user_conn->download_expected_bytes = strtoull(total_buf, NULL, 10);
+                size_t total_length = strtoull(total_buf, NULL, 10);
+                if (total_length > 0) {
+                    user_conn->download_expected_bytes = total_length;
+                    user_conn->send_file_size = total_length;
+                }
             }
         }
 
         user_stream->response_status = status_code;
+
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_conn->download_expected_bytes > 0
+            && !user_conn->total_requests_known)
+        {
+            size_t stream_range_size = user_conn->ctx->args->net_cfg.stream_range_size > 0
+                ? user_conn->ctx->args->net_cfg.stream_range_size
+                : (4*1024*1024);
+            int required_streams = (int)((user_conn->download_expected_bytes + stream_range_size - 1)
+                / stream_range_size);
+            if (required_streams <= 0) {
+                required_streams = 1;
+            }
+            if (required_streams < user_conn->next_stream_index) {
+                required_streams = user_conn->next_stream_index;
+            }
+            user_conn->target_requests = required_streams;
+            user_conn->total_requests_known = 1;
+            printf("[stats] GET total length=%zu, total rounds stream count=%d, concurrency=%d\n",
+                user_conn->download_expected_bytes, user_conn->target_requests,
+                user_conn->max_concurrent_requests);
+            if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+                printf("[error] schedule GET rounds failed\n");
+            }
+        }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
@@ -345,10 +388,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
-            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET){
-                xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
-                xqc_engine_main_logic(user_conn->ctx->engine);
-            }
+            
             return XQC_OK;
         }
         
@@ -426,6 +466,20 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             user_stream->recv_body_len, duration_ms, mbps);
         printf("[stats] read h3 request finish. \n");
         user_stream->recv_fin = 1;
+
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && !user_stream->slot_released)
+        {
+            if (user_conn->active_requests > 0) {
+                user_conn->active_requests--;
+            }
+            user_stream->slot_released = 1;
+            if (user_conn->next_stream_index < user_conn->target_requests) {
+                if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+                    printf("[error] schedule next GET round failed\n");
+                }
+            }
+        }
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->expected_content_length > 0) {
             printf("\n");
@@ -728,44 +782,33 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
 
-     if (user_conn->handshake_finished
-        && user_conn->requests_launched
-        && user_conn->active_path_cnt > 1)
+    xqc_usec_t now = xqc_now();
+    if (user_conn->handshake_finished
+        && !user_conn->requests_launched
+        && user_conn->active_path_cnt > 1
+        && (user_conn->last_path_probe_ping_time == 0
+            || now - user_conn->last_path_probe_ping_time >= 1000000))
+
     {
         xqc_int_t ping_ret = xqc_h3_conn_send_ping(user_conn->ctx->engine,
                                                    &user_conn->cid, NULL);
         if (ping_ret != XQC_OK) {
-            printf("[warn] periodic mp ping failed, ret=%d\n", ping_ret);
+            printf("[warn] path-probe ping failed, ret=%d\n", ping_ret);
+        }else {
+            user_conn->last_path_probe_ping_time = now;
         }
     }
 
 
 
-     if (user_conn->handshake_finished && !user_conn->requests_launched) {
-        int target_paths = user_conn->ctx->args->net_cfg.multi_interface_cnt;
-        if (target_paths <= 0) {
-            target_paths = MAX_PATH_CNT;
-        }
-        if (target_paths > MAX_PATH_CNT) {
-            target_paths = MAX_PATH_CNT;
-        }
-
-        if (user_conn->active_path_cnt >= target_paths
-            || user_conn->path_wait_rounds_after_handshake >= 2) {
-            if (user_conn->active_path_cnt < target_paths) {
-                printf("[warn] launch requests with %d/%d active paths after waiting\n",
-                    user_conn->active_path_cnt, target_paths);
-            }
-            if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
-                printf("[error] launch requests in path retry callback failed\n");
-            }
-        } else {
-            user_conn->path_wait_rounds_after_handshake++;
+    if (user_conn->handshake_finished && !user_conn->requests_launched) {
+        if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
+            printf("[error] launch requests in path retry callback failed\n");
         }
     }
 
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
+    tv.tv_sec = 0;
+    tv.tv_usec = 200000;
     event_add(user_conn->ev_path_retry, &tv);
 }
 

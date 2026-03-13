@@ -7,6 +7,7 @@
 #include <memory.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <event2/event.h>
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
@@ -49,7 +50,7 @@
 #define XQC_PACKET_BUF_LEN 65536
 #define XQC_MINI_PATH_ID_INVALID ((uint64_t)-1)
 #define XQC_MINI_INTERFACE_NAME_MAX_LEN 64
-
+#define XQC_SOCKET_READ_BUDGET_PER_EVENT 32
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
 #define TOKEN_FILE                  "token"
@@ -74,6 +75,7 @@ typedef struct xqc_mini_cli_net_config_s {
     int                 kernel_revbuf;
     size_t              user_send_buf_size;
     size_t              user_recv_buf_size;
+    size_t              stream_range_size;
 
 
 
@@ -219,7 +221,19 @@ typedef struct xqc_mini_cli_user_path_s {
     char                    interface_name[XQC_MINI_INTERFACE_NAME_MAX_LEN];
     //用于测试路径是否失效
     int                     consecutive_write_failures;
+    pthread_t               rx_thread;
+    int                     rx_thread_running;
+
 } xqc_mini_cli_user_path_t;
+
+typedef struct xqc_mini_cli_rx_packet_s {
+    int                             path_index;
+    size_t                          data_len;
+    xqc_usec_t                      recv_time;
+    struct xqc_mini_cli_rx_packet_s *next;
+    unsigned char                   data[];
+} xqc_mini_cli_rx_packet_t;
+
 
 typedef struct xqc_mini_cli_user_conn_s {
     xqc_cid_t               cid;
@@ -231,7 +245,11 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     active_path_cnt;
 
     int                     target_requests;
+    int                     max_concurrent_requests;
+    int                     next_stream_index;
+    int                     active_requests;
     int                     completed_requests;
+    int                     total_requests_known;
     size_t                  send_file_size;
     char                    send_file_path[PATH_LEN];
     
@@ -253,11 +271,21 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     handshake_finished;
     int                     requests_launched;
     int                     path_wait_rounds_after_handshake;
+    xqc_usec_t              last_path_probe_ping_time;
 
 
 
     struct event            *ev_timeout;
     struct event            *ev_path_retry;
+    struct event            *ev_rx_queue;
+
+    int                     rx_notify_fds[2];
+    int                     rx_threads_running;
+    pthread_mutex_t         rx_queue_lock;
+    xqc_mini_cli_rx_packet_t *rx_queue_head;
+    xqc_mini_cli_rx_packet_t *rx_queue_tail;
+    int                     rx_notify_pending;
+
 
 } xqc_mini_cli_user_conn_t;
 
@@ -282,6 +310,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                      recv_body_len;
     size_t                      expected_content_length;
     int                         recv_fin;
+    int                         slot_released;
     xqc_msec_t                  start_time;
     int                         send_finished;
 
@@ -365,4 +394,5 @@ int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[
 int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn);
 #endif

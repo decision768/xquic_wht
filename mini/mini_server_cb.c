@@ -15,6 +15,7 @@
 
 #define XQC_MINI_SVR_MAX_STREAMS 16
 #define SERVER_OUTPUT_FILE "server_received.txt"
+#define XQC_MINI_SVR_STREAM_RANGE_SIZE (4 * 1024 * 1024)
 /* engine callbacks */
 typedef struct {
     int initialized;
@@ -44,7 +45,7 @@ static void xqc_mini_svr_resolve_file_path(xqc_mini_svr_ctx_t *ctx, const char *
 static void xqc_mini_svr_prepare_text_response(xqc_mini_svr_user_stream_t *user_stream,
     int status, const char *fmt, ...);
 static void xqc_mini_svr_compute_stream_segment(int stream_count, int stream_index,
-    size_t total_size, size_t *offset, size_t *length);
+    size_t total_size, size_t stream_range_size, size_t *offset, size_t *length);
 static int xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream);
 static void xqc_mini_svr_fill_generated_chunk(unsigned char *buf, size_t len,
     size_t offset);
@@ -54,6 +55,20 @@ static int xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_st
     size_t *file_size);
 static void xqc_mini_svr_log_mp_active_state(xqc_mini_svr_user_conn_t *user_conn,
     const char *scene);
+
+
+static size_t
+xqc_mini_svr_get_stream_range_size(xqc_mini_svr_user_stream_t *user_stream)
+{
+    xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+    if (user_conn != NULL && user_conn->ctx != NULL
+        && user_conn->ctx->args != NULL
+        && user_conn->ctx->args->net_cfg.stream_range_size > 0) {
+        return user_conn->ctx->args->net_cfg.stream_range_size;
+    }
+
+    return 4 * 1024 * 1024;
+}
 
 
 static void
@@ -426,8 +441,8 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
     }
     fclose(fp);
 
-    printf("[server] prepared output file '%s' for %d streams totaling %zu bytes\n",
-        output_file, stream_count, total_size);
+    printf("[server] prepared output file '%s' for totaling %zu bytes\n",
+        output_file, total_size);
 }
 static void
 xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
@@ -456,31 +471,41 @@ xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
 
 static void
 xqc_mini_svr_compute_stream_segment(int stream_count, int stream_index,
-    size_t total_size, size_t *offset, size_t *length)
+    size_t total_size, size_t stream_range_size, size_t *offset, size_t *length)
 {
+    (void)stream_count;
     if (offset == NULL || length == NULL) {
         return;
     }
-    if (stream_count <= 0) {
+    if (stream_index < 0 || total_size == 0) {
         *offset = 0;
-        *length = total_size;
+        *length = 0;
         return;
     }
-    if (stream_index < 0) {
-        stream_index = 0;
+    // if (stream_index < 0) {
+    //     stream_index = 0;
+    // }
+    // if (stream_index >= stream_count) {
+    //     stream_index = stream_count - 1;
+    // }
+    // size_t base = total_size / (size_t)stream_count;
+    // size_t remainder = total_size % (size_t)stream_count;
+    // size_t start = base * (size_t)stream_index;
+    // if ((size_t)stream_index < remainder) {
+    //     start += (size_t)stream_index;
+    // } else {
+    //     start += remainder;
+    size_t start = (size_t)stream_index * XQC_MINI_SVR_STREAM_RANGE_SIZE;
+    if (start >= total_size) {
+        *offset = total_size;
+        *length = 0;
+        return;
     }
-    if (stream_index >= stream_count) {
-        stream_index = stream_count - 1;
-    }
-    size_t base = total_size / (size_t)stream_count;
-    size_t remainder = total_size % (size_t)stream_count;
-    size_t start = base * (size_t)stream_index;
-    if ((size_t)stream_index < remainder) {
-        start += (size_t)stream_index;
-    } else {
-        start += remainder;
-    }
-    size_t len = base + ((size_t)stream_index < remainder ? 1 : 0);
+    // size_t len = base + ((size_t)stream_index < remainder ? 1 : 0);
+    size_t remaining = total_size - start;
+    size_t len = remaining < stream_range_size
+        ? remaining : stream_range_size;
+
     *offset = start;
     *length = len;
 }
@@ -1120,20 +1145,12 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             } else {
                 user_stream->total_file_size = real_file_size;
                 if (have_index && have_count) {
-                    if (parsed_count <= 0) {
-                        printf("[error] invalid stream count %ld\n", parsed_count);
-                        return XQC_ERROR;
-                    }
-                    if (parsed_index < 0 || parsed_index >= parsed_count) {
-                        printf("[error] invalid stream index %ld for count %ld\n",
-                            parsed_index, parsed_count);
-                        return XQC_ERROR;
-                    }
-
+                    
                     size_t stream_offset = 0;
                     size_t stream_length = 0;
                     xqc_mini_svr_compute_stream_segment((int)parsed_count,
                         (int)parsed_index, user_stream->total_file_size,
+                        xqc_mini_svr_get_stream_range_size(user_stream),
                         &stream_offset, &stream_length);
                     if (have_total && parsed_total != user_stream->total_file_size) {
                         printf("[warn] total length mismatch, header=%llu file=%zu\n",
@@ -1185,6 +1202,22 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             user_stream->stream_offset = (size_t)parsed_offset;
             user_stream->total_file_size = (size_t)parsed_total;
             user_stream->metadata_parsed = 1;
+
+            size_t expect_offset = 0;
+            size_t expect_length = 0;
+            xqc_mini_svr_compute_stream_segment(user_stream->stream_count,
+                user_stream->stream_index, user_stream->total_file_size,
+                xqc_mini_svr_get_stream_range_size(user_stream),
+                &expect_offset, &expect_length);
+            if (user_stream->stream_offset != expect_offset) {
+                printf("[warn] stream offset mismatch, header=%zu computed=%zu, use computed\n",
+                    user_stream->stream_offset, expect_offset);
+                user_stream->stream_offset = expect_offset;
+            }
+            if (user_stream->expected_content_length != expect_length) {
+                printf("[warn] stream length mismatch, header=%zu computed=%zu\n",
+                    user_stream->expected_content_length, expect_length);
+            }
 
             if (xqc_mini_svr_prepare_output_file(user_stream) != XQC_OK) {
                 return XQC_ERROR;
