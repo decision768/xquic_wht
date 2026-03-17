@@ -221,6 +221,8 @@ typedef struct xqc_mini_cli_user_path_s {
     char                    interface_name[XQC_MINI_INTERFACE_NAME_MAX_LEN];
     //用于测试路径是否失效
     int                     consecutive_write_failures;
+    int                     disabled_for_session;
+    xqc_usec_t              last_recover_probe_time;
     pthread_t               rx_thread;
     int                     rx_thread_running;
 
@@ -258,7 +260,7 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     upload_finished_streams;
     size_t                  upload_total_bytes;
 
-    FILE                   *download_fp;
+    int                     download_fd;
     char                    download_path[PATH_LEN];
     size_t                  download_total_bytes;
     size_t                  download_expected_bytes;
@@ -272,6 +274,7 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     requests_launched;
     int                     path_wait_rounds_after_handshake;
     xqc_usec_t              last_path_probe_ping_time;
+    int                     timeout_defer_count;
 
 
 
@@ -395,4 +398,6 @@ int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn);
+
+void xqc_mini_cli_stop_path_rx_thread(xqc_mini_cli_user_path_t *path);
 #endif

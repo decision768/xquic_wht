@@ -488,7 +488,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .anti_amplification_limit = 4,
         .recv_rate_bytes_per_sec = 0,
         .mp_ack_on_any_path = 0,
-        .mp_enable_reinjection = 0,
+        .mp_enable_reinjection = 1,
         .ack_frequency = 1,
         // .enable_stream_rate_limit = 1,
         .mp_ping_on = 1,

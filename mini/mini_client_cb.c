@@ -365,16 +365,16 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
-            && user_conn->download_fp == NULL) {
+            && user_conn->download_fd < 0) {
             const char *download_path = user_conn->ctx->args->env_cfg.download_path;
             printf("[stats] response status: %d, download_path: %s\n",
                 status_code, download_path);
-            user_conn->download_fp = fopen(download_path, "wb+");
-            if (user_conn->download_fp == NULL) {
-                perror("fopen");
+            user_conn->download_fd = open(download_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (user_conn->download_fd < 0) {
+                perror("open");
                 return XQC_ERROR;
             }
-            setvbuf(user_conn->download_fp, NULL, _IOFBF, 4 * 1024 * 1024);
+            
             strncpy(user_conn->download_path, download_path,
                 sizeof(user_conn->download_path) - 1);
             user_conn->download_path[sizeof(user_conn->download_path) - 1] = '\0';
@@ -436,17 +436,11 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_conn->download_fp != NULL && read > 0) {
-            if (fseek(user_conn->download_fp, (long)(user_stream->recv_offset + prev_len),
-                    SEEK_SET) != 0) {
-                perror("fseek");
-                return XQC_ERROR;
-            }
-
-            size_t written = fwrite(recv_buff, 1, (size_t)read,
-                user_conn->download_fp);
-            if (written != (size_t)read) {
-                perror("fwrite");
+            && user_conn->download_fd >= 0 && read > 0) {
+            off_t write_off = (off_t)(user_stream->recv_offset + prev_len);
+            ssize_t written = pwrite(user_conn->download_fd, recv_buff, (size_t)read, write_off);
+            if (written != read) {
+                perror("pwrite");
                 return XQC_ERROR;
             }
         }
@@ -485,11 +479,13 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             printf("\n");
         }
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_conn->download_fp != NULL) {
+            && user_conn->download_fd >= 0) {
             user_conn->download_total_bytes += user_stream->recv_body_len;
             user_conn->download_finished_streams++;
             if (user_conn->download_finished_streams >= user_conn->target_requests) {
-                fflush(user_conn->download_fp);
+                if (fsync(user_conn->download_fd) != 0) {
+                    perror("fsync");
+                }
                 xqc_usec_t download_end_time = xqc_now();
                 double duration_ms = (user_conn->download_start_time > 0)
                     ? (download_end_time - user_conn->download_start_time) / 1000.0
@@ -503,8 +499,8 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                                                 : user_conn->ctx->args->env_cfg.download_path);
                 printf("[stats] all download streams finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
                     user_conn->download_total_bytes, duration_ms, mbps);
-                fclose(user_conn->download_fp);
-                user_conn->download_fp = NULL;
+                close(user_conn->download_fd);
+                user_conn->download_fd = -1;
                 xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
                 xqc_engine_main_logic(user_conn->ctx->engine);
             }
@@ -591,7 +587,8 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     }
 
     if (user_path == NULL || !user_path->is_active || user_path->fd < 0) {
-        return -1;
+        xqc_mini_cli_try_rebuild_paths(user_conn);
+        return XQC_SOCKET_EAGAIN;
     }
 
     fd = user_path->fd;
@@ -631,13 +628,34 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
         if (user_path->consecutive_write_failures >= max_write_failures
             && user_path->path_id != XQC_MINI_PATH_ID_INVALID)
         {
+            uint64_t dead_path_id = user_path->path_id;
             printf("[warn] path_id=%"PRIu64" reached write failure threshold, closing path\n",
-                user_path->path_id);
+                dead_path_id);
             user_path->is_active = 0;
+            user_path->prepared = 0;
+            user_path->path_id = XQC_MINI_PATH_ID_INVALID;
+            user_path->consecutive_write_failures = 0;
+
+            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+                xqc_mini_cli_stop_path_rx_thread(user_path);
+            }
+
+            if (user_path->ev_socket) {
+                event_del(user_path->ev_socket);
+                event_free(user_path->ev_socket);
+                user_path->ev_socket = NULL;
+            }
+            if (user_path->fd >= 0) {
+                close(user_path->fd);
+                user_path->fd = -1;
+            }
+
             if (user_conn->active_path_cnt > 0) {
                 user_conn->active_path_cnt--;
             }
-            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, user_path->path_id);
+            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, dead_path_id);
+            xqc_mini_cli_try_rebuild_paths(user_conn);
+
             xqc_engine_main_logic(user_conn->ctx->engine);
             return XQC_SOCKET_EAGAIN;
         }
@@ -744,6 +762,25 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
     socket_idle_time = xqc_now() - last_socket_time;
     //printf("[stats] client connection idle time: %llu us, conn_timeout:%d,last_socket_time:%d\n", socket_idle_time,conn_timeout,last_socket_time);
     if (socket_idle_time < conn_timeout * 1000000) {
+        user_conn->timeout_defer_count = 0;
+        tv.tv_sec = conn_timeout;
+        tv.tv_usec = 0;
+        event_add(user_conn->ev_timeout, &tv);
+        return;
+    }
+
+    if (user_conn->active_requests > 0
+        && user_conn->completed_requests < user_conn->target_requests
+        && user_conn->active_path_cnt > 0
+        && user_conn->timeout_defer_count < 6)
+    {
+        user_conn->timeout_defer_count++;
+        printf("[warn] idle timeout deferred (%d/6), active=%d completed=%d/%d paths=%d\n",
+            user_conn->timeout_defer_count, user_conn->active_requests,
+            user_conn->completed_requests, user_conn->target_requests,
+            user_conn->active_path_cnt);
+        (void)xqc_h3_conn_send_ping(ctx->engine, &user_conn->cid, NULL);
+        user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
         tv.tv_sec = conn_timeout;
         tv.tv_usec = 0;
         event_add(user_conn->ev_timeout, &tv);
@@ -779,13 +816,16 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
     if (user_conn == NULL || user_conn->ctx == NULL) {
         return;
     }
+    if (!user_conn->handshake_finished) {
+        return;
+    }
+
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
 
     xqc_usec_t now = xqc_now();
     if (user_conn->handshake_finished
         && !user_conn->requests_launched
-        && user_conn->active_path_cnt > 1
         && (user_conn->last_path_probe_ping_time == 0
             || now - user_conn->last_path_probe_ping_time >= 1000000))
 
@@ -807,8 +847,7 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
         }
     }
 
-    tv.tv_sec = 0;
-    tv.tv_usec = 200000;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
     event_add(user_conn->ev_path_retry, &tv);
 }
-

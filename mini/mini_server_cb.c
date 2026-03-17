@@ -495,7 +495,7 @@ xqc_mini_svr_compute_stream_segment(int stream_count, int stream_index,
     //     start += (size_t)stream_index;
     // } else {
     //     start += remainder;
-    size_t start = (size_t)stream_index * XQC_MINI_SVR_STREAM_RANGE_SIZE;
+    size_t start = (size_t)stream_index * stream_range_size;
     if (start >= total_size) {
         *offset = total_size;
         *length = 0;
@@ -519,23 +519,30 @@ xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream)
     char output_path[PATH_LEN];
     xqc_mini_svr_resolve_upload_path(ctx, output_path, sizeof(output_path));
     const char *output_file = output_path[0] != '\0' ? output_path : SERVER_OUTPUT_FILE;
+    int tracked_stream_count = user_stream->stream_count;
+    if (tracked_stream_count <= 0) {
+        tracked_stream_count = 1;
+    }
+    if (tracked_stream_count > XQC_MINI_SVR_MAX_STREAMS) {
+        tracked_stream_count = XQC_MINI_SVR_MAX_STREAMS;
+    }
 
     if (!g_svr_file_state.initialized
-        || g_svr_file_state.expected_streams != user_stream->stream_count
+        || g_svr_file_state.expected_streams != tracked_stream_count
         || g_svr_file_state.total_size != user_stream->total_file_size
         || strncmp(g_svr_file_state.output_path, output_file,
             sizeof(g_svr_file_state.output_path)) != 0) {
 
-        xqc_mini_svr_reset_file_state(user_stream->stream_count,
+        xqc_mini_svr_reset_file_state(tracked_stream_count,
             user_stream->total_file_size,output_file);
     }
 
     user_stream->file_generation = g_svr_file_state.generation;
 
-    if (user_stream->recv_body_fp == NULL) {
-        user_stream->recv_body_fp = fopen(output_file, "wb+");
-        if (user_stream->recv_body_fp == NULL) {
-            perror("fopen");
+    if (user_stream->recv_body_fd < 0) {
+        user_stream->recv_body_fd = open(output_file, O_RDWR);
+        if (user_stream->recv_body_fd < 0) {
+            perror("open");
             printf("[error] failed to open output file '%s'\n", output_file);
             return XQC_ERROR;
         }
@@ -900,6 +907,7 @@ xqc_mini_svr_h3_request_create_notify(xqc_h3_request_t *h3_request, void *strm_u
     user_stream->response_prepared = 0;
     user_stream->use_file_response = 0;
     user_stream->send_body_fp = NULL;
+    user_stream->recv_body_fd = -1;
     user_stream->static_response[0] = '\0';
     user_stream->request_path[0] = '\0';
     user_stream->resolved_path[0] = '\0';
@@ -920,9 +928,9 @@ xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_us
     printf("[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
 
     xqc_mini_svr_user_stream_t *user_stream = (xqc_mini_svr_user_stream_t*)strm_user_data;
-    if (user_stream->recv_body_fp) {
-        fclose(user_stream->recv_body_fp);
-        user_stream->recv_body_fp = NULL;
+    if (user_stream->recv_body_fd >= 0) {
+        close(user_stream->recv_body_fd);
+        user_stream->recv_body_fd = -1;
     }
     if (user_stream->send_body_fp) {
         fclose(user_stream->send_body_fp);
@@ -1245,7 +1253,7 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             return XQC_ERROR;
         }
 
-        if (user_stream->recv_body_fp == NULL) {
+        if (user_stream->recv_body_fd < 0) {
             if (xqc_mini_svr_prepare_output_file(user_stream) != XQC_OK) {
                 return XQC_ERROR;
             }
@@ -1261,14 +1269,10 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                 return XQC_OK;
             }
 
-            if (fseek(user_stream->recv_body_fp,
-                    (long)(user_stream->stream_offset + user_stream->recv_body_len), SEEK_SET) != 0) {
-                perror("fseek");
-                return XQC_ERROR;
-            }
-            size_t written = fwrite(recv_buff, 1, (size_t)read, user_stream->recv_body_fp);
-            if (written != (size_t)read) {
-                perror("fwrite");
+            off_t write_off = (off_t)(user_stream->stream_offset + user_stream->recv_body_len);
+            ssize_t written = pwrite(user_stream->recv_body_fd, recv_buff, (size_t)read, write_off);
+            if (written != read) {
+                perror("pwrite");
                 return XQC_ERROR;
             }
 
@@ -1287,10 +1291,12 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
     if (user_stream->fin_received &&
         user_stream->recv_body_len >= user_stream->expected_content_length) {
 
-        if (user_stream->recv_body_fp) {
-            fflush(user_stream->recv_body_fp);
-            fclose(user_stream->recv_body_fp);
-            user_stream->recv_body_fp = NULL;
+        if (user_stream->recv_body_fd >= 0) {
+            if (fsync(user_stream->recv_body_fd) != 0) {
+                perror("fsync");
+            }
+            close(user_stream->recv_body_fd);
+            user_stream->recv_body_fd = -1;
         }
         double duration_ms = (user_stream->end_time.tv_sec - user_stream->start_time.tv_sec) * 1000.0 +
                          (user_stream->end_time.tv_usec - user_stream->start_time.tv_usec) / 1000.0;

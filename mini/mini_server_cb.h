@@ -22,7 +22,7 @@
 
 typedef struct xqc_mini_svr_user_stream_s {
     xqc_h3_request_t           *h3_request;
-    FILE                        *recv_body_fp;
+    int                          recv_body_fd;
     FILE                        *send_body_fp;
     size_t                       expected_content_length;
     int                          fin_received;
