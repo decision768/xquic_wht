@@ -1,1 +1,0 @@
-/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux/aarch64-oe-linux-gcc --sysroot=/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm -std=c99 -pedantic -D_DEFAULT_SOURCE -rdynamic "CMakeFiles/zlog-chk-conf.dir/zlog-chk-conf.c.o" -o CMakeFiles/CMakeRelink.dir/zlog-chk-conf   -L/home/admin123/zlog-1.2.18/build_aarch64/lib  ../lib/libzlog.so.1.2.12 

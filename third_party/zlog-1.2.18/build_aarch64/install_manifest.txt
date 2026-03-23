@@ -1,6 +1,0 @@
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/lib/libzlog.so.1.2.12
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/lib/libzlog.so.1
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/lib/libzlog.so
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/lib/libzlog.a
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/bin/zlog-chk-conf
-/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr/include/zlog.h

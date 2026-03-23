@@ -1,9 +1,0 @@
-prefix=/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207/sysroots_pvm/usr
-exec_prefix=${prefix}
-libdir=${exec_prefix}/lib
-includedir=${prefix}/include
-
-Name: OpenSSL
-Description: Secure Sockets Layer and cryptography libraries and tools
-Version: 1.1.1h
-Requires: libssl libcrypto
