@@ -487,10 +487,10 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
-    settings->adaptive_ack_frequency = 0;
-    settings->ack_frequency = 1;      
+    settings->adaptive_ack_frequency = 1;
+    //settings->ack_frequency = 2;      
     // settings->max_ack_delay = 5;
-    //settings->mp_ack_on_any_path = 1;
+    settings->mp_ack_on_any_path = 1;
 
     settings->enable_multipath = args->quic_cfg.multipath;
     //settings->enable_stream_rate_limit = 1;
@@ -499,6 +499,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->recv_rate_bytes_per_sec = 0;
     //settings->max_datagram_frame_size = 1350;
     settings->mp_ping_on = 1;
+    settings->standby_path_probe_timeout = 200;
     settings->mp_enable_reinjection = 1;
 }
 // 初始化 HTTP3 回调与上下文
