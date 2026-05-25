@@ -438,6 +438,9 @@ xqc_mini_svr_get_cc_cb(xqc_mini_svr_args_t *args)
     case CC_TYPE_CUBIC:
         ccc = xqc_cubic_cb;
         break;
+    // case CC_TYPE_BBR_V2:
+    //     ccc = xqc_bbr2_cb;
+    //     break;
     default:
         break;
     }
@@ -482,15 +485,14 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .spurious_loss_detect_on = 1,
         .init_idle_time_out = 60000,
         .enable_multipath = args->quic_cfg.multipath,
-        .reinj_ctl_callback = xqc_deadline_reinj_ctl_cb,
         .scheduler_callback = sched,
-        .standby_path_probe_timeout = 200,
+        .standby_path_probe_timeout = 1000,
         .adaptive_ack_frequency = 1,
         .anti_amplification_limit = 4,
         .recv_rate_bytes_per_sec = 0,
         .mp_ack_on_any_path = 1,
         .mp_enable_reinjection = 1,
-        //.ack_frequency = 2,
+        // .ack_frequency = 1,
         // .enable_stream_rate_limit = 1,
         .mp_ping_on = 1,
         .init_recv_window =  64 * 1024 * 1024,  // ✅ 2GB 接收窗口

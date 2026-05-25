@@ -257,6 +257,7 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     if (user_conn->completed_requests < user_conn->target_requests) {
         if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
             printf("[error] schedule next request round failed\n");
+            xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
         }
     }
 
@@ -471,6 +472,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             if (user_conn->next_stream_index < user_conn->target_requests) {
                 if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
                     printf("[error] schedule next GET round failed\n");
+                    xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
                 }
             }
         }
@@ -588,6 +590,7 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
 
     if (user_path == NULL || !user_path->is_active || user_path->fd < 0) {
         xqc_mini_cli_try_rebuild_paths(user_conn);
+        xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
         return XQC_SOCKET_EAGAIN;
     }
 
@@ -655,6 +658,7 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
             }
             xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, dead_path_id);
             xqc_mini_cli_try_rebuild_paths(user_conn);
+            xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
 
             xqc_engine_main_logic(user_conn->ctx->engine);
             return XQC_SOCKET_EAGAIN;
@@ -769,7 +773,8 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
         return;
     }
 
-    if (user_conn->active_requests > 0
+    if ((user_conn->active_requests > 0
+            || user_conn->next_stream_index < user_conn->target_requests)
         && user_conn->completed_requests < user_conn->target_requests
         && user_conn->active_path_cnt > 0
         && user_conn->timeout_defer_count < 6)
@@ -779,10 +784,19 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
             user_conn->timeout_defer_count, user_conn->active_requests,
             user_conn->completed_requests, user_conn->target_requests,
             user_conn->active_path_cnt);
+        if (user_conn->requests_launched
+            && user_conn->active_requests < user_conn->max_concurrent_requests
+            && user_conn->next_stream_index < user_conn->target_requests)
+        {
+            if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+                printf("[warn] timeout retry schedule failed, active=%d next=%d target=%d\n",
+                    user_conn->active_requests, user_conn->next_stream_index,
+                    user_conn->target_requests);
+            }
+        }
         (void)xqc_h3_conn_send_ping(ctx->engine, &user_conn->cid, NULL);
-        user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
-        tv.tv_sec = conn_timeout;
-        tv.tv_usec = 0;
+        tv.tv_sec = (long)(XQC_MINI_TIMEOUT_DEFER_CHECK_USEC / 1000000);
+        tv.tv_usec = (long)(XQC_MINI_TIMEOUT_DEFER_CHECK_USEC % 1000000);
         event_add(user_conn->ev_timeout, &tv);
         return;
     }
@@ -817,6 +831,7 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
         return;
     }
     if (!user_conn->handshake_finished) {
+        xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_INTERVAL_USEC);
         return;
     }
 
@@ -825,9 +840,9 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
     xqc_usec_t now = xqc_now();
     if (user_conn->handshake_finished
-        && !user_conn->requests_launched
+        && user_conn->active_path_cnt < xqc_mini_cli_get_target_path_count(user_conn)
         && (user_conn->last_path_probe_ping_time == 0
-            || now - user_conn->last_path_probe_ping_time >= 1000000))
+            || now - user_conn->last_path_probe_ping_time >= XQC_MINI_PATH_PROBE_PING_INTERVAL_USEC))
 
     {
         xqc_int_t ping_ret = xqc_h3_conn_send_ping(user_conn->ctx->engine,
@@ -847,7 +862,16 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
         }
     }
 
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    event_add(user_conn->ev_path_retry, &tv);
+    if (user_conn->requests_launched
+        && user_conn->active_requests < user_conn->max_concurrent_requests
+        && user_conn->next_stream_index < user_conn->target_requests)
+    {
+        if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+            printf("[warn] periodic request reschedule failed, active=%d next=%d target=%d\n",
+                user_conn->active_requests, user_conn->next_stream_index,
+                user_conn->target_requests);
+        }
+    }
+
+    xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_INTERVAL_USEC);
 }

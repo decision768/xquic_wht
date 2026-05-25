@@ -31,6 +31,7 @@
 #include "src/transport/xqc_packet.h"
 #include "src/transport/xqc_fec.h"
 #include "src/transport/xqc_fec_scheme.h"
+#include "src/transport/scheduler/xqc_scheduler_common.h"
 #include "src/tls/xqc_tls.h"
 #include <inttypes.h>
 
@@ -2703,6 +2704,8 @@ xqc_conn_schedule_start(xqc_connection_t *conn)
     if (!conn->enable_multipath) {
         return;
     }
+
+    xqc_scheduler_handle_path_probe(conn);
 
     if (conn->scheduler_callback->xqc_scheduler_handle_conn_event) {
         conn->scheduler_callback->xqc_scheduler_handle_conn_event(conn->scheduler, conn, XQC_SCHED_EVENT_CONN_ROUND_START, NULL);

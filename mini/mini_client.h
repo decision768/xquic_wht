@@ -51,6 +51,11 @@
 #define XQC_MINI_PATH_ID_INVALID ((uint64_t)-1)
 #define XQC_MINI_INTERFACE_NAME_MAX_LEN 64
 #define XQC_SOCKET_READ_BUDGET_PER_EVENT 32
+#define XQC_MINI_PATH_RETRY_INTERVAL_USEC 200000
+#define XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC 20000
+#define XQC_MINI_PATH_PROBE_PING_INTERVAL_USEC 200000
+#define XQC_MINI_PATH_RECOVER_PROBE_INTERVAL_USEC 200000
+#define XQC_MINI_TIMEOUT_DEFER_CHECK_USEC 200000
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
 #define TOKEN_FILE                  "token"
@@ -398,6 +403,7 @@ int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn);
+void xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us);
 
 void xqc_mini_cli_stop_path_rx_thread(xqc_mini_cli_user_path_t *path);
 #endif

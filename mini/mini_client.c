@@ -63,7 +63,7 @@ xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn)
         }
 
         if (path->last_recover_probe_time != 0
-            && now - path->last_recover_probe_time < 1000 * 1000) {
+            && now - path->last_recover_probe_time < XQC_MINI_PATH_RECOVER_PROBE_INTERVAL_USEC) {
             continue;
         }
         path->last_recover_probe_time = now;
@@ -80,6 +80,20 @@ xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn)
                 path->interface_name, i);
         }
     }
+}
+
+void
+xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us)
+{
+    if (user_conn == NULL || user_conn->ev_path_retry == NULL) {
+        return;
+    }
+
+    struct timeval tv;
+    tv.tv_sec = (long)(delay_us / 1000000);
+    tv.tv_usec = (long)(delay_us % 1000000);
+    event_del(user_conn->ev_path_retry);
+    event_add(user_conn->ev_path_retry, &tv);
 }
 
 
@@ -462,6 +476,9 @@ xqc_mini_cli_get_cc_cb(xqc_mini_cli_args_t *args)
     case CC_TYPE_CUBIC:
         ccc = xqc_cubic_cb;
         break;
+    // case CC_TYPE_BBR_V2:
+    //     ccc = xqc_bbr2_cb;
+    //     break;
     default:
         break;
     }
@@ -488,7 +505,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->scheduler_callback = sched;
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
     settings->adaptive_ack_frequency = 1;
-    //settings->ack_frequency = 2;      
+    // settings->ack_frequency = 1;      
     // settings->max_ack_delay = 5;
     settings->mp_ack_on_any_path = 1;
 
@@ -499,7 +516,6 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->recv_rate_bytes_per_sec = 0;
     //settings->max_datagram_frame_size = 1350;
     settings->mp_ping_on = 1;
-    settings->standby_path_probe_timeout = 200;
     settings->mp_enable_reinjection = 1;
 }
 // 初始化 HTTP3 回调与上下文
@@ -2125,10 +2141,8 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->ev_timeout = event_new(ctx->eb, -1, 0, xqc_mini_cli_timeout_callback, user_conn);
     event_add(user_conn->ev_timeout, &tv);
     /* set path retry timer */
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
     user_conn->ev_path_retry = event_new(ctx->eb, -1, 0, xqc_mini_cli_path_retry_callback, user_conn);
-    event_add(user_conn->ev_path_retry, &tv);
+    xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_INTERVAL_USEC);
 
 
     

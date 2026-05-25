@@ -1388,16 +1388,15 @@ xqc_int_t
 xqc_path_standby_probe(xqc_path_ctx_t *path)
 {
     xqc_connection_t *conn = path->parent_conn;
-
-    xqc_int_t ret = xqc_path_send_ping_to_probe(path, XQC_PNS_APP_DATA, 
+    xqc_int_t ret = xqc_path_send_ping_to_probe(path, XQC_PNS_APP_DATA,
                                                 XQC_PATH_SPECIFIED_BY_PQP);
-    if (ret != XQC_OK) {
-        return ret;
+    if (ret == XQC_OK) {
+        path->path_last_rtt_probe_time = xqc_monotonic_timestamp();
+        path->standby_probe_count++;
+        xqc_log(conn->log, XQC_LOG_DEBUG, "|PING|path:%ui|", path->path_id);
     }
 
-    xqc_log(conn->log, XQC_LOG_DEBUG, "|PING|path:%ui|", path->path_id);
-    path->standby_probe_count++;
-    return XQC_OK;
+    return ret;
 }
 
 xqc_path_perf_class_t 

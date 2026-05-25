@@ -146,6 +146,7 @@ struct xqc_path_ctx_s {
     /* path backup mode */
     uint32_t            standby_probe_count;
     uint32_t            app_path_status_changed_count;
+    xqc_usec_t          path_last_rtt_probe_time;
 
     /* PTMUD */
     size_t              curr_pkt_out_size;
@@ -263,5 +264,4 @@ double xqc_path_recent_loss_rate(xqc_path_ctx_t *path);
 double xqc_conn_recent_loss_rate(xqc_connection_t *conn);
 
 #endif /* XQC_MULTIPATH_H */
-
 

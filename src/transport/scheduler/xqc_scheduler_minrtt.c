@@ -6,6 +6,7 @@
 #include "src/transport/scheduler/xqc_scheduler_minrtt.h"
 #include "src/transport/scheduler/xqc_scheduler_common.h"
 #include "src/transport/xqc_send_ctl.h"
+#include "src/transport/xqc_multipath.h"
 
 
 static size_t
@@ -34,6 +35,12 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
 
     /* min RTT */
     uint64_t path_srtt = 0;
+    uint64_t path_bw = 0;
+    double loss_rate = 0;
+    uint32_t pto_count = 0;
+    uint64_t bytes_in_flight = 0;
+    uint32_t recent_send0 = 0, recent_send1 = 0;
+    uint32_t recent_lost0 = 0, recent_lost1 = 0;
     xqc_bool_t reached_cwnd_check = XQC_FALSE;
     xqc_bool_t path_can_send = XQC_FALSE;
 
@@ -50,6 +57,17 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        send_ctl = path->path_send_ctl;
+        path_srtt = xqc_send_ctl_get_srtt(send_ctl);
+        path_bw = xqc_send_ctl_get_est_bw(send_ctl);
+        loss_rate = xqc_path_recent_loss_rate(path);
+        pto_count = send_ctl->ctl_pto_count;
+        bytes_in_flight = send_ctl->ctl_bytes_in_flight;
+        recent_send0 = send_ctl->ctl_recent_send_count[0];
+        recent_send1 = send_ctl->ctl_recent_send_count[1];
+        recent_lost0 = send_ctl->ctl_recent_lost_count[0];
+        recent_lost1 = send_ctl->ctl_recent_lost_count[1];
+        path_can_send = XQC_FALSE;
 
         path_class = xqc_path_get_perf_class(path);
         
@@ -84,8 +102,6 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
             *cc_blocked = XQC_FALSE;
         }
 
-        path_srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
-        
         if (best_path[path_class] == NULL 
             || path_srtt < best_path[path_class]->path_send_ctl->ctl_srtt)
         {
@@ -94,10 +110,12 @@ xqc_minrtt_scheduler_get_path(void *scheduler,
 
 skip_path:
         xqc_log(conn->log, XQC_LOG_DEBUG, 
-                "|path srtt|conn:%p|path_id:%ui|path_srtt:%ui|path_class:%d|"
-                "can_send:%d|path_status:%d|path_state:%d|reinj:%d|"
+                "|minrtt scheduler|conn:%p|path_id:%ui|path_srtt:%ui|path_bw:%ui|"
+                "loss_rate:%.2f|pto_cnt:%ud|path_class:%d|can_send:%d|"
+                "path_status:%d|path_state:%d|reinj:%d|"
                 "pkt_path_id:%ui|best_path:%i|", 
-                conn, path->path_id, path_srtt, path_class, path_can_send,
+                conn, path->path_id, path_srtt, path_bw, loss_rate, pto_count,
+                path_class, path_can_send,
                 path->app_path_status, path->path_state, reinject, 
                 packet_out->po_path_id,
                 best_path[path_class] ? best_path[path_class]->path_id : -1);
@@ -110,11 +128,12 @@ skip_path:
     {
         if (best_path[path_class] != NULL) {
             xqc_log(conn->log, XQC_LOG_DEBUG, "|best path:%ui|frame_type:%s|"
-                    "pn:%ui|size:%ud|reinj:%d|path_class:%d|",
+                    "pn:%ui|size:%ud|reinj:%d|path_class:%d|selected_srtt:%ui|",
                     best_path[path_class]->path_id, 
                     xqc_frame_type_2_str(conn->engine, packet_out->po_frame_types),
                     packet_out->po_pkt.pkt_num,
-                    packet_out->po_used_size, reinject, path_class);
+                    packet_out->po_used_size, reinject, path_class,
+                    best_path[path_class]->path_send_ctl->ctl_srtt);
             return best_path[path_class];
         }
     }
