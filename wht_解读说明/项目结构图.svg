@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1120" viewBox="0 0 1280 1120">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#3f4a5a"/>
+    </marker>
+    <style>
+      .title { font: 700 30px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .subtitle { font: 15px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #5b6677; }
+      .box { fill: #ffffff; stroke: #9aa7ba; stroke-width: 1.4; rx: 10; }
+      .root { fill: #1f6feb; stroke: #174ea6; }
+      .core { fill: #edf6ff; stroke: #6aa6df; }
+      .app { fill: #f2fbf5; stroke: #79b889; }
+      .support { fill: #fff7e8; stroke: #d9a441; }
+      .data { fill: #f7f2ff; stroke: #a986d6; }
+      .label { font: 700 18px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #1f2937; }
+      .rootText { font: 700 21px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #ffffff; }
+      .body { font: 14px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #334155; }
+      .small { font: 13px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #475569; }
+      .line { stroke: #3f4a5a; stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="1120" fill="#f6f8fb"/>
+  <text x="48" y="54" class="title">xquic_wht 项目结构图</text>
+  <text x="48" y="82" class="subtitle">核心源码、公共 API、示例程序、GX 压测、构建与依赖的目录定位</text>
+
+  <rect x="530" y="120" width="220" height="64" class="box root"/>
+  <text x="640" y="158" text-anchor="middle" class="rootText">xquic_wht</text>
+
+  <path d="M 640 184 L 640 238" class="line"/>
+  <path d="M 640 238 L 205 238 L 205 278" class="line"/>
+  <path d="M 640 238 L 515 238 L 515 278" class="line"/>
+  <path d="M 640 238 L 820 238 L 820 278" class="line"/>
+  <path d="M 640 238 L 1085 238 L 1085 278" class="line"/>
+
+  <rect x="60" y="278" width="290" height="124" class="box support"/>
+  <text x="205" y="308" text-anchor="middle" class="label">根目录配置</text>
+  <text x="82" y="338" class="body">README.md / docs/: 项目说明</text>
+  <text x="82" y="362" class="body">CMakeLists.txt / build.sh: 构建入口</text>
+  <text x="82" y="386" class="body">server.crt / server.key: 测试证书</text>
+
+  <rect x="390" y="278" width="250" height="124" class="box core"/>
+  <text x="515" y="308" text-anchor="middle" class="label">include/xquic</text>
+  <text x="412" y="338" class="body">xquic.h: QUIC Engine API</text>
+  <text x="412" y="362" class="body">xqc_http3.h: HTTP/3 API</text>
+  <text x="412" y="386" class="body">typedef / errno / configure</text>
+
+  <rect x="690" y="278" width="260" height="124" class="box core"/>
+  <text x="820" y="308" text-anchor="middle" class="label">src 核心库实现</text>
+  <text x="712" y="338" class="body">QUIC 传输层 + HTTP/3</text>
+  <text x="712" y="362" class="body">TLS/加密 + 拥塞控制</text>
+  <text x="712" y="386" class="body">基础工具与协议数据结构</text>
+
+  <rect x="980" y="278" width="210" height="124" class="box app"/>
+  <text x="1085" y="308" text-anchor="middle" class="label">mini 示例程序</text>
+  <text x="1002" y="338" class="body">mini_client</text>
+  <text x="1002" y="362" class="body">mini_server</text>
+  <text x="1002" y="386" class="body">配置和公共工具</text>
+
+  <path d="M 820 402 L 820 462" class="line"/>
+  <path d="M 820 462 L 180 462 L 180 500" class="line"/>
+  <path d="M 820 462 L 395 462 L 395 500" class="line"/>
+  <path d="M 820 462 L 640 462 L 640 500" class="line"/>
+  <path d="M 820 462 L 880 462 L 880 500" class="line"/>
+  <path d="M 820 462 L 1090 462 L 1090 500" class="line"/>
+
+  <rect x="50" y="500" width="260" height="148" class="box core"/>
+  <text x="180" y="530" text-anchor="middle" class="label">src/common</text>
+  <text x="74" y="562" class="body">日志、时间、随机数、字符串</text>
+  <text x="74" y="586" class="body">Hash、队列、红黑树、FIFO</text>
+  <text x="74" y="610" class="body">buffer、内存池、对象管理</text>
+  <text x="74" y="634" class="body">varint、huffman、ring buffer</text>
+
+  <rect x="340" y="500" width="290" height="148" class="box core"/>
+  <text x="485" y="530" text-anchor="middle" class="label">src/transport</text>
+  <text x="364" y="562" class="body">engine、conn、stream</text>
+  <text x="364" y="586" class="body">packet、frame、CID、timer</text>
+  <text x="364" y="610" class="body">multipath、datagram、FEC</text>
+  <text x="364" y="634" class="body">scheduler / reinjection_control</text>
+
+  <rect x="660" y="500" width="260" height="148" class="box core"/>
+  <text x="790" y="530" text-anchor="middle" class="label">src/http3</text>
+  <text x="684" y="562" class="body">H3 ctx / conn / request / stream</text>
+  <text x="684" y="586" class="body">HTTP/3 frame 与 header</text>
+  <text x="684" y="610" class="body">QPACK encoder / decoder</text>
+  <text x="684" y="634" class="body">Datagram / Bytestream 扩展</text>
+
+  <rect x="950" y="500" width="260" height="148" class="box core"/>
+  <text x="1080" y="530" text-anchor="middle" class="label">src/tls + congestion</text>
+  <text x="974" y="562" class="body">TLS ctx、HKDF、crypto</text>
+  <text x="974" y="586" class="body">BabaSSL / BoringSSL 适配</text>
+  <text x="974" y="610" class="body">Cubic、BBR、可选 Reno/BBR2</text>
+  <text x="974" y="634" class="body">Copa、Unlimited 等算法</text>
+
+  <path d="M 1085 402 L 1085 704 L 180 704 L 180 744" class="line"/>
+  <path d="M 1085 402 L 1085 704 L 500 704 L 500 744" class="line"/>
+  <path d="M 1085 402 L 1085 704 L 820 704 L 820 744" class="line"/>
+
+  <rect x="50" y="744" width="260" height="132" class="box app"/>
+  <text x="180" y="774" text-anchor="middle" class="label">mini_client</text>
+  <text x="74" y="806" class="body">main 初始化参数和 engine</text>
+  <text x="74" y="830" class="body">H3 connect / request send</text>
+  <text x="74" y="854" class="body">libevent 驱动 socket 与定时器</text>
+
+  <rect x="370" y="744" width="260" height="132" class="box app"/>
+  <text x="500" y="774" text-anchor="middle" class="label">mini_server</text>
+  <text x="394" y="806" class="body">server engine 与 UDP socket</text>
+  <text x="394" y="830" class="body">处理 H3 请求并发送响应</text>
+  <text x="394" y="854" class="body">使用 server.crt / server.key</text>
+
+  <rect x="690" y="744" width="260" height="132" class="box data"/>
+  <text x="820" y="774" text-anchor="middle" class="label">mini 配置</text>
+  <text x="714" y="806" class="body">client_config.txt</text>
+  <text x="714" y="830" class="body">server_config.txt</text>
+  <text x="714" y="854" class="body">common.c/h 共享工具</text>
+
+  <path d="M 640 184 L 640 930 L 205 930 L 205 966" class="line"/>
+  <path d="M 640 930 L 515 930 L 515 966" class="line"/>
+  <path d="M 640 930 L 820 930 L 820 966" class="line"/>
+  <path d="M 640 930 L 1085 930 L 1085 966" class="line"/>
+
+  <rect x="60" y="966" width="290" height="104" class="box app"/>
+  <text x="205" y="996" text-anchor="middle" class="label">GX</text>
+  <text x="82" y="1028" class="body">stress_gx.py / ssh_gx.py / serial_at.py</text>
+  <text x="82" y="1052" class="body">设备压测、远端 mini_client、日志汇总</text>
+
+  <rect x="390" y="966" width="250" height="104" class="box support"/>
+  <text x="515" y="996" text-anchor="middle" class="label">scripts / interop / cmake</text>
+  <text x="412" y="1028" class="body">测试、日志分析、互操作</text>
+  <text x="412" y="1052" class="body">CMake 查找模块和工具链</text>
+
+  <rect x="690" y="966" width="260" height="104" class="box data"/>
+  <text x="820" y="996" text-anchor="middle" class="label">lib</text>
+  <text x="714" y="1028" class="body">aarch64 / x86 第三方依赖快照</text>
+  <text x="714" y="1052" class="body">体量大，排查依赖时再进入</text>
+
+  <rect x="980" y="966" width="210" height="104" class="box data"/>
+  <text x="1085" y="996" text-anchor="middle" class="label">build / log*</text>
+  <text x="1002" y="1028" class="body">构建产物与历史日志</text>
+  <text x="1002" y="1052" class="body">不是主线源码入口</text>
+</svg>

@@ -1,0 +1,41 @@
+flowchart TD
+    R["xquic_wht"]
+
+    R --> ROOT["根目录配置与说明"]
+    ROOT --> README["README.md / docs/: 官方说明、API、FAQ、平台文档"]
+    ROOT --> CMAKE["CMakeLists.txt / CMakeOptions.txt / build.sh: 构建入口"]
+    ROOT --> CERT["server.crt / server.key: mini_server 默认证书"]
+
+    R --> API["include/xquic"]
+    API --> API1["xquic.h: QUIC Engine 公共 API"]
+    API --> API2["xqc_http3.h: HTTP/3 公共 API"]
+    API --> API3["xquic_typedef.h / xqc_errno.h / xqc_configure.h"]
+
+    R --> SRC["src: XQUIC 核心库实现"]
+    SRC --> COMMON["common: 日志、时间、随机数、字符串、基础容器"]
+    SRC --> TRANSPORT["transport: QUIC 连接、流、包、帧、CID、定时器、多路径"]
+    TRANSPORT --> SCHED["scheduler: 多路径调度策略"]
+    TRANSPORT --> REINJ["reinjection_control: 重传/重注入控制"]
+    TRANSPORT --> FEC["fec_schemes: FEC 编码方案"]
+    SRC --> TLS["tls: TLS/加密抽象与 BoringSSL/BabaSSL 适配"]
+    SRC --> H3["http3: HTTP/3、QPACK、扩展 Datagram/Bytestream"]
+    SRC --> CC["congestion_control: Cubic、BBR、BBR2、Reno、Copa 等"]
+
+    R --> MINI["mini: 示例客户端/服务端"]
+    MINI --> MC["mini_client_main.c / mini_client.c / mini_client_cb.c"]
+    MINI --> MS["mini_server_main.c / mini_server.c / mini_server_cb.c"]
+    MINI --> MCFG["client_config.txt / server_config.txt"]
+    MINI --> MCOMMON["common.c/h: 示例公共配置和工具"]
+
+    R --> GX["GX: 设备压测工作流"]
+    GX --> GSTRESS["stress_gx.py: 5G1/5G2/Agg 压测编排"]
+    GX --> GSSH["ssh_gx.py: SSH 到设备、切配置、运行 mini_client、汇总日志"]
+    GX --> GSERIAL["serial_at.py: 串口 AT 控制 5G 模块"]
+    GX --> GLOG["gx_stress_*.log / log*: 历史运行和汇总日志"]
+    GX --> GMINI["mini_client: 设备侧可执行文件"]
+
+    R --> SCRIPTS["scripts: 测试、日志分析、符号导出脚本"]
+    R --> INTEROP["interop: QUIC interop Docker/endpoint 脚本"]
+    R --> CMAKE_DIR["cmake: CMake 查找模块和工具链文件"]
+    R --> LIB["lib: 本地第三方依赖快照/预编译产物"]
+    R --> BUILD["build: 本地构建产物，不是源码入口"]

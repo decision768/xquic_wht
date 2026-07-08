@@ -1,0 +1,49 @@
+flowchart LR
+    subgraph APP["应用与测试入口"]
+        GX["GX/stress_gx.py\n压测编排: Agg -> 5G2 -> Agg -> 5G1"]
+        SSH["GX/ssh_gx.py\nSSH 设备、切换远端配置、执行 mini_client"]
+        SERIAL["GX/serial_at.py\n串口 AT 控制 5G 模块上下线"]
+        MINI_C["mini_client\nHTTP/3 客户端示例/设备侧测试入口"]
+        MINI_S["mini_server\nHTTP/3 服务端示例"]
+    end
+
+    subgraph API["公共 API 层 include/xquic"]
+        XQUIC["xquic.h\nEngine/Connection/Stream/Transport API"]
+        H3API["xqc_http3.h\nHTTP/3 Connection/Request API"]
+    end
+
+    subgraph CORE["XQUIC 核心库 src"]
+        H3["http3\nHTTP/3、QPACK、Frame、Header、Datagram"]
+        TRANSPORT["transport\nEngine、Conn、Stream、Packet、Frame、CID、Multipath"]
+        CC["congestion_control\nCubic、BBR、可选 Reno/BBR2/Copa"]
+        TLS["tls\nTLS 上下文、HKDF、AEAD、SSL 适配"]
+        COMMON["common\n日志、时间、随机数、字符串、Hash、Buffer、工具容器"]
+    end
+
+    subgraph DEPS["外部依赖/系统能力"]
+        SSL["BabaSSL/Tongsuo 或 BoringSSL\n当前 CMake 默认 SSL_TYPE=babassl"]
+        EVENT["libevent\nmini 事件循环和 socket 事件"]
+        OS["Linux socket / UDP / SO_BINDTODEVICE\n多网卡与接口绑定"]
+    end
+
+    GX --> SERIAL
+    GX --> SSH
+    SSH --> MINI_C
+    MINI_C --> EVENT
+    MINI_S --> EVENT
+
+    MINI_C --> XQUIC
+    MINI_C --> H3API
+    MINI_S --> XQUIC
+    MINI_S --> H3API
+
+    H3API --> H3
+    XQUIC --> TRANSPORT
+    H3 --> TRANSPORT
+    TRANSPORT --> CC
+    TRANSPORT --> TLS
+    TRANSPORT --> COMMON
+    H3 --> COMMON
+    TLS --> SSL
+    MINI_C --> OS
+    MINI_S --> OS

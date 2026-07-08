@@ -1,0 +1,76 @@
+# 解读版本：当前板端客户端默认配置
+# 原始文件：C:\Users\DELL\Desktop\4.1 正式文件备份\xquic_file\client_config.txt
+# 场景判断：该文件内容与 client_config_get.txt 相同，属于 GET 下载 + rmnet_data0/usb0 双接口聚合配置。
+# 注意：3.0 mini_client 默认只读取运行目录下名为 client_config.txt 的文件。
+
+# server_addr 是客户端要连接的服务端 IP。
+# 当前值 124.70.219.194 是公网服务端地址；如果服务端 IP 变化，这里必须同步修改。
+server_addr=124.70.219.194
+
+# server_port 是服务端 QUIC 监听端口。
+# 必须与服务端 server_config.txt 里的 listen_port 一致。
+server_port=8443
+
+# request settings
+# method 指定 HTTP/3 请求方法。
+# GET 表示从服务端下载文件或资源。
+method=GET
+
+# stream_cnt 指定客户端请求并发流数量。
+# 当前为 8，表示最多并发 8 条请求流；3.0 代码里最大值受 XQC_MINI_MAX_STREAMS 限制。
+stream_cnt=8
+
+# send_data_len 是发送数据长度限制。
+# 当前被 # 注释，不生效；GET 下载场景通常不需要该项。
+#send_data_len=1048576000
+
+# algorithm settings
+# cc 是拥塞控制算法。
+# cubic 表示使用 CUBIC 拥塞控制；3.0 代码支持 bbr 和 cubic。
+cc=cubic
+
+# mp_sched 是多路径调度算法。
+# rap 表示使用 RAP 调度器；3.0 代码支持 minrtt、backup、balanced、rap、act、bw。
+mp_sched=rap
+
+# interface list (comma separated, up to MAX_PATH_CNT)
+# interfaces 指定客户端绑定使用的网络接口列表。
+# rmnet_data0,usb0 表示同时使用蜂窝数据接口 rmnet_data0 和 USB 网卡 usb0，属于双接口聚合测试。
+# 代码会按接口名绑定 socket；接口不存在或路由不通会导致对应路径不可用。
+interfaces=rmnet_data0,usb0
+
+# kernel socket buffers (bytes)
+# kernel_sndbuf 是内核 socket 发送缓冲区大小，单位字节。
+# 当前 16777216 = 16 MB。
+kernel_sndbuf=16777216
+
+# kernel_revbuf 是内核 socket 接收缓冲区大小，单位字节。
+# 字段名在代码里写作 revbuf，应理解为 recv buffer；当前 16777216 = 16 MB。
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+# user_send_buf_size 是用户态单次发送缓冲区大小。
+# GET 场景主要是接收数据，该值影响较小；当前 8192 = 8 KB。
+user_send_buf_size=8192
+
+# user_recv_buf_size 是用户态接收缓冲区大小。
+# GET 下载时比较关键；当前 65536 = 64 KB。
+user_recv_buf_size=65536
+
+# file settings
+# send_file 是 POST 上传时读取的本地文件路径。
+# 当前配置虽然是 GET，但该字段仍会被解析；GET 场景通常不会用它发送请求体。
+send_file=./download/kkk.txt
+
+# download_path 是 GET 下载数据保存到板端本地的路径。
+# 路径相对于 mini_client 的运行目录。
+download_path=./download/kkk.txt
+
+# download_target 是 GET 请求服务端的目标路径。
+# 代码会把该值写入请求 URL/path，因此这里会向服务端请求 /upload/ccc.bin。
+download_target=/upload/ccc.bin
+
+# use_zlog 控制是否使用 zlog。
+# 0 表示关闭 zlog，程序改用普通日志文件路径；这样可以减少对 zlog.conf 的依赖。
+use_zlog=0
+

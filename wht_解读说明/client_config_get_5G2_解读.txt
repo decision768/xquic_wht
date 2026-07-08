@@ -1,0 +1,61 @@
+# 解读版本：当前板端客户端 GET 5G2 单接口配置
+# 原始文件：C:\Users\DELL\Desktop\4.1 正式文件备份\xquic_file\client_config_get_5G2.txt
+# 场景判断：GET 下载 + 只绑定 usb0，常用于 5G2 单路测试。
+# 注意：如果 usb0 到公网服务端不通，即使配置能被 3.0 代码正确读取，测试也不会得到有效吞吐结果。
+
+# 客户端连接的公网服务端 IP。
+server_addr=124.70.219.194
+
+# 服务端 QUIC 端口。
+server_port=8443
+
+# request settings
+# GET 表示下载。
+method=GET
+
+# 下载并发流数量上限。
+stream_cnt=8
+
+# 注释项，不生效；GET 场景通常不用。
+#send_data_len=1048576000
+
+# algorithm settings
+# 拥塞控制：CUBIC。
+cc=cubic
+
+# 多路径调度器：RAP。
+# 当前只有 usb0 一个接口时，多路径调度空间有限，但该配置仍会被解析并设置。
+mp_sched=rap
+
+# interface list (comma separated, up to MAX_PATH_CNT)
+# 只使用 usb0。
+# 3.0 mini_client 会通过 SO_BINDTODEVICE 绑定该接口；接口不存在、权限不足或 usb0 路由不可达都会导致运行失败或无有效结果。
+interfaces=usb0
+
+# kernel socket buffers (bytes)
+# 内核发送缓冲区，16 MB。
+kernel_sndbuf=16777216
+
+# 内核接收缓冲区，16 MB。
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+# 用户态发送缓冲区，8 KB。
+user_send_buf_size=8192
+
+# 用户态接收缓冲区，64 KB。
+user_recv_buf_size=65536
+
+# file settings
+# POST 上传源文件路径；GET 下通常不使用。
+send_file=./download/kkk.txt
+
+# GET 下载保存路径。
+download_path=./download/kkk.txt
+
+# GET 请求目标路径。
+download_target=/upload/ccc.bin
+
+# 关闭 zlog。
+use_zlog=0
+

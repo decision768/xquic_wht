@@ -1,0 +1,62 @@
+# 解读版本：当前板端客户端 POST 5G2 单接口配置
+# 原始文件：C:\Users\DELL\Desktop\4.1 正式文件备份\xquic_file\client_config_post_5G2.txt
+# 场景判断：POST 上传 + 只绑定 usb0，常用于 5G2 单路测试。
+# 注意：该配置对 usb0 依赖最强；usb0 没有公网路由时，代码能读配置但测试无法正常完成。
+
+# 客户端连接的公网服务端 IP。
+server_addr=124.70.219.194
+
+# 服务端 QUIC 端口。
+server_port=8443
+
+# request settings
+# POST 表示上传。
+method=POST
+
+# 上传并发流数量。
+stream_cnt=4
+
+# 注释项，不生效；启用后限制发送数据长度。
+#send_data_len=1048576000
+
+# algorithm settings
+# 拥塞控制算法：BBR。
+cc=bbr
+
+# 多路径调度器：RAP。
+# 当前只配置 usb0，调度器仍会被设置，但没有第二条可用接口时不会形成双路聚合。
+mp_sched=rap
+
+# interface list (comma separated, up to MAX_PATH_CNT)
+# 只绑定 usb0。
+# 3.0 mini_client 会使用 SO_BINDTODEVICE；需要确认 usb0 存在、具备绑定权限、且能访问 124.70.219.194。
+interfaces=usb0
+
+# kernel socket buffers (bytes)
+# 内核发送缓冲区，16 MB。
+kernel_sndbuf=16777216
+
+# 内核接收缓冲区，16 MB。
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+# 用户态发送缓冲区，32 KB。
+user_send_buf_size=32768
+
+# 用户态接收缓冲区，32 KB。
+user_recv_buf_size=32768
+
+# file settings
+# POST 上传源文件路径。
+# 文件必须存在，并且大小不能为 0，才会产生有效上传数据。
+send_file=./download/kkk.txt
+
+# GET 下载保存路径；POST 下通常不使用。
+download_path=./download/kkk.txt
+
+# 请求目标路径。
+download_target=/upload/ccc.bin
+
+# 关闭 zlog。
+use_zlog=0
+

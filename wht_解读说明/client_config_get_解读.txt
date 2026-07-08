@@ -1,0 +1,66 @@
+# 解读版本：当前板端客户端 GET 聚合配置
+# 原始文件：C:\Users\DELL\Desktop\4.1 正式文件备份\xquic_file\client_config_get.txt
+# 场景判断：GET 下载 + rmnet_data0/usb0 双接口聚合。
+# 注意：如果由 3.0 mini_client 单独运行，需要先把本文件内容复制/替换为运行目录下的 client_config.txt。
+
+# server_addr 是客户端要连接的服务端 IP。
+# 当前值 124.70.219.194 是公网服务端地址。
+server_addr=124.70.219.194
+
+# server_port 是服务端 QUIC 监听端口。
+# 必须与服务端 listen_port=8443 一致。
+server_port=8443
+
+# request settings
+# GET 表示下载请求。
+method=GET
+
+# 并发请求流数量。
+# GET 模式下，代码会先发起首个请求，拿到总长度后再展开后续下载任务；该值控制并发上限。
+stream_cnt=8
+
+# 注释项，不生效。
+# 如果取消注释，表示限制发送数据长度；GET 场景一般不需要。
+#send_data_len=1048576000
+
+# algorithm settings
+# 拥塞控制算法：CUBIC。
+cc=cubic
+
+# 多路径调度算法：RAP。
+# 用于双接口聚合时决定数据在不同路径上的调度策略。
+mp_sched=rap
+
+# interface list (comma separated, up to MAX_PATH_CNT)
+# 双接口聚合：rmnet_data0 + usb0。
+# 两个接口都需要在板端存在，并且到 server_addr 有可用路由。
+interfaces=rmnet_data0,usb0
+
+# kernel socket buffers (bytes)
+# 内核发送缓冲区，16 MB。
+kernel_sndbuf=16777216
+
+# 内核接收缓冲区，16 MB。
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+# 用户态发送缓冲区，8 KB。
+user_send_buf_size=8192
+
+# 用户态接收缓冲区，64 KB。
+user_recv_buf_size=65536
+
+# file settings
+# POST 上传源文件路径；GET 配置中保留但通常不参与发送。
+send_file=./download/kkk.txt
+
+# GET 下载保存路径。
+download_path=./download/kkk.txt
+
+# GET 请求服务端文件路径。
+# 服务端会按 data_dir + upload/ccc.bin 查找该文件，除非路径被服务端代码特殊处理。
+download_target=/upload/ccc.bin
+
+# 关闭 zlog。
+use_zlog=0
+

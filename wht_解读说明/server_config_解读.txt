@@ -1,0 +1,53 @@
+# 解读版本：当前服务端配置
+# 原始文件：C:\Users\DELL\Desktop\4.1 正式文件备份\test_xquic_server\server_config.txt
+# 场景判断：服务端监听 8443，允许任意本地地址接入，GET 默认发送 hhh.bin，POST 上传落盘到 ./upload/ccc.bin。
+# 注意：3.0 mini_server 默认只读取运行目录下名为 server_config.txt 的文件。
+
+# listen_addr 是服务端绑定监听地址。
+# 0.0.0.0 表示监听本机所有 IPv4 网卡地址，适合公网服务器或多网卡环境。
+listen_addr=0.0.0.0
+
+# listen_port 是服务端 QUIC 监听端口。
+# 必须与客户端 server_port=8443 一致，并确保服务器安全组/防火墙放行 UDP 8443。
+listen_port=8443
+
+# data directory and default file
+# data_dir 是服务端读写文件的根目录。
+# . 表示 mini_server 当前运行目录。
+data_dir=.
+
+# default_send_file 是 GET 请求没有指定有效目标时的默认发送文件。
+# 当前为 hhh.bin，对应运行目录下 ./hhh.bin。
+default_send_file=hhh.bin
+
+# mp_sched 是服务端多路径调度算法。
+# minrtt 表示优先使用 RTT 更小的路径；3.0 代码支持 minrtt、backup、balanced、rap、act、bw。
+mp_sched=minrtt
+
+# kernel socket buffers (bytes)
+# kernel_sndbuf 是服务端内核 socket 发送缓冲区大小。
+# 当前 8192 = 8 KB，比 3.0 自带配置的 16 MB 小很多；如果下行吞吐偏低，可以重点关注该值。
+kernel_sndbuf=8192
+
+# kernel_revbuf 是服务端内核 socket 接收缓冲区大小。
+# 当前 16777216 = 16 MB。
+kernel_revbuf=16777216
+
+# user-space buffers (bytes)
+# user_send_buf_size 是服务端用户态发送缓冲区大小。
+# GET 下载时服务端发送数据，该值会影响单次读写块大小；当前 32768 = 32 KB。
+user_send_buf_size=32768
+
+# user_recv_buf_size 是服务端用户态接收缓冲区大小。
+# POST 上传时服务端接收数据，该值较关键；当前 32768 = 32 KB。
+user_recv_buf_size=32768
+
+# upload_path 是 POST 上传数据在服务端的保存路径。
+# 相对路径会基于 data_dir 拼接，因此当前实际落盘路径是 ./upload/ccc.bin。
+# 运行前应确认 ./upload 目录存在且 mini_server 有写权限。
+upload_path=./upload/ccc.bin
+
+# use_zlog 控制是否使用 zlog。
+# 0 表示关闭 zlog，减少对 zlog.conf 的依赖。
+use_zlog=0
+
