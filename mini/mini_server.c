@@ -546,7 +546,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .cong_ctrl_callback = ccc,
         .cc_params = {
             .customize_on = 1,
-            .init_cwnd = 128,
+            .init_cwnd = 100,
             .bbr_enable_lt_bw = 1,
         },
         .spurious_loss_detect_on = 1,

@@ -937,7 +937,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     memset(settings, 0, sizeof(xqc_conn_settings_t));
     settings->cong_ctrl_callback = ccc;
     settings->cc_params.customize_on = 1;
-    settings->cc_params.init_cwnd = 128;
+    settings->cc_params.init_cwnd = 100;
     //settings->so_sndbuf = 1024*1024;
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
