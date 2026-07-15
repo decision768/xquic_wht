@@ -659,7 +659,8 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     // printf("[report] xqc_mini_cli_write_socket_ex success size=%lu\n", size);
     if (res >= 0) {
         user_path->consecutive_write_failures = 0;
-        user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
+        __atomic_store_n(&user_conn->ctx->args->net_cfg.last_socket_time,
+                         xqc_now(), __ATOMIC_RELEASE);
     }
     else if (res != XQC_SOCKET_EAGAIN) {
         printf("[error] xqc_mini_cli_write_socket_ex failed, path_id=%"PRIu64", err=%s\n",
@@ -671,14 +672,12 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
             uint64_t dead_path_id = user_path->path_id;
             printf("[warn] path_id=%"PRIu64" reached write failure threshold, closing path\n",
                 dead_path_id);
+            xqc_mini_cli_stop_path_rx_thread(user_path);
+
             user_path->is_active = 0;
             user_path->prepared = 0;
             user_path->path_id = XQC_MINI_PATH_ID_INVALID;
             user_path->consecutive_write_failures = 0;
-
-            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
-                xqc_mini_cli_stop_path_rx_thread(user_path);
-            }
 
             if (user_path->ev_socket) {
                 event_del(user_path->ev_socket);
@@ -693,9 +692,26 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
             if (user_conn->active_path_cnt > 0) {
                 user_conn->active_path_cnt--;
             }
-            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, dead_path_id);
-            xqc_mini_cli_try_rebuild_paths(user_conn);
-            xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
+            if (user_conn->ctx->args->quic_cfg.multipath
+                && user_conn->handshake_finished && user_conn->active_path_cnt > 0)
+            {
+                xqc_int_t ret = xqc_conn_close_path(user_conn->ctx->engine,
+                                                    &user_conn->cid, dead_path_id);
+                if (ret != XQC_OK) {
+                    printf("[diag_rx_path_state] action=close_failed path_id=%" PRIu64
+                           " ret=%d reason=write_failure\n", dead_path_id, ret);
+                }
+                xqc_mini_cli_try_rebuild_paths(user_conn);
+                xqc_mini_cli_schedule_path_retry(user_conn,
+                    XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
+            } else {
+                xqc_int_t ret = xqc_h3_conn_close(user_conn->ctx->engine,
+                                                  &user_conn->cid);
+                if (ret != XQC_OK) {
+                    printf("[diag_rx_path_state] action=conn_close_failed ret=%d"
+                           " reason=write_failure\n", ret);
+                }
+            }
 
             xqc_engine_main_logic(user_conn->ctx->engine);
             return XQC_SOCKET_EAGAIN;
@@ -799,7 +815,8 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
     user_conn = (xqc_mini_cli_user_conn_t *)arg;
     ctx = user_conn->ctx;
     conn_timeout = ctx->args->net_cfg.conn_timeout;
-    xqc_usec_t last_socket_time = ctx->args->net_cfg.last_socket_time;
+    xqc_usec_t last_socket_time = __atomic_load_n(
+        &ctx->args->net_cfg.last_socket_time, __ATOMIC_ACQUIRE);
     socket_idle_time = xqc_now() - last_socket_time;
     //printf("[stats] client connection idle time: %llu us, conn_timeout:%d,last_socket_time:%d\n", socket_idle_time,conn_timeout,last_socket_time);
     if (socket_idle_time < conn_timeout * 1000000) {
@@ -866,6 +883,9 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
     struct timeval tv;
 
     if (user_conn == NULL || user_conn->ctx == NULL) {
+        return;
+    }
+    if (xqc_mini_cli_handle_failed_rx_threads(user_conn)) {
         return;
     }
     if (!user_conn->handshake_finished) {
