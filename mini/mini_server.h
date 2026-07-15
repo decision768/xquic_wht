@@ -148,6 +148,8 @@ typedef struct xqc_mini_svr_ctx_s {
 
 
 typedef struct xqc_mini_svr_user_conn_s {
+    struct xqc_mini_svr_user_conn_s *listener_conn;
+    int                     is_connection_scope;
     struct event           *ev_timeout;
     xqc_cid_t               cid;
     xqc_mini_svr_ctx_t     *ctx;
@@ -161,6 +163,13 @@ typedef struct xqc_mini_svr_user_conn_s {
     socklen_t               peer_addrlen;
 
     uint64_t                last_mp_state_log_us;
+
+    int                     get_submit_active;
+    int                     get_submit_expected_streams;
+    uint64_t                get_submit_start_us;
+    uint64_t                get_submit_last_us;
+    uint64_t                get_submit_streams;
+    uint64_t                get_submit_bytes;
 
 } xqc_mini_svr_user_conn_t;
 

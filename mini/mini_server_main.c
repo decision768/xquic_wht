@@ -53,11 +53,11 @@ void close_all(xqc_mini_svr_ctx_t* ctx, xqc_mini_svr_user_conn_t* user_conn){
 int main(int argc, char *argv[]){
     xqc_mini_svr_ctx_t svr_ctx = {0}, *ctx = &svr_ctx;
     xqc_mini_svr_args_t *args = NULL;
+    xqc_mini_svr_user_conn_t *user_conn = NULL;
 
     if(init_args(&args, ctx, argc, argv) ==XQC_ERROR){
         goto exit;
     }
-    xqc_mini_svr_user_conn_t *user_conn = NULL;
     user_conn = connection_socket(ctx);
     if (user_conn == NULL) {
         goto exit;

@@ -62,6 +62,7 @@
 #define XQC_MINI_TIMEOUT_DEFER_CHECK_USEC 200000
 #define XQC_MINI_CLI_WRITE_QUEUE_MAX_TASKS 1024
 #define XQC_MINI_CLI_WRITE_QUEUE_MAX_BYTES (64 * 1024 * 1024)
+#define XQC_MINI_RX_HIST_BUCKETS 8
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
 #define TOKEN_FILE                  "token"
@@ -215,6 +216,25 @@ typedef struct xqc_mini_cli_ctx_s {
 } xqc_mini_cli_ctx_t;
 
 struct xqc_mini_cli_user_conn_s;
+typedef struct xqc_mini_cli_rx_batch_s xqc_mini_cli_rx_batch_t;
+
+typedef struct xqc_mini_cli_rx_hist_s {
+    uint64_t                buckets[XQC_MINI_RX_HIST_BUCKETS];
+    uint64_t                count;
+    uint64_t                max;
+} xqc_mini_cli_rx_hist_t;
+
+typedef struct xqc_mini_cli_rx_path_diag_s {
+    uint64_t                event_count;
+    uint64_t                batch_call_count;
+    uint64_t                eagain_count;
+    uint64_t                packet_count;
+    uint64_t                byte_count;
+    uint64_t                batch_max;
+    uint64_t                process_error_count;
+    xqc_usec_t              last_service_time;
+    xqc_mini_cli_rx_hist_t  service_gap;
+} xqc_mini_cli_rx_path_diag_t;
 
 typedef struct xqc_mini_cli_user_path_s {
     struct xqc_mini_cli_user_conn_s *user_conn;
@@ -234,18 +254,12 @@ typedef struct xqc_mini_cli_user_path_s {
     int                     consecutive_write_failures;
     int                     disabled_for_session;
     xqc_usec_t              last_recover_probe_time;
-    pthread_t               rx_thread;
-    int                     rx_thread_running;
+    xqc_mini_cli_rx_batch_t *rx_batch;
+    int                     rx_release_pending;
+    xqc_mini_cli_rx_path_diag_t rx_diag;
 
 } xqc_mini_cli_user_path_t;
 
-typedef struct xqc_mini_cli_rx_packet_s {
-    int                             path_index;
-    size_t                          data_len;
-    xqc_usec_t                      recv_time;
-    struct xqc_mini_cli_rx_packet_s *next;
-    unsigned char                   data[];
-} xqc_mini_cli_rx_packet_t;
 
 typedef struct xqc_mini_cli_write_task_s {
     off_t                           offset;
@@ -255,21 +269,21 @@ typedef struct xqc_mini_cli_write_task_s {
 } xqc_mini_cli_write_task_t;
 
 typedef struct xqc_mini_cli_diag_stats_s {
-    uint64_t                rx_enqueue_count;
-    uint64_t                rx_enqueue_bytes;
-    uint64_t                rx_notify_write_count;
-    uint64_t                rx_notify_read_count;
-    uint64_t                rx_notify_skip_count;
-    uint64_t                rx_queue_current_depth;
-    uint64_t                rx_queue_max_depth;
-    uint64_t                rx_drain_round_count;
-    uint64_t                rx_drain_packet_count;
-    uint64_t                rx_drain_max_packets;
-    uint64_t                rx_drain_max_us;
-    uint64_t                rx_packet_max_wait_us;
+    uint64_t                rx_arbiter_calls;
+    uint64_t                rx_arbiter_empty_calls;
+    uint64_t                rx_fair_round_count;
+    uint64_t                rx_round_packet_count;
+    uint64_t                rx_datagram_count;
+    uint64_t                rx_byte_count;
     uint64_t                finish_recv_count;
+    uint64_t                rx_reentry_skip_count;
+    uint64_t                rx_deferred_release_count;
+    xqc_usec_t              rx_last_finish_recv_us;
     uint64_t                socket_ev_read_count;
     uint64_t                socket_ev_write_count;
+    xqc_mini_cli_rx_hist_t  rx_callback_us;
+    xqc_mini_cli_rx_hist_t  finish_gap_us;
+    xqc_mini_cli_rx_hist_t  dispatch_delay_us;
     uint64_t                pwrite_count;
     uint64_t                pwrite_total_bytes;
     uint64_t                pwrite_max_us;
@@ -340,14 +354,10 @@ typedef struct xqc_mini_cli_user_conn_s {
 
     struct event            *ev_timeout;
     struct event            *ev_path_retry;
-    struct event            *ev_rx_queue;
-
-    int                     rx_notify_fds[2];
-    int                     rx_threads_running;
-    pthread_mutex_t         rx_queue_lock;
-    xqc_mini_cli_rx_packet_t *rx_queue_head;
-    xqc_mini_cli_rx_packet_t *rx_queue_tail;
-    int                     rx_notify_pending;
+    int                     rx_next_path_index;
+    int                     rx_arbiter_running;
+    int                     rx_shutdown;
+    int                     rx_free_pending;
 
     xqc_mini_cli_diag_stats_t diag_stats;
 
@@ -476,5 +486,5 @@ int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us);
 
-void xqc_mini_cli_stop_path_rx_thread(xqc_mini_cli_user_path_t *path);
+void xqc_mini_cli_release_path_io(xqc_mini_cli_user_path_t *path, const char *reason);
 #endif

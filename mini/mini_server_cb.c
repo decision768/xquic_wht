@@ -35,15 +35,6 @@ typedef struct {
 
 static xqc_mini_svr_file_state_t g_svr_file_state = {0};
 
-typedef struct {
-    uint64_t streams;
-    uint64_t bytes;
-    double duration_ms;
-} xqc_mini_svr_get_phase_diag_t;
-
-static xqc_mini_svr_get_phase_diag_t g_get_phase_single = {0};
-static xqc_mini_svr_get_phase_diag_t g_get_phase_dual = {0};
-static int g_get_phase_run_active = 0;
 
 static void xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path);
 static void xqc_mini_svr_update_upload_progress(xqc_mini_svr_user_stream_t *user_stream);
@@ -69,9 +60,11 @@ static void xqc_mini_svr_log_mp_active_state(xqc_mini_svr_user_conn_t *user_conn
     const char *scene);
 static void xqc_mini_svr_log_mp_active_state_force(xqc_mini_svr_user_conn_t *user_conn,
     const char *scene);
+static uint64_t xqc_mini_svr_now_us(void);
 static void xqc_mini_svr_get_diag_capture(xqc_mini_svr_user_conn_t *user_conn,
     xqc_mini_svr_get_diag_snapshot_t *snapshot);
 static void xqc_mini_svr_get_diag_maybe_reset_phase(xqc_mini_svr_user_stream_t *user_stream);
+static void xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream);
 static void xqc_mini_svr_log_get_path_response_done(xqc_mini_svr_user_stream_t *user_stream,
     double duration_ms, double mbps);
 
@@ -107,12 +100,16 @@ xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
     if (duration_ms > 0.0) {
         mbps = (user_stream->response_body_len * 8.0)
             / (duration_ms * 1000.0);
-        printf("[server] response send finished. send_len=%zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
-            user_stream->response_body_len, duration_ms, mbps);
+        printf("[server] response body submitted to XQUIC. send_len=%zu bytes,"
+               " time=%.3f ms, app_submit_mbps=%.3f"
+               " metric=app_submit_not_delivered\n",
+               user_stream->response_body_len, duration_ms, mbps);
 
     } else {
-        printf("[server] response send finished. send_len=%zu bytes, time=%.3f ms (throughput unavailable)\n",
-            user_stream->response_body_len, duration_ms);
+        printf("[server] response body submitted to XQUIC. send_len=%zu bytes,"
+               " time=%.3f ms metric=app_submit_not_delivered"
+               " (throughput unavailable)\n",
+               user_stream->response_body_len, duration_ms);
     }
 
     if (user_stream->method == REQUEST_METHOD_GET && user_stream->use_file_response) {
@@ -132,6 +129,7 @@ xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
                user_stream->h3_send_bytes,
                user_stream->h3_send_max_us);
 
+        xqc_mini_svr_log_get_submit_done(user_stream);
         xqc_mini_svr_log_get_path_response_done(user_stream, duration_ms, mbps);
     }
 
@@ -160,15 +158,6 @@ xqc_mini_svr_delta_u64(uint64_t end, uint64_t start)
     return end >= start ? end - start : 0;
 }
 
-static double
-xqc_mini_svr_phase_mbps(const xqc_mini_svr_get_phase_diag_t *phase)
-{
-    if (phase->duration_ms <= 0.0) {
-        return 0.0;
-    }
-
-    return ((double)phase->bytes * 8.0) / (phase->duration_ms * 1000.0);
-}
 
 static const xqc_mini_svr_path_diag_t *
 xqc_mini_svr_get_diag_find_path(const xqc_mini_svr_get_diag_snapshot_t *snapshot,
@@ -246,21 +235,78 @@ static void
 xqc_mini_svr_get_diag_maybe_reset_phase(xqc_mini_svr_user_stream_t *user_stream)
 {
     if (user_stream == NULL || user_stream->method != REQUEST_METHOD_GET
-        || user_stream->stream_count <= 1)
+        || !user_stream->use_file_response)
     {
         return;
     }
 
-    if (user_stream->stream_index == 0 || !g_get_phase_run_active) {
-        memset(&g_get_phase_single, 0, sizeof(g_get_phase_single));
-        memset(&g_get_phase_dual, 0, sizeof(g_get_phase_dual));
-        g_get_phase_run_active = 1;
-        printf("[diag_server_get_phase][reset] stream=%d/%d offset=%zu len=%zu\n",
-            user_stream->stream_index,
-            user_stream->stream_count,
-            user_stream->response_body_offset,
-            user_stream->response_body_len);
+    xqc_mini_svr_user_conn_t *user_conn =
+        xqc_mini_svr_get_conn_from_request(user_stream);
+    if (user_conn == NULL) {
+        return;
     }
+
+    if (!user_conn->get_submit_active
+        || (user_stream->stream_index == 0
+            && user_conn->get_submit_streams > 0))
+    {
+        user_conn->get_submit_active = 1;
+        user_conn->get_submit_expected_streams = 0;
+        user_conn->get_submit_start_us = xqc_mini_svr_now_us();
+        user_conn->get_submit_last_us = 0;
+        user_conn->get_submit_streams = 0;
+        user_conn->get_submit_bytes = 0;
+        printf("[diag_server_get_submit][reset] stream=%d/%d"
+               " offset=%zu len=%zu metric=app_submit_not_delivered\n",
+               user_stream->stream_index, user_stream->stream_count,
+               user_stream->response_body_offset,
+               user_stream->response_body_len);
+    }
+
+    if (user_stream->stream_count > user_conn->get_submit_expected_streams) {
+        user_conn->get_submit_expected_streams = user_stream->stream_count;
+    }
+}
+
+static void
+xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
+{
+    if (user_stream == NULL || user_stream->method != REQUEST_METHOD_GET) {
+        return;
+    }
+
+    xqc_mini_svr_user_conn_t *user_conn =
+        xqc_mini_svr_get_conn_from_request(user_stream);
+    if (user_conn == NULL) {
+        return;
+    }
+    if (!user_conn->get_submit_active) {
+        xqc_mini_svr_get_diag_maybe_reset_phase(user_stream);
+    }
+
+    uint64_t now_us = xqc_mini_svr_now_us();
+    user_conn->get_submit_last_us = now_us;
+    user_conn->get_submit_streams++;
+    user_conn->get_submit_bytes += user_stream->response_body_len;
+    if (user_stream->stream_count > user_conn->get_submit_expected_streams) {
+        user_conn->get_submit_expected_streams = user_stream->stream_count;
+    }
+
+    double wall_time_ms = now_us >= user_conn->get_submit_start_us
+        ? (double)(now_us - user_conn->get_submit_start_us) / 1000.0 : 0.0;
+    double app_submit_mbps = wall_time_ms > 0.0
+        ? (double)user_conn->get_submit_bytes * 8.0
+            / (wall_time_ms * 1000.0)
+        : 0.0;
+
+    printf("[diag_server_get_submit][summary] stream=%d/%d"
+           " completed=%" PRIu64 " expected=%d bytes=%" PRIu64
+           " wall_time_ms=%.3f app_submit_mbps=%.3f"
+           " metric=app_submit_not_delivered\n",
+           user_stream->stream_index, user_stream->stream_count,
+           user_conn->get_submit_streams,
+           user_conn->get_submit_expected_streams,
+           user_conn->get_submit_bytes, wall_time_ms, app_submit_mbps);
 }
 
 static void
@@ -318,7 +364,8 @@ xqc_mini_svr_log_get_path_response_done(xqc_mini_svr_user_stream_t *user_stream,
     printf("[diag_server_get_path][response_done] stream=%d/%d offset=%zu len=%zu"
            " start_both=%d end_both=%d start_active=%d end_active=%d"
            " start_mp_state=%d end_mp_state=%d enable_mp=%d"
-           " duration_ms=%.3f server_mbps=%.3f"
+           " duration_ms=%.3f app_submit_mbps=%.3f"
+           " metric=app_submit_not_delivered"
            " conn_send_delta=%" PRIu64 " conn_recv_delta=%" PRIu64
            " conn_lost_delta=%" PRIu64 " loss_delta_rate=%.3f%% loss_rate_end=%.3f%%"
            " app_delta=%" PRIu64 " path_send_delta=%" PRIu64
@@ -401,36 +448,6 @@ xqc_mini_svr_log_get_path_response_done(xqc_mini_svr_user_stream_t *user_stream,
             end_snapshot.paths[i].path_recv_bytes);
     }
 
-    xqc_mini_svr_get_phase_diag_t *phase = start->both_active
-        ? &g_get_phase_dual : &g_get_phase_single;
-    phase->streams++;
-    phase->bytes += user_stream->response_body_len;
-    if (duration_ms > 0.0) {
-        phase->duration_ms += duration_ms;
-    }
-
-    printf("[diag_server_get_phase][summary] stream=%d/%d phase=%s"
-           " single_streams=%" PRIu64 " single_bytes=%" PRIu64
-           " single_time_ms=%.3f single_mbps=%.3f"
-           " dual_streams=%" PRIu64 " dual_bytes=%" PRIu64
-           " dual_time_ms=%.3f dual_mbps=%.3f\n",
-        user_stream->stream_index,
-        user_stream->stream_count,
-        start->both_active ? "dual" : "single",
-        g_get_phase_single.streams,
-        g_get_phase_single.bytes,
-        g_get_phase_single.duration_ms,
-        xqc_mini_svr_phase_mbps(&g_get_phase_single),
-        g_get_phase_dual.streams,
-        g_get_phase_dual.bytes,
-           g_get_phase_dual.duration_ms,
-           xqc_mini_svr_phase_mbps(&g_get_phase_dual));
-
-    if (user_stream->stream_count > 1
-        && user_stream->stream_index >= user_stream->stream_count - 1)
-    {
-        g_get_phase_run_active = 0;
-    }
 }
 
 static ssize_t
@@ -1280,7 +1297,32 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     void *conn_user_data)
 {
     DEBUG;
-    xqc_mini_svr_user_conn_t *user_conn = (xqc_mini_svr_user_conn_t *)conn_user_data;
+    xqc_mini_svr_user_conn_t *listener_conn =
+        (xqc_mini_svr_user_conn_t *)conn_user_data;
+    xqc_mini_svr_user_conn_t *user_conn = calloc(1, sizeof(*user_conn));
+    if (user_conn == NULL) {
+        printf("[error] allocate server connection scope failed\n");
+        return XQC_ERROR;
+    }
+    user_conn->local_addr = calloc(1, sizeof(*user_conn->local_addr));
+    user_conn->peer_addr = calloc(1, sizeof(*user_conn->peer_addr));
+    if (user_conn->local_addr == NULL || user_conn->peer_addr == NULL) {
+        printf("[error] allocate server connection addresses failed\n");
+        free(user_conn->local_addr);
+        free(user_conn->peer_addr);
+        free(user_conn);
+        return XQC_ERROR;
+    }
+
+    user_conn->listener_conn = listener_conn;
+    user_conn->is_connection_scope = 1;
+    user_conn->ctx = listener_conn->ctx;
+    user_conn->fd = listener_conn->fd;
+    user_conn->local_addrlen = listener_conn->local_addrlen;
+    if (listener_conn->local_addr != NULL) {
+        memcpy(user_conn->local_addr, listener_conn->local_addr,
+            sizeof(*user_conn->local_addr));
+    }
     xqc_h3_conn_set_user_data(h3_conn, user_conn);
     xqc_h3_conn_get_peer_addr(h3_conn, (struct sockaddr *)user_conn->peer_addr,
                               sizeof(struct sockaddr_in), &user_conn->peer_addrlen);
@@ -1308,6 +1350,15 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
 
     xqc_mini_svr_log_mp_active_state_force(user_conn, "h3_conn_close");
     printf("[stats] xqc_mini_svr_h3_conn_close_notify success \n");
+    if (user_conn != NULL && user_conn->is_connection_scope) {
+        xqc_mini_svr_user_conn_t *listener_conn = user_conn->listener_conn;
+        xqc_h3_conn_set_user_data(h3_conn, listener_conn);
+        free(user_conn->local_addr);
+        free(user_conn->peer_addr);
+        user_conn->local_addr = NULL;
+        user_conn->peer_addr = NULL;
+        free(user_conn);
+    }
     return 0;
 }
 

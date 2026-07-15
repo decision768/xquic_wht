@@ -49,6 +49,10 @@
 
     add_executable(mini_server ${MINI_SERVER_SOURCES})
     add_executable(mini_client ${MINI_CLIENT_SOURCES})
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_compile_definitions(mini_client PRIVATE _GNU_SOURCE)
+    endif()
+
 
     target_include_directories(mini_server PRIVATE ${ZLOG_INCLUDE_DIR})
     target_include_directories(mini_client PRIVATE ${ZLOG_INCLUDE_DIR})

@@ -121,8 +121,9 @@ void start_event(xqc_mini_cli_ctx_t *ctx){
 }
 
 void close_all(xqc_mini_cli_ctx_t *ctx,xqc_mini_cli_user_conn_t *user_conn){
-    xqc_engine_destroy(ctx->engine);
     xqc_mini_cli_on_connection_finish(user_conn);
+    xqc_engine_destroy(ctx->engine);
+    ctx->engine = NULL;
     xqc_mini_cli_free_ctx(ctx);
     xqc_mini_cli_free_user_conn(user_conn);
 }
@@ -130,11 +131,11 @@ int main(int argc, char *argv[]){
     
     xqc_mini_cli_ctx_t cli_ctx = {0}, *ctx = &cli_ctx;
     xqc_mini_cli_args_t *args = NULL;
+    xqc_mini_cli_user_conn_t *user_conn = NULL;
     if(init_args(&args, ctx, argc, argv) ==XQC_ERROR){
         goto exit;
     }
 
-    xqc_mini_cli_user_conn_t *user_conn = NULL;
     if(create_connection(&user_conn, ctx) == XQC_ERROR){
         goto exit;
     }

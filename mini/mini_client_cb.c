@@ -672,23 +672,8 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
             printf("[warn] path_id=%"PRIu64" reached write failure threshold, closing path\n",
                 dead_path_id);
             user_path->is_active = 0;
-            user_path->prepared = 0;
-            user_path->path_id = XQC_MINI_PATH_ID_INVALID;
             user_path->consecutive_write_failures = 0;
-
-            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
-                xqc_mini_cli_stop_path_rx_thread(user_path);
-            }
-
-            if (user_path->ev_socket) {
-                event_del(user_path->ev_socket);
-                event_free(user_path->ev_socket);
-                user_path->ev_socket = NULL;
-            }
-            if (user_path->fd >= 0) {
-                close(user_path->fd);
-                user_path->fd = -1;
-            }
+            xqc_mini_cli_release_path_io(user_path, "write_failure_threshold");
 
             if (user_conn->active_path_cnt > 0) {
                 user_conn->active_path_cnt--;
