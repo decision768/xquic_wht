@@ -14,7 +14,7 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_BATCH_MAX_PACKETS 512
+#define CLIENT_RX_BATCH_MAX_PACKETS 32
 #define CLIENT_RX_BATCH_MAX_US 5000
 
 static void xqc_mini_cli_conn_ready_to_create_path(const xqc_cid_t *cid, void *conn_user_data);
@@ -2763,6 +2763,9 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         free(user_conn);
         return NULL;
     }
+
+    printf("[resolved-rx] mode=queue_small_batch_b batch_packets=%d budget_us=%d\n",
+           CLIENT_RX_BATCH_MAX_PACKETS, CLIENT_RX_BATCH_MAX_US);
 
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         user_conn->paths[i].fd = -1;
