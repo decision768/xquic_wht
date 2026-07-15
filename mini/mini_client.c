@@ -3204,7 +3204,9 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
         user_conn->ev_path_retry = NULL;
     }
 
-    xqc_mini_cli_diag_maybe_log(user_conn, "connection_finish", 1);
+    if (user_conn->h3_conn != NULL) {
+        xqc_mini_cli_diag_maybe_log(user_conn, "connection_finish", 1);
+    }
     user_conn->rx_shutdown = 1;
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_release_path_io(&user_conn->paths[i],

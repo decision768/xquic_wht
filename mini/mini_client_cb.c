@@ -163,6 +163,7 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
 
     xqc_mini_cli_diag_maybe_log(user_conn, "h3_conn_close", 1);
+    user_conn->h3_conn = NULL;
     event_base_loopbreak(user_conn->ctx->eb);
     printf("[stats] xqc_mini_cli_h3_conn_close_notify success \n");
     return XQC_OK;
