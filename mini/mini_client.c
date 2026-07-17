@@ -14,8 +14,6 @@
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
 #define CLIENT_RX_PER_PATH_PACKETS 16
-#define CLIENT_RX_MAX_ROUNDS_PER_CALLBACK 2
-#define CLIENT_RX_CALLBACK_BUDGET_US 200
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
@@ -2124,32 +2122,21 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     user_conn->rx_arbiter_running = 1;
     stats->rx_arbiter_calls++;
     xqc_usec_t callback_start = xqc_now();
-    int callback_packets = 0;
-
-    for (int round = 0; round < CLIENT_RX_MAX_ROUNDS_PER_CALLBACK; round++) {
-        if (round > 0 && xqc_now() - callback_start >= CLIENT_RX_CALLBACK_BUDGET_US) {
+    int round_packets = 0;
+    int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
+    for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
+        int path_index = (start_index + offset) % MAX_PATH_CNT;
+        round_packets += xqc_mini_cli_recv_path_batch(
+            &user_conn->paths[path_index]);
+        if (user_conn->rx_shutdown) {
             break;
         }
+    }
 
-        int round_packets = 0;
-        int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
-        for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
-            int path_index = (start_index + offset) % MAX_PATH_CNT;
-            round_packets += xqc_mini_cli_recv_path_batch(
-                &user_conn->paths[path_index]);
-            if (user_conn->rx_shutdown) {
-                break;
-            }
-        }
-
-        user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
-        if (round_packets == 0) {
-            break;
-        }
-
+    user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
+    if (round_packets > 0) {
         stats->rx_fair_round_count++;
         stats->rx_round_packet_count += (uint64_t)round_packets;
-        callback_packets += round_packets;
 
         xqc_usec_t finish_time = xqc_now();
         if (stats->rx_last_finish_recv_us != 0
@@ -2161,15 +2148,7 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
         stats->rx_last_finish_recv_us = finish_time;
         stats->finish_recv_count++;
         xqc_engine_finish_recv(user_conn->ctx->engine);
-
-        if (user_conn->rx_shutdown
-            || xqc_now() - callback_start >= CLIENT_RX_CALLBACK_BUDGET_US)
-        {
-            break;
-        }
-    }
-
-    if (callback_packets == 0) {
+    } else {
         stats->rx_arbiter_empty_calls++;
     }
     xqc_usec_t callback_end = xqc_now();
@@ -2938,9 +2917,8 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->paths[i].last_recover_probe_time = 0;
     }
 
-    printf("[resolved-rx] mode=%s per_path=%d rounds=%d budget_us=%d\n",
-        xqc_mini_cli_rx_mode(), CLIENT_RX_PER_PATH_PACKETS,
-        CLIENT_RX_MAX_ROUNDS_PER_CALLBACK, CLIENT_RX_CALLBACK_BUDGET_US);
+    printf("[resolved-rx] mode=%s per_path=%d rounds=1\n",
+        xqc_mini_cli_rx_mode(), CLIENT_RX_PER_PATH_PACKETS);
 
     ret = xqc_mini_cli_promote_available_initial_interface(user_conn);
     if (ret != XQC_OK) {

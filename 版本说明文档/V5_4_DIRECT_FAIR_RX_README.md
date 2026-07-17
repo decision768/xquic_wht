@@ -47,18 +47,18 @@ POST 的主要大流量方向是客户端发送，旧客户端 RX 队列主要�
 ```text
 两个持久化 EV_READ 事件
 -> 同一个 Libevent 线程公平仲裁
--> 每条路径每轮最多读取 16 个 UDP 包
--> 每轮轮转起始路径并服务两条路径
--> 每个非空轮调用一次 xqc_engine_finish_recv()
--> 最多 2 轮或达到 200 us 回调预算后返回 Libevent
+-> 每次回调只执行一个公平轮
+-> 每条路径在本轮最多读取 16 个 UDP 包
+-> 每次回调结束后轮转下一次回调的起始路径
+-> 非空回调调用一次 xqc_engine_finish_recv()
+-> 返回 Libevent，未读空的 socket 依靠水平触发再次唤醒
 ```
 
-固定参数：
+固定接收策略：
 
 ```text
 per_path_packets = 16
-max_rounds_per_callback = 2
-callback_budget_us = 200
+rounds_per_callback = 1（固定行为，不是独立控制参数）
 ```
 
 Linux 主路径使用 `recvmmsg()`；其他平台使用最多 16 次非阻塞 `recvfrom()`。批量缓冲区在路径准备阶段从堆上分配并复用，不在回调栈上放置大数组。
@@ -66,18 +66,18 @@ Linux 主路径使用 `recvmmsg()`；其他平台使用最多 16 次非阻塞 `r
 启动时会输出：
 
 ```text
-[resolved-rx] mode=direct_fair_recvmmsg per_path=16 rounds=2 budget_us=200
+[resolved-rx] mode=direct_fair_recvmmsg per_path=16 rounds=1
 ```
 
 非 Linux 平台的 mode 为 `direct_fair_recvfrom`。
 
 ## 4. 公平性和 engine 交付
 
-任一路径的 `EV_READ` 事件都会进入同一个仲裁器。仲裁器每轮从 `rx_next_path_index` 指定的路径开始，依次服务两条路径，并在下一轮交换起始路径。
+任一路径的 `EV_READ` 事件都会进入同一个仲裁器。一次回调只执行一个公平轮：从 `rx_next_path_index` 指定的路径开始，依次服务两条路径；本次回调结束后交换起始路径，使下一次回调从另一条路径开始。
 
-因此持续满载的快路径不能无限占用 engine；慢路径只要 socket 可读，就会在当前轮或下一轮获得处理机会。未读空的 level-triggered socket 会再次触发 Libevent，不需要应用层主动重新通知。
+因此持续满载的快路径不能在单次回调中无限占用 engine；慢路径只要 socket 可读，就会在当前回调获得处理机会。未读空的 level-triggered socket 会再次触发 Libevent，不需要应用层主动重新通知，也不存在固定等待时间。
 
-每轮只要处理过至少一个包，就调用一次：
+每次回调只要处理过至少一个包，就调用一次：
 
 ```c
 xqc_engine_finish_recv(engine);
@@ -85,7 +85,23 @@ xqc_engine_finish_recv(engine);
 
 这样 ACK、定时器、HTTP/3 回调和拥塞控制反馈不会等待一个无界队列全部排空。
 
-需要注意：`200 us` 是在公平轮边界检查的协作式预算，不是可抢占的硬实时上限。一次完整的双路径公平轮或一次 `xqc_engine_finish_recv()` 本身可能使回调时间超过 200 us。
+单路径模式下每次回调最多读取 16 个包；双路径模式下每次回调最多读取 32 个包。若任一路径仍有未读数据，Libevent 会在后续事件循环中继续触发回调。`callback_us` 等时间统计继续保留，但不再参与是否继续收包的控制。
+
+单路径持续可读时，回调行为为：
+
+```text
+回调 N：A 最多读取 16 包 -> finish_recv() -> 返回 Libevent
+回调 N+1：A 最多读取 16 包 -> finish_recv() -> 返回 Libevent
+```
+
+双路径持续可读时，回调行为为：
+
+```text
+回调 N：A 最多读取 16 包 -> B 最多读取 16 包 -> finish_recv()
+回调 N+1：B 最多读取 16 包 -> A 最多读取 16 包 -> finish_recv()
+```
+
+例如 A 的内核队列有 100 包、B 有 1 包，第一次回调最多处理 A 的 16 包和 B 的 1 包；A 剩余数据使其 socket 继续保持可读，后续回调从 B 开始检查并继续处理 A，不等待 B 凑满批量，也不等待固定时间。
 
 ## 5. 路径生命周期和错误安全
 
@@ -221,7 +237,8 @@ metric=app_submit_not_delivered
 - 旧 RX 线程、共享 FIFO、通知 pipe 和相关字段没有残留调用；
 - 路径事件在 `path_id/is_active` 初始化后才加入 Libevent；
 - `EV_READ` 和 `EV_WRITE` 独立判断；
-- 每个非空公平轮只调用一次 `xqc_engine_finish_recv()`；
+- 每次 RX 回调只执行一个公平轮，并跨回调交换起始路径；
+- 每个非空 RX 回调只调用一次 `xqc_engine_finish_recv()`；
 - 仲裁期间的路径释放采用延迟释放，不直接销毁正在执行的回调资源；
 - engine 销毁后不再查询连接统计；
 - 服务端 GET 提交统计为真正的 H3 连接级状态；
@@ -248,11 +265,12 @@ make -j
 1. 单链路接口 A，GET 100 MB，校验 SHA-256
 2. 单链路接口 B，GET 100 MB，校验 SHA-256
 3. 双链路 GET 100 MB，校验 SHA-256
-4. 快路径满载、慢路径间歇突发
-5. 传输中移除并重建任一路径
-6. recvmmsg 正常、EAGAIN、EINTR 和真实错误
-7. 下载完成、超时和连接关闭
-8. 每种模式至少 10 次交替测试
+4. 快路径队列 100 包、慢路径队列 1 包，确认单轮上限和跨回调起点轮换
+5. 快路径满载、慢路径间歇突发
+6. 传输中移除并重建任一路径
+7. recvmmsg 正常、EAGAIN、EINTR 和真实错误
+8. 下载完成、超时和连接关闭
+9. 每种模式至少 10 次交替测试
 ```
 
 重点验收：
@@ -261,7 +279,7 @@ make -j
 - 双链路两条路径都有有效接收，不能出现可读路径长期零服务；
 - RX 回调和 `finish_recv` 间隔 p99 在 CPU 有余量时以 250 us 为目标；
 - 相比旧版本，主机侧可观测 RX 延迟下降，双链路 GET 吞吐提升或相同吞吐下 CPU 降低；
-- 单链路吞吐回退不超过预定范围；
+- 单链路和双链路中位吞吐回退均不超过 5%，且无新增内核 UDP 接收丢包；
 - 服务端 `app_submit_mbps` 不再跨连接或重复累计；
 - 实际网络收益以 `delivered_mbps` 和客户端 GET 完成速率判断。
 
