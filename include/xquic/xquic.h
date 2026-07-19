@@ -893,6 +893,8 @@ typedef struct xqc_scheduler_params_u {
     double      loss_percent_thr_high;
     double      loss_percent_thr_low;
     uint32_t    pto_cnt_thr;
+    uint8_t     mp_diag_enabled;
+    uint32_t    mp_diag_interval_ms;
 } xqc_scheduler_params_t;
 
 /**

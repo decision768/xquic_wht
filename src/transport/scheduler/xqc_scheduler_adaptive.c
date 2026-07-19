@@ -4,6 +4,7 @@
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_send_ctl.h"
 #include "src/common/xqc_time.h"
+#include "src/congestion_control/xqc_bbr_common.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -40,6 +41,7 @@ typedef enum {
     XQC_ADAPTIVE_PICK_PRIMARY,
     XQC_ADAPTIVE_PICK_PROBE,
     XQC_ADAPTIVE_PICK_CWND_FALLBACK,
+    XQC_ADAPTIVE_PICK_REINJECT_FALLBACK,
     XQC_ADAPTIVE_PICK_BEST_FALLBACK,
     XQC_ADAPTIVE_PICK_SINGLE,
     XQC_ADAPTIVE_PICK_ORIGINAL,
@@ -53,6 +55,8 @@ typedef struct {
     uint64_t    last_delivered;
     xqc_usec_t  last_delivered_time;
     uint64_t    warmup_sent_base;
+    uint64_t    warmup_sent_final;
+    uint64_t    warmup_delivered_final;
     uint64_t    window_sent_base;
     uint64_t    adjust_sent_base;
     uint64_t    adjust_delivered_base;
@@ -72,6 +76,7 @@ typedef struct {
     uint64_t    primary_pick_count;
     uint64_t    probe_pick_count;
     uint64_t    cwnd_fallback_pick_count;
+    uint64_t    reinject_fallback_pick_count;
     uint64_t    warmup_pick_count;
     uint64_t    single_pick_count;
     uint64_t    best_fallback_pick_count;
@@ -96,12 +101,15 @@ typedef struct {
     double                       score;
     double                       queue_ratio;
     xqc_bool_t                   can_send;
+    xqc_bool_t                   excluded_by_reinject;
+    xqc_sched_path_eval_t        cwnd_eval;
 } xqc_adaptive_candidate_t;
 
 typedef struct {
     xqc_adaptive_path_state_t    states[XQC_MAX_PATHS_COUNT];
     xqc_adaptive_phase_t         phase;
     xqc_usec_t                   phase_start_us;
+    xqc_usec_t                   warmup_elapsed_us;
     xqc_usec_t                   window_start_us;
     xqc_usec_t                   adjust_start_us;
     uint64_t                     primary_path_id;
@@ -121,6 +129,7 @@ typedef struct {
     uint64_t                     primary_pick_count;
     uint64_t                     probe_pick_count;
     uint64_t                     cwnd_fallback_pick_count;
+    uint64_t                     reinject_fallback_pick_count;
     uint64_t                     warmup_pick_count;
     uint64_t                     single_pick_count;
     uint64_t                     best_fallback_pick_count;
@@ -138,6 +147,20 @@ typedef struct {
     uint64_t                     secondary_queue_reduce_count;
     double                       min_probe_pct;
     double                       max_probe_pct;
+    xqc_sched_diag_t             sched_diag;
+    uint64_t                     both_sendable;
+    uint64_t                     primary_only;
+    uint64_t                     secondary_only;
+    uint64_t                     neither_sendable;
+    uint64_t                     probe_considered;
+    uint64_t                     probe_selected;
+    uint64_t                     probe_denied_secondary_cwnd;
+    uint64_t                     probe_denied_secondary_reinject;
+    uint64_t                     probe_denied_secondary_other;
+    uint64_t                     probe_denied_share_limit;
+    uint64_t                     probe_denied_no_secondary;
+    uint64_t                     fallback_real_inflight;
+    uint64_t                     fallback_scheduled_reservation;
 } xqc_adaptive_scheduler_t;
 
 static size_t
@@ -151,7 +174,6 @@ xqc_adaptive_scheduler_init(void *scheduler, xqc_log_t *log,
     xqc_scheduler_params_t *params)
 {
     (void)log;
-    (void)params;
     xqc_adaptive_scheduler_t *adaptive = scheduler;
     if (adaptive == NULL) {
         return;
@@ -162,6 +184,7 @@ xqc_adaptive_scheduler_init(void *scheduler, xqc_log_t *log,
     adaptive->primary_path_id = UINT64_MAX;
     adaptive->challenger_path_id = UINT64_MAX;
     adaptive->probe_pct = XQC_ADAPTIVE_PROBE_FLOOR_PCT;
+    xqc_scheduler_diag_init(&adaptive->sched_diag, "adaptive", params);
 }
 
 static double
@@ -212,6 +235,7 @@ xqc_adaptive_diag_reset(xqc_adaptive_scheduler_t *adaptive,
     adaptive->primary_pick_count = 0;
     adaptive->probe_pick_count = 0;
     adaptive->cwnd_fallback_pick_count = 0;
+    adaptive->reinject_fallback_pick_count = 0;
     adaptive->warmup_pick_count = 0;
     adaptive->single_pick_count = 0;
     adaptive->best_fallback_pick_count = 0;
@@ -234,11 +258,14 @@ xqc_adaptive_diag_reset(xqc_adaptive_scheduler_t *adaptive,
         xqc_adaptive_path_state_t *state = &adaptive->states[i];
         state->diag_base_valid = XQC_FALSE;
         state->blocked_count = 0;
+        state->warmup_sent_final = 0;
+        state->warmup_delivered_final = 0;
         state->selected_count = 0;
         state->selected_bytes = 0;
         state->primary_pick_count = 0;
         state->probe_pick_count = 0;
         state->cwnd_fallback_pick_count = 0;
+        state->reinject_fallback_pick_count = 0;
         state->warmup_pick_count = 0;
         state->single_pick_count = 0;
         state->best_fallback_pick_count = 0;
@@ -293,6 +320,10 @@ xqc_adaptive_diag_record_pick(xqc_adaptive_scheduler_t *adaptive,
     case XQC_ADAPTIVE_PICK_CWND_FALLBACK:
         adaptive->cwnd_fallback_pick_count++;
         state->cwnd_fallback_pick_count++;
+        break;
+    case XQC_ADAPTIVE_PICK_REINJECT_FALLBACK:
+        adaptive->reinject_fallback_pick_count++;
+        state->reinject_fallback_pick_count++;
         break;
     case XQC_ADAPTIVE_PICK_BEST_FALLBACK:
         adaptive->best_fallback_pick_count++;
@@ -523,8 +554,10 @@ xqc_adaptive_collect_candidates(xqc_adaptive_scheduler_t *adaptive,
         candidate.path_id = path->path_id;
         candidate.state = state;
         candidate.ctl = path->path_send_ctl;
-        candidate.can_send = xqc_scheduler_check_path_can_send(path,
-            packet_out, check_cwnd);
+        candidate.can_send = xqc_scheduler_evaluate_path(path,
+            packet_out, check_cwnd, &candidate.cwnd_eval);
+        xqc_scheduler_diag_record_evaluation(&adaptive->sched_diag, path,
+            &candidate.cwnd_eval);
         if (!candidate.can_send) {
             state->blocked_count++;
         } else {
@@ -534,6 +567,7 @@ xqc_adaptive_collect_candidates(xqc_adaptive_scheduler_t *adaptive,
         if (reinject && packet_out && packet_out->po_path_id == path->path_id) {
             *original_path = path;
             candidate.can_send = XQC_FALSE;
+            candidate.excluded_by_reinject = XQC_TRUE;
         }
 
         xqc_adaptive_refresh_candidate(&candidate, now);
@@ -622,6 +656,50 @@ xqc_adaptive_initial_probe_pct(xqc_adaptive_candidate_t *primary,
 }
 
 static void
+xqc_adaptive_diag_print_primary_paths(xqc_adaptive_scheduler_t *adaptive,
+    xqc_adaptive_candidate_t *candidates, size_t count, xqc_usec_t now,
+    const char *reason)
+{
+    if (!adaptive->sched_diag.enabled) {
+        return;
+    }
+    for (size_t i = 0; i < count; i++) {
+        xqc_send_ctl_t *ctl = candidates[i].ctl;
+        uint8_t bbr_mode = 255, full_bw = 0;
+        xqc_bbr_info_interface_t *info = ctl->ctl_cong_callback
+            ? ctl->ctl_cong_callback->xqc_cong_ctl_info_cb : NULL;
+        if (info && info->mode && info->full_bw_reached) {
+            bbr_mode = info->mode(ctl->ctl_cong);
+            full_bw = info->full_bw_reached(ctl->ctl_cong);
+        }
+        printf("[diag_adaptive_primary_path] reason=%s path=%" PRIu64
+               " warmup_elapsed=%" PRIu64 " warmup_sent=%" PRIu64
+               " warmup_delivered=%" PRIu64 " est_bw=%" PRIu64
+               " cwnd=%" PRIu64 " inflight=%u scheduled=%u"
+               " srtt=%" PRIu64 " app_limited_samples=%" PRIu64
+               " non_app_limited_samples=%" PRIu64
+               " bbr_mode=%u full_bw_reached=%u\n", reason,
+               candidates[i].path_id,
+               adaptive->warmup_elapsed_us > 0
+                   ? adaptive->warmup_elapsed_us
+                   : (adaptive->phase_start_us > 0
+                       ? now - adaptive->phase_start_us : 0),
+               adaptive->warmup_elapsed_us > 0
+                   ? candidates[i].state->warmup_sent_final
+                   : candidates[i].warmup_sent,
+               adaptive->warmup_elapsed_us > 0
+                   ? candidates[i].state->warmup_delivered_final
+                   : xqc_adaptive_delta_u64(candidates[i].delivered_total,
+                       candidates[i].state->init_delivered),
+               xqc_send_ctl_get_est_bw(ctl), candidates[i].cwnd,
+               ctl->ctl_bytes_in_flight,
+               candidates[i].path->path_schedule_bytes,
+               candidates[i].srtt, ctl->diag.sample_app_limited,
+               ctl->diag.sample_non_app_limited, bbr_mode, full_bw);
+    }
+}
+
+static void
 xqc_adaptive_select_primary(xqc_adaptive_scheduler_t *adaptive,
     xqc_connection_t *conn, xqc_adaptive_candidate_t *candidates,
     size_t count, xqc_usec_t now, const char *reason)
@@ -681,6 +759,8 @@ xqc_adaptive_select_primary(xqc_adaptive_scheduler_t *adaptive,
            adaptive->probe_pct,
            secondary ? secondary->path_id : UINT64_MAX,
            secondary ? secondary->score : 0.0);
+    xqc_adaptive_diag_print_primary_paths(adaptive, candidates, count, now,
+        reason);
 }
 
 static void
@@ -690,9 +770,12 @@ xqc_adaptive_start_warmup(xqc_adaptive_scheduler_t *adaptive,
 {
     adaptive->phase = XQC_ADAPTIVE_PHASE_WARMUP;
     adaptive->phase_start_us = now;
+    adaptive->warmup_elapsed_us = 0;
     xqc_adaptive_diag_reset(adaptive, candidates, count, now);
     for (size_t i = 0; i < count; i++) {
         candidates[i].state->warmup_sent_base = candidates[i].sent_total;
+        candidates[i].state->warmup_sent_final = 0;
+        candidates[i].state->warmup_delivered_final = 0;
         candidates[i].state->init_delivered = candidates[i].delivered_total;
         candidates[i].warmup_sent = 0;
     }
@@ -941,11 +1024,36 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
         *pick_reason = XQC_ADAPTIVE_PICK_BEST_FALLBACK;
         return xqc_adaptive_best_candidate(candidates, count, XQC_TRUE);
     }
-    if (secondary == NULL || !secondary->can_send) {
+    if (secondary == NULL) {
+        if (adaptive->sched_diag.enabled) {
+            adaptive->probe_denied_no_secondary++;
+        }
         if (primary->can_send) {
             *pick_reason = XQC_ADAPTIVE_PICK_PRIMARY;
         }
         return primary->can_send ? primary : NULL;
+    }
+    if (!secondary->can_send) {
+        if (adaptive->sched_diag.enabled) {
+            adaptive->probe_considered++;
+            if (secondary->excluded_by_reinject) {
+                adaptive->probe_denied_secondary_reinject++;
+            } else if (secondary->cwnd_eval.block_reason
+                       != XQC_SCHED_BLOCK_NONE)
+            {
+                adaptive->probe_denied_secondary_cwnd++;
+            } else {
+                adaptive->probe_denied_secondary_other++;
+            }
+        }
+        if (primary->can_send) {
+            *pick_reason = XQC_ADAPTIVE_PICK_PRIMARY;
+        }
+        return primary->can_send ? primary : NULL;
+    }
+
+    if (adaptive->sched_diag.enabled) {
+        adaptive->probe_considered++;
     }
 
     xqc_bool_t probe_allowed = XQC_FALSE;
@@ -956,14 +1064,43 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
     }
 
     if (primary->can_send) {
+        if (adaptive->sched_diag.enabled) {
+            if (probe_allowed) {
+                adaptive->probe_selected++;
+            } else {
+                adaptive->probe_denied_share_limit++;
+            }
+        }
         *pick_reason = probe_allowed
             ? XQC_ADAPTIVE_PICK_PROBE : XQC_ADAPTIVE_PICK_PRIMARY;
         return probe_allowed ? secondary : primary;
     }
 
     /* Do not idle the connection merely to preserve a target byte share. */
-    *pick_reason = XQC_ADAPTIVE_PICK_CWND_FALLBACK;
+    if (adaptive->sched_diag.enabled) {
+        if (primary->cwnd_eval.block_reason == XQC_SCHED_BLOCK_REAL_INFLIGHT) {
+            adaptive->fallback_real_inflight++;
+        } else if (primary->cwnd_eval.block_reason
+                   == XQC_SCHED_BLOCK_SCHEDULED_RESERVATION)
+        {
+            adaptive->fallback_scheduled_reservation++;
+        }
+    }
+    *pick_reason = primary->excluded_by_reinject
+        ? XQC_ADAPTIVE_PICK_REINJECT_FALLBACK
+        : XQC_ADAPTIVE_PICK_CWND_FALLBACK;
     return secondary;
+}
+
+static xqc_path_ctx_t *
+xqc_adaptive_diag_return(xqc_adaptive_scheduler_t *adaptive,
+    xqc_connection_t *conn, xqc_packet_out_t *packet_out,
+    xqc_path_ctx_t *selected, xqc_bool_t no_sendable, xqc_usec_t now)
+{
+    xqc_scheduler_diag_record_decision(&adaptive->sched_diag, selected,
+        packet_out ? packet_out->po_used_size : 0, no_sendable);
+    xqc_scheduler_diag_maybe_tick(&adaptive->sched_diag, conn, now);
+    return selected;
 }
 
 xqc_path_ctx_t *
@@ -996,6 +1133,26 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         check_cwnd, reinject, candidates, standby, &original_path,
         &has_active, &has_sendable, now);
 
+    if (adaptive->sched_diag.enabled && count >= 2
+        && adaptive->primary_valid)
+    {
+        xqc_adaptive_candidate_t *primary = xqc_adaptive_find_candidate(
+            candidates, count, adaptive->primary_path_id);
+        xqc_adaptive_candidate_t *secondary = NULL;
+        for (size_t i = 0; i < count; i++) {
+            if (candidates[i].path_id != adaptive->primary_path_id) {
+                secondary = &candidates[i];
+                break;
+            }
+        }
+        if (primary && secondary) {
+            adaptive->both_sendable += primary->can_send && secondary->can_send;
+            adaptive->primary_only += primary->can_send && !secondary->can_send;
+            adaptive->secondary_only += !primary->can_send && secondary->can_send;
+            adaptive->neither_sendable += !primary->can_send && !secondary->can_send;
+        }
+    }
+
     if (count == 0) {
         if (has_active && !has_sendable) {
             adaptive->no_sendable_count++;
@@ -1006,9 +1163,11 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         if (original_path != NULL && packet_out
             && !(packet_out->po_flag & XQC_POF_REINJECT_DIFF_PATH))
         {
-            return original_path;
+            return xqc_adaptive_diag_return(adaptive, conn, packet_out,
+                original_path, XQC_FALSE, now);
         }
-        return NULL;
+        return xqc_adaptive_diag_return(adaptive, conn, packet_out, NULL,
+            has_active && !has_sendable, now);
     }
 
     if (count == 1) {
@@ -1021,13 +1180,15 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
             {
                 xqc_adaptive_diag_record_pick(adaptive, &candidates[0],
                     packet_size, XQC_ADAPTIVE_PICK_ORIGINAL, reinject);
-                return original_path;
+                return xqc_adaptive_diag_return(adaptive, conn, packet_out,
+                    original_path, XQC_FALSE, now);
             }
             adaptive->no_sendable_count++;
             if (cc_blocked) {
                 *cc_blocked = XQC_TRUE;
             }
-            return NULL;
+            return xqc_adaptive_diag_return(adaptive, conn, packet_out, NULL,
+                XQC_TRUE, now);
         }
         if (adaptive->phase == XQC_ADAPTIVE_PHASE_BULK
             && (!adaptive->primary_valid
@@ -1058,10 +1219,13 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
                 candidates[0].delivered_total;
             printf("[diag_adaptive] conn=%p event=failover_single primary=%" PRIu64 "\n",
                    (void *)conn, adaptive->primary_path_id);
+            xqc_adaptive_diag_print_primary_paths(adaptive, candidates, 1,
+                now, "failover_single");
         }
         xqc_adaptive_diag_record_pick(adaptive, &candidates[0], packet_size,
             XQC_ADAPTIVE_PICK_SINGLE, reinject);
-        return candidates[0].path;
+        return xqc_adaptive_diag_return(adaptive, conn, packet_out,
+            candidates[0].path, XQC_FALSE, now);
     }
 
     if (adaptive->phase == XQC_ADAPTIVE_PHASE_WAIT_PATHS) {
@@ -1072,6 +1236,14 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
     if (adaptive->phase == XQC_ADAPTIVE_PHASE_WARMUP) {
         xqc_usec_t elapsed = now - adaptive->phase_start_us;
         if (xqc_adaptive_warmup_complete(candidates, count, elapsed)) {
+            adaptive->warmup_elapsed_us = elapsed;
+            for (size_t i = 0; i < count; i++) {
+                candidates[i].state->warmup_sent_final =
+                    candidates[i].warmup_sent;
+                candidates[i].state->warmup_delivered_final =
+                    xqc_adaptive_delta_u64(candidates[i].delivered_total,
+                        candidates[i].state->init_delivered);
+            }
             xqc_adaptive_select_primary(adaptive, conn, candidates, count,
                                         now, "warmup_complete");
             adaptive->phase = XQC_ADAPTIVE_PHASE_BULK;
@@ -1112,7 +1284,8 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         if (cc_blocked) {
             *cc_blocked = XQC_TRUE;
         }
-        return NULL;
+        return xqc_adaptive_diag_return(adaptive, conn, packet_out, NULL,
+            XQC_TRUE, now);
     }
     if (selected == NULL) {
         selected = xqc_adaptive_best_candidate(candidates, count, XQC_TRUE);
@@ -1127,13 +1300,15 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
             candidates, count, original_path->path_id);
         xqc_adaptive_diag_record_pick(adaptive, original, packet_size,
             XQC_ADAPTIVE_PICK_ORIGINAL, reinject);
-        return original_path;
+        return xqc_adaptive_diag_return(adaptive, conn, packet_out,
+            original_path, XQC_FALSE, now);
     }
 
     if (selected != NULL) {
         xqc_adaptive_diag_record_pick(adaptive, selected, packet_size,
             pick_reason, reinject);
-        return selected->path;
+        return xqc_adaptive_diag_return(adaptive, conn, packet_out,
+            selected->path, XQC_FALSE, now);
     }
     if (has_active && !has_sendable) {
         adaptive->no_sendable_count++;
@@ -1141,7 +1316,8 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
     if (cc_blocked) {
         *cc_blocked = has_active && !has_sendable;
     }
-    return NULL;
+    return xqc_adaptive_diag_return(adaptive, conn, packet_out, NULL,
+        has_active && !has_sendable, now);
 }
 
 static const char *
@@ -1169,6 +1345,31 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
         return;
     }
     adaptive->diag_emitted = XQC_TRUE;
+
+    if (adaptive->sched_diag.enabled) {
+        printf("[diag_adaptive_probe] both_sendable=%" PRIu64
+               " primary_only=%" PRIu64 " secondary_only=%" PRIu64
+               " neither_sendable=%" PRIu64
+               " probe_considered=%" PRIu64 " probe_selected=%" PRIu64
+               " probe_denied_secondary_cwnd=%" PRIu64
+               " probe_denied_secondary_reinject=%" PRIu64
+               " probe_denied_secondary_other=%" PRIu64
+               " probe_denied_share_limit=%" PRIu64
+               " probe_denied_no_secondary=%" PRIu64
+               " fallback_real_inflight=%" PRIu64
+               " fallback_scheduled_reservation=%" PRIu64 "\n",
+               adaptive->both_sendable, adaptive->primary_only,
+               adaptive->secondary_only, adaptive->neither_sendable,
+               adaptive->probe_considered, adaptive->probe_selected,
+               adaptive->probe_denied_secondary_cwnd,
+               adaptive->probe_denied_secondary_reinject,
+               adaptive->probe_denied_secondary_other,
+               adaptive->probe_denied_share_limit,
+               adaptive->probe_denied_no_secondary,
+               adaptive->fallback_real_inflight,
+               adaptive->fallback_scheduled_reservation);
+        xqc_scheduler_diag_close(&adaptive->sched_diag, conn);
+    }
 
     xqc_usec_t now = xqc_monotonic_timestamp();
     xqc_usec_t start_us = adaptive->diag_start_us > 0
@@ -1234,7 +1435,9 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
            " primary=%" PRIu64 " final_probe_pct=%.1f min_probe_pct=%.1f"
            " max_probe_pct=%.1f picks_total=%" PRIu64
            " picks_primary=%" PRIu64 " picks_probe=%" PRIu64
-           " picks_cwnd_fallback=%" PRIu64 " picks_warmup=%" PRIu64
+           " picks_cwnd_fallback=%" PRIu64
+           " picks_reinject_fallback=%" PRIu64
+           " picks_warmup=%" PRIu64
            " picks_single=%" PRIu64 " picks_best_fallback=%" PRIu64
            " picks_original=%" PRIu64 " picks_reinject=%" PRIu64
            " no_sendable_calls=%" PRIu64 " primary_selects=%" PRIu64
@@ -1248,7 +1451,9 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
            adaptive->probe_pct, adaptive->min_probe_pct,
            adaptive->max_probe_pct, adaptive->pick_count,
            adaptive->primary_pick_count, adaptive->probe_pick_count,
-           adaptive->cwnd_fallback_pick_count, adaptive->warmup_pick_count,
+           adaptive->cwnd_fallback_pick_count,
+           adaptive->reinject_fallback_pick_count,
+           adaptive->warmup_pick_count,
            adaptive->single_pick_count, adaptive->best_fallback_pick_count,
            adaptive->original_pick_count, adaptive->reinject_pick_count,
            adaptive->no_sendable_count, adaptive->primary_select_count,
@@ -1331,7 +1536,9 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
                " cwnd=%" PRIu64 " inflight=%u est_bw_Bps=%" PRIu64
                " delivery_ema_Bps=%.0f capacity_ema_Bps=%.0f score=%.0f"
                " picks_primary=%" PRIu64 " picks_probe=%" PRIu64
-               " picks_cwnd_fallback=%" PRIu64 " picks_warmup=%" PRIu64
+               " picks_cwnd_fallback=%" PRIu64
+               " picks_reinject_fallback=%" PRIu64
+               " picks_warmup=%" PRIu64
                " picks_single=%" PRIu64 " picks_reinject=%" PRIu64
                " reinject_selected_bytes=%" PRIu64 "\n",
                path->path_id, state ? state->selected_count : 0,
@@ -1347,6 +1554,7 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
                state ? state->primary_pick_count : 0,
                state ? state->probe_pick_count : 0,
                state ? state->cwnd_fallback_pick_count : 0,
+               state ? state->reinject_fallback_pick_count : 0,
                state ? state->warmup_pick_count : 0,
                state ? state->single_pick_count : 0,
                state ? state->reinject_pick_count : 0,

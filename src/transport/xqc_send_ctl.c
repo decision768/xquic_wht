@@ -22,6 +22,143 @@
 #include "src/transport/xqc_datagram.h"
 #include "src/transport/xqc_reinjection.h"
 
+#include <inttypes.h>
+#include <stdio.h>
+
+#define XQC_MP_DIAG_HIST_BUCKETS 11
+
+static const uint64_t xqc_mp_diag_hist_limits_us[XQC_MP_DIAG_HIST_BUCKETS - 1] = {
+    100, 250, 500, 1000, 2500, 5000, 10000, 20000, 50000, 100000
+};
+
+static size_t
+xqc_send_ctl_diag_hist_index(uint64_t value)
+{
+    for (size_t i = 0; i < XQC_MP_DIAG_HIST_BUCKETS - 1; i++) {
+        if (value <= xqc_mp_diag_hist_limits_us[i]) {
+            return i;
+        }
+    }
+    return XQC_MP_DIAG_HIST_BUCKETS - 1;
+}
+
+static const char *
+xqc_send_ctl_diag_bbr_mode(uint8_t mode)
+{
+    switch (mode) {
+    case 0: return "STARTUP";
+    case 1: return "DRAIN";
+    case 2: return "PROBE_BW";
+    case 3: return "PROBE_RTT";
+    default: return "UNKNOWN";
+    }
+}
+
+static void
+xqc_send_ctl_diag_maybe_tick(xqc_send_ctl_t *send_ctl, xqc_usec_t now)
+{
+    if (!send_ctl->diag.enabled || now - send_ctl->diag.last_tick_us
+        < send_ctl->diag.interval_us)
+    {
+        return;
+    }
+    uint8_t mode = 255, full_bw = 0;
+    xqc_bbr_info_interface_t *info =
+        send_ctl->ctl_cong_callback->xqc_cong_ctl_info_cb;
+    if (info && info->mode && info->full_bw_reached) {
+        mode = info->mode(send_ctl->ctl_cong);
+        full_bw = info->full_bw_reached(send_ctl->ctl_cong);
+    }
+    uint64_t cwnd = send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(
+        send_ctl->ctl_cong);
+    uint64_t sample_rate = send_ctl->sampler.delivery_rate;
+    printf("[diag_bbr_tick] path=%" PRIu64 " mode=%s full_bw=%u"
+           " est_bw_Bps=%" PRIu64 " sample_rate_Bps=%" PRIu64
+           " sample_interval_us=%" PRIu64 " ack_elapse_us=%" PRIu64
+           " send_elapse_us=%" PRIu64 " sample_app_limited=%u"
+           " cwnd=%" PRIu64 " inflight=%u scheduled=%u"
+           " pacing_Bps=%" PRIu64 " srtt_us=%" PRIu64
+           " min_rtt_us=%" PRIu64 "\n", send_ctl->ctl_path->path_id,
+           xqc_send_ctl_diag_bbr_mode(mode), full_bw,
+           xqc_send_ctl_get_est_bw(send_ctl), sample_rate,
+           send_ctl->sampler.interval, send_ctl->sampler.ack_elapse,
+           send_ctl->sampler.send_elapse, send_ctl->sampler.is_app_limited,
+           cwnd, send_ctl->ctl_bytes_in_flight,
+           send_ctl->ctl_path->path_schedule_bytes,
+           xqc_send_ctl_get_pacing_rate(send_ctl), send_ctl->ctl_srtt,
+           send_ctl->ctl_minrtt);
+    send_ctl->diag.last_tick_us = now;
+}
+
+static void
+xqc_send_ctl_diag_record_sample(xqc_send_ctl_t *send_ctl,
+    xqc_sample_type_t sample_type)
+{
+    if (!send_ctl->diag.enabled) {
+        return;
+    }
+    if (sample_type == XQC_RATE_SAMPLE_ACK_NOTHING) {
+        send_ctl->diag.sample_ack_nothing++;
+        return;
+    }
+    if (sample_type == XQC_RATE_SAMPLE_INTERVAL_TOO_SAMLL) {
+        send_ctl->diag.sample_interval_too_small++;
+        return;
+    }
+    send_ctl->diag.sample_valid++;
+    send_ctl->diag.sample_app_limited += send_ctl->sampler.is_app_limited != 0;
+    send_ctl->diag.sample_non_app_limited += send_ctl->sampler.is_app_limited == 0;
+    uint64_t rate = send_ctl->sampler.delivery_rate;
+    if (send_ctl->diag.sample_valid == 1
+        || rate < send_ctl->diag.sample_rate_min)
+    {
+        send_ctl->diag.sample_rate_min = rate;
+    }
+    send_ctl->diag.sample_rate_max = xqc_max(send_ctl->diag.sample_rate_max,
+        rate);
+    send_ctl->diag.sample_rate_sum += rate;
+}
+
+void
+xqc_send_ctl_diag_record_ack_mp(xqc_send_ctl_t *send_ctl,
+    xqc_usec_t now, xqc_usec_t generation_delay, int has_gap,
+    xqc_packet_number_t largest_ack)
+{
+    if (!send_ctl || !send_ctl->diag.enabled) {
+        return;
+    }
+    send_ctl->diag.ack_mp_generated++;
+    if (send_ctl->diag.last_ack_mp_us > 0) {
+        uint64_t gap = now - send_ctl->diag.last_ack_mp_us;
+        send_ctl->diag.ack_gap_sum_us += gap;
+        if (send_ctl->diag.ack_mp_generated == 2
+            || gap < send_ctl->diag.ack_gap_min_us)
+        {
+            send_ctl->diag.ack_gap_min_us = gap;
+        }
+        send_ctl->diag.ack_gap_max_us = xqc_max(
+            send_ctl->diag.ack_gap_max_us, gap);
+    }
+    send_ctl->diag.last_ack_mp_us = now;
+    send_ctl->diag.ack_generation_delay_sum_us += generation_delay;
+    if (send_ctl->diag.ack_mp_generated == 1
+        || generation_delay < send_ctl->diag.ack_generation_delay_min_us)
+    {
+        send_ctl->diag.ack_generation_delay_min_us = generation_delay;
+    }
+    send_ctl->diag.ack_generation_delay_max_us = xqc_max(
+        send_ctl->diag.ack_generation_delay_max_us, generation_delay);
+    if (send_ctl->diag.ack_mp_generated > 1
+        && largest_ack >= send_ctl->diag.last_largest_ack)
+    {
+        send_ctl->diag.largest_ack_delta_max = xqc_max(
+            send_ctl->diag.largest_ack_delta_max,
+            largest_ack - send_ctl->diag.last_largest_ack);
+    }
+    send_ctl->diag.last_largest_ack = largest_ack;
+    send_ctl->diag.ack_has_gap += has_gap != 0;
+}
+
 int 
 xqc_send_ctl_may_remove_unacked_dgram(xqc_connection_t *conn, xqc_packet_out_t *po)
 {
@@ -183,6 +320,13 @@ xqc_send_ctl_create(xqc_path_ctx_t *path)
     send_ctl->ctl_info.bw_change_threshold = XQC_DEFAULT_BW_CHANGE_THRESHOLD;
 
     send_ctl->sampler.send_ctl = send_ctl;
+    send_ctl->diag.enabled = conn->conn_settings.scheduler_params.mp_diag_enabled;
+    send_ctl->diag.interval_us =
+        (xqc_usec_t)(conn->conn_settings.scheduler_params.mp_diag_interval_ms
+            ? conn->conn_settings.scheduler_params.mp_diag_interval_ms : 250)
+        * 1000;
+    send_ctl->diag.start_us = xqc_monotonic_timestamp();
+    send_ctl->diag.last_tick_us = send_ctl->diag.start_us;
 
     xqc_log_event(conn->log, REC_PARAMETERS_SET, send_ctl, XQC_kGranularity, conn->conn_settings.cc_params);
     return send_ctl;
@@ -192,6 +336,100 @@ void
 xqc_send_ctl_destroy(xqc_send_ctl_t *send_ctl)
 {
     xqc_log(send_ctl->ctl_conn->log, XQC_LOG_DEBUG, "|destroy|");
+
+    if (send_ctl->diag.enabled && !send_ctl->diag.emitted) {
+        send_ctl->diag.emitted = 1;
+        uint64_t sample_avg = send_ctl->diag.sample_valid
+            ? send_ctl->diag.sample_rate_sum / send_ctl->diag.sample_valid : 0;
+        uint64_t ack_gap_avg = send_ctl->diag.ack_mp_generated > 1
+            ? send_ctl->diag.ack_gap_sum_us
+                / (send_ctl->diag.ack_mp_generated - 1) : 0;
+        uint64_t ack_delay_avg = send_ctl->diag.ack_mp_generated
+            ? send_ctl->diag.ack_generation_delay_sum_us
+                / send_ctl->diag.ack_mp_generated : 0;
+        printf("[diag_ack_path] path=%" PRIu64
+               " ack_frames=%" PRIu64 " acked_packets=%" PRIu64
+               " acked_bytes=%" PRIu64 " same_path_ack=%" PRIu64
+               " cross_path_ack=%" PRIu64
+               " inter_ack_gap_hist=%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               " ack_delay_hist=%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+               "\n", send_ctl->ctl_path->path_id,
+               send_ctl->diag.ack_frames, send_ctl->diag.acked_packets,
+               send_ctl->diag.acked_bytes, send_ctl->diag.same_path_ack,
+               send_ctl->diag.cross_path_ack,
+               send_ctl->diag.inter_ack_gap_hist[0], send_ctl->diag.inter_ack_gap_hist[1],
+               send_ctl->diag.inter_ack_gap_hist[2], send_ctl->diag.inter_ack_gap_hist[3],
+               send_ctl->diag.inter_ack_gap_hist[4], send_ctl->diag.inter_ack_gap_hist[5],
+               send_ctl->diag.inter_ack_gap_hist[6], send_ctl->diag.inter_ack_gap_hist[7],
+               send_ctl->diag.inter_ack_gap_hist[8], send_ctl->diag.inter_ack_gap_hist[9],
+               send_ctl->diag.inter_ack_gap_hist[10], send_ctl->diag.ack_delay_hist[0],
+               send_ctl->diag.ack_delay_hist[1], send_ctl->diag.ack_delay_hist[2],
+               send_ctl->diag.ack_delay_hist[3], send_ctl->diag.ack_delay_hist[4],
+               send_ctl->diag.ack_delay_hist[5], send_ctl->diag.ack_delay_hist[6],
+               send_ctl->diag.ack_delay_hist[7], send_ctl->diag.ack_delay_hist[8],
+               send_ctl->diag.ack_delay_hist[9], send_ctl->diag.ack_delay_hist[10]);
+        printf("[diag_bbr_path] path=%" PRIu64
+               " sample_valid=%" PRIu64 " sample_ack_nothing=%" PRIu64
+               " sample_interval_too_small=%" PRIu64
+               " sample_app_limited=%" PRIu64
+               " sample_non_app_limited=%" PRIu64
+               " sample_rate_min=%" PRIu64 " sample_rate_avg=%" PRIu64
+               " sample_rate_max=%" PRIu64 "\n",
+               send_ctl->ctl_path->path_id, send_ctl->diag.sample_valid,
+               send_ctl->diag.sample_ack_nothing,
+               send_ctl->diag.sample_interval_too_small,
+               send_ctl->diag.sample_app_limited,
+               send_ctl->diag.sample_non_app_limited,
+               send_ctl->diag.sample_rate_min, sample_avg,
+               send_ctl->diag.sample_rate_max);
+        printf("[diag_send_path] path=%" PRIu64
+               " send_cwnd_block_count=%" PRIu64
+               " send_cwnd_block_duration_us=%" PRIu64
+               " pacing_block_count=%" PRIu64
+               " pacing_block_duration_us=%" PRIu64
+               " first_block_cwnd=%" PRIu64
+               " first_block_pacing=%" PRIu64
+               " both_blocked_cwnd_first=%" PRIu64
+               " both_blocked_pacing_first=%" PRIu64
+               " send_burst_events=%" PRIu64
+               " send_burst_packets=%" PRIu64 " send_burst_bytes=%" PRIu64
+               " send_burst_max_packets=%" PRIu64
+               " send_burst_max_bytes=%" PRIu64
+               " ack_mp_generated=%" PRIu64
+               " ack_gap_us_min=%" PRIu64 " ack_gap_us_avg=%" PRIu64
+               " ack_gap_us_max=%" PRIu64
+               " ack_generation_delay_us_min=%" PRIu64
+               " ack_generation_delay_us_avg=%" PRIu64
+               " ack_generation_delay_us_max=%" PRIu64
+               " largest_ack_delta_max=%" PRIu64
+               " ack_has_gap=%" PRIu64 "\n",
+               send_ctl->ctl_path->path_id,
+               send_ctl->diag.send_cwnd_block_count,
+               send_ctl->diag.send_cwnd_block_duration_us,
+               send_ctl->diag.pacing_block_count,
+               send_ctl->diag.pacing_block_duration_us,
+               send_ctl->diag.first_block_cwnd,
+               send_ctl->diag.first_block_pacing,
+               send_ctl->diag.both_blocked_cwnd_first,
+               send_ctl->diag.both_blocked_pacing_first,
+               send_ctl->diag.send_burst_events,
+               send_ctl->diag.send_burst_packets,
+               send_ctl->diag.send_burst_bytes,
+               send_ctl->diag.send_burst_max_packets,
+               send_ctl->diag.send_burst_max_bytes,
+               send_ctl->diag.ack_mp_generated,
+               send_ctl->diag.ack_gap_min_us, ack_gap_avg,
+               send_ctl->diag.ack_gap_max_us,
+               send_ctl->diag.ack_generation_delay_min_us,
+               ack_delay_avg,
+               send_ctl->diag.ack_generation_delay_max_us,
+               send_ctl->diag.largest_ack_delta_max,
+               send_ctl->diag.ack_has_gap);
+    }
 
     /* 从上到下4个pns的遍历，全都不一样 */
     for (xqc_pkt_num_space_t pns = 0; pns < XQC_PNS_N; ++pns) {
@@ -415,17 +653,27 @@ xqc_send_ctl_info_circle_record(xqc_send_ctl_t *send_ctl)
  * another.  The signals QUIC provides for congestion control are
  * generic and are designed to support different algorithms.
  */
+unsigned
+xqc_send_ctl_calc_effective_cwnd(uint64_t raw_cwnd, uint64_t so_sndbuf)
+{
+    unsigned effective_cwnd = (unsigned)raw_cwnd;
+    if (so_sndbuf > 0) {
+        effective_cwnd = xqc_min(effective_cwnd, so_sndbuf);
+    }
+    return effective_cwnd;
+}
+
 int
 xqc_send_ctl_can_send(xqc_send_ctl_t *send_ctl, xqc_packet_out_t *packet_out, uint32_t schedule_bytes)
 {
     xqc_connection_t *conn = send_ctl->ctl_conn;
 
     int can = 1;
-    unsigned congestion_window = send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(send_ctl->ctl_cong);
-
-    if (conn->conn_settings.so_sndbuf > 0) {
-        congestion_window = xqc_min(congestion_window, conn->conn_settings.so_sndbuf);
-    }
+    uint64_t raw_cwnd = send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(
+        send_ctl->ctl_cong);
+    unsigned congestion_window = xqc_send_ctl_calc_effective_cwnd(raw_cwnd,
+        conn->conn_settings.so_sndbuf > 0
+            ? (uint64_t)conn->conn_settings.so_sndbuf : 0);
 
     if (send_ctl->ctl_bytes_in_flight + schedule_bytes + packet_out->po_used_size > congestion_window) {
         can = 0;
@@ -452,7 +700,15 @@ xqc_send_packet_cwnd_allows(xqc_send_ctl_t *send_ctl,
             xqc_log(conn->log, XQC_LOG_DEBUG, 
                     "|blocked by congestion control|po_sz:%ud|", packet_out->po_used_size);
             if (packet_out->po_send_cwnd_blk_ts == 0) {
+                if (send_ctl->diag.enabled
+                    && packet_out->po_send_pacing_blk_ts == 0)
+                {
+                    send_ctl->diag.first_block_cwnd++;
+                }
                 packet_out->po_send_cwnd_blk_ts = now;
+            }
+            if (send_ctl->diag.enabled) {
+                send_ctl->diag.send_cwnd_block_count++;
             }
             return XQC_FALSE;
         }
@@ -475,7 +731,15 @@ xqc_send_packet_pacer_allows(xqc_send_ctl_t *send_ctl,
             {
                 xqc_log(conn->log, XQC_LOG_DEBUG, "|pacing blocked|");
                 if (packet_out->po_send_pacing_blk_ts == 0) {
+                    if (send_ctl->diag.enabled
+                        && packet_out->po_send_cwnd_blk_ts == 0)
+                    {
+                        send_ctl->diag.first_block_pacing++;
+                    }
                     packet_out->po_send_pacing_blk_ts = now;
+                }
+                if (send_ctl->diag.enabled) {
+                    send_ctl->diag.pacing_block_count++;
                 }
                 return XQC_FALSE;
             }
@@ -619,6 +883,50 @@ void
 xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_packet_out_t *packet_out, xqc_usec_t now)
 {
     xqc_pkt_num_space_t pns = packet_out->po_pkt.pkt_pns;
+
+    if (send_ctl->diag.enabled) {
+        if (packet_out->po_send_cwnd_blk_ts > 0
+            && now >= packet_out->po_send_cwnd_blk_ts)
+        {
+            send_ctl->diag.send_cwnd_block_duration_us +=
+                now - packet_out->po_send_cwnd_blk_ts;
+        }
+        if (packet_out->po_send_pacing_blk_ts > 0
+            && now >= packet_out->po_send_pacing_blk_ts)
+        {
+            send_ctl->diag.pacing_block_duration_us +=
+                now - packet_out->po_send_pacing_blk_ts;
+        }
+        if (packet_out->po_send_cwnd_blk_ts > 0
+            && packet_out->po_send_pacing_blk_ts > 0)
+        {
+            if (packet_out->po_send_cwnd_blk_ts
+                <= packet_out->po_send_pacing_blk_ts)
+            {
+                send_ctl->diag.both_blocked_cwnd_first++;
+            } else {
+                send_ctl->diag.both_blocked_pacing_first++;
+            }
+        }
+        if (send_ctl->diag.last_send_us == 0
+            || now - send_ctl->diag.last_send_us > 1000)
+        {
+            send_ctl->diag.send_burst_events++;
+            send_ctl->diag.current_burst_packets = 0;
+            send_ctl->diag.current_burst_bytes = 0;
+        }
+        send_ctl->diag.current_burst_packets++;
+        send_ctl->diag.current_burst_bytes += packet_out->po_enc_size;
+        send_ctl->diag.send_burst_packets++;
+        send_ctl->diag.send_burst_bytes += packet_out->po_enc_size;
+        send_ctl->diag.send_burst_max_packets = xqc_max(
+            send_ctl->diag.send_burst_max_packets,
+            send_ctl->diag.current_burst_packets);
+        send_ctl->diag.send_burst_max_bytes = xqc_max(
+            send_ctl->diag.send_burst_max_bytes,
+            send_ctl->diag.current_burst_bytes);
+        send_ctl->diag.last_send_us = now;
+    }
 
     xqc_sample_on_sent(packet_out, send_ctl, now);
 
@@ -844,6 +1152,20 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
         return -XQC_EPROTO;
     }
 
+    if (send_ctl->diag.enabled) {
+        send_ctl->diag.ack_frames++;
+        send_ctl->diag.same_path_ack += ack_on_same_path != 0;
+        send_ctl->diag.cross_path_ack += ack_on_same_path == 0;
+        if (send_ctl->diag.last_ack_recv_us > 0) {
+            uint64_t gap = ack_recv_time - send_ctl->diag.last_ack_recv_us;
+            send_ctl->diag.inter_ack_gap_hist[
+                xqc_send_ctl_diag_hist_index(gap)]++;
+        }
+        send_ctl->diag.last_ack_recv_us = ack_recv_time;
+        send_ctl->diag.ack_delay_hist[
+            xqc_send_ctl_diag_hist_index(ack_info->ack_delay)]++;
+    }
+
     xqc_packet_number_t largest_acked_ack = xqc_ack_sent_record_on_ack(&pn_ctl->ack_sent_record[pns], ack_info);
     if (largest_acked_ack > pn_ctl->ctl_largest_acked_ack[pns]) {
         pn_ctl->ctl_largest_acked_ack[pns] = largest_acked_ack;
@@ -882,6 +1204,10 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
 
         if (packet_out->po_pkt.pkt_num >= range->low) {
             // this packet is acked
+            if (send_ctl->diag.enabled) {
+                send_ctl->diag.acked_packets++;
+                send_ctl->diag.acked_bytes += packet_out->po_used_size;
+            }
 
             // 修改标志位
             if (has_acked == 0) {
@@ -962,6 +1288,10 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
 
     /* 此path没有ack */
     if (!has_acked) {
+        if (send_ctl->diag.enabled) {
+            send_ctl->diag.sample_ack_nothing++;
+            xqc_send_ctl_diag_maybe_tick(send_ctl, ack_recv_time);
+        }
         return XQC_OK;
     }
 
@@ -1024,6 +1354,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
         int bw_record_flag = 0;
         xqc_usec_t now = ack_recv_time;
         xqc_sample_type_t sample_type = xqc_generate_sample(&send_ctl->sampler, send_ctl, ack_recv_time);
+        xqc_send_ctl_diag_record_sample(send_ctl, sample_type);
 
         /* Make sure that we do not call BBR with a invalid sampler. */
         if (sample_type == XQC_RATE_SAMPLE_VALID) {
@@ -1089,6 +1420,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
 
     } else if (send_ctl->ctl_cong_callback->xqc_cong_ctl_on_ack_multiple_pkts) {
         xqc_sample_type_t sample_type = xqc_generate_sample(&send_ctl->sampler, send_ctl, ack_recv_time);
+        xqc_send_ctl_diag_record_sample(send_ctl, sample_type);
         /* Currently, this is only the case for Copa. */
         if (sample_type != XQC_RATE_SAMPLE_ACK_NOTHING) {
             send_ctl->ctl_cong_callback->xqc_cong_ctl_on_ack_multiple_pkts(send_ctl->ctl_cong, &send_ctl->sampler);
@@ -1096,6 +1428,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     }
 
     xqc_send_ctl_info_circle_record(send_ctl);
+    xqc_send_ctl_diag_maybe_tick(send_ctl, ack_recv_time);
     xqc_log_event(conn->log, REC_METRICS_UPDATED, send_ctl);
     return XQC_OK;
 }

@@ -84,7 +84,9 @@ xqc_conn_settings_t internal_default_conn_settings = {
                                     .loss_percent_thr_low = 10,
                                     .pto_cnt_thr = 2,
                                     .rtt_us_thr_high = 2000000,
-                                    .rtt_us_thr_low = 500000
+                                    .rtt_us_thr_low = 500000,
+                                    .mp_diag_enabled = 0,
+                                    .mp_diag_interval_ms = 250
                                   },
     .is_interop_mode            = 0,
 #ifdef XQC_PROTECT_POOL_MEM
@@ -159,6 +161,16 @@ xqc_conn_set_default_sched_params(xqc_conn_settings_t *src_settings, xqc_conn_se
 
     if (settings->scheduler_params.rtt_us_thr_low == 0) {
         settings->scheduler_params.rtt_us_thr_low = src_settings->scheduler_params.rtt_us_thr_low;
+    }
+
+    if (settings->scheduler_params.mp_diag_interval_ms == 0) {
+        settings->scheduler_params.mp_diag_interval_ms =
+            src_settings->scheduler_params.mp_diag_interval_ms;
+    }
+    if (settings->scheduler_params.mp_diag_interval_ms < 100
+        || settings->scheduler_params.mp_diag_interval_ms > 5000)
+    {
+        settings->scheduler_params.mp_diag_interval_ms = 250;
     }
 }
 

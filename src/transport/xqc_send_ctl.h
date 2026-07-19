@@ -176,6 +176,57 @@ typedef struct xqc_send_ctl_s {
 
     uint64_t                    ctl_ack_sent_cnt;
 
+    struct {
+        uint8_t     enabled;
+        uint8_t     emitted;
+        xqc_usec_t  start_us;
+        xqc_usec_t  last_tick_us;
+        xqc_usec_t  interval_us;
+        xqc_usec_t  last_ack_recv_us;
+        uint64_t    ack_frames;
+        uint64_t    acked_packets;
+        uint64_t    acked_bytes;
+        uint64_t    same_path_ack;
+        uint64_t    cross_path_ack;
+        uint64_t    inter_ack_gap_hist[11];
+        uint64_t    ack_delay_hist[11];
+        uint64_t    sample_valid;
+        uint64_t    sample_ack_nothing;
+        uint64_t    sample_interval_too_small;
+        uint64_t    sample_app_limited;
+        uint64_t    sample_non_app_limited;
+        uint64_t    sample_rate_min;
+        uint64_t    sample_rate_max;
+        uint64_t    sample_rate_sum;
+        uint64_t    send_cwnd_block_count;
+        uint64_t    send_cwnd_block_duration_us;
+        uint64_t    pacing_block_count;
+        uint64_t    pacing_block_duration_us;
+        uint64_t    first_block_cwnd;
+        uint64_t    first_block_pacing;
+        uint64_t    both_blocked_cwnd_first;
+        uint64_t    both_blocked_pacing_first;
+        uint64_t    send_burst_events;
+        uint64_t    send_burst_packets;
+        uint64_t    send_burst_bytes;
+        uint64_t    send_burst_max_packets;
+        uint64_t    send_burst_max_bytes;
+        xqc_usec_t  last_send_us;
+        uint64_t    current_burst_packets;
+        uint64_t    current_burst_bytes;
+        uint64_t    ack_mp_generated;
+        xqc_usec_t  last_ack_mp_us;
+        uint64_t    ack_gap_sum_us;
+        uint64_t    ack_gap_min_us;
+        uint64_t    ack_gap_max_us;
+        uint64_t    ack_generation_delay_sum_us;
+        uint64_t    ack_generation_delay_min_us;
+        uint64_t    ack_generation_delay_max_us;
+        xqc_packet_number_t last_largest_ack;
+        uint64_t    largest_ack_delta_max;
+        uint64_t    ack_has_gap;
+    } diag;
+
 } xqc_send_ctl_t;
 
 
@@ -206,6 +257,9 @@ void xqc_pn_ctl_destroy(xqc_pn_ctl_t *pn_ctl);
 xqc_pn_ctl_t *xqc_get_pn_ctl(xqc_connection_t *conn, xqc_path_ctx_t *path);
 
 int xqc_send_ctl_can_send(xqc_send_ctl_t *send_ctl, xqc_packet_out_t *packet_out, uint32_t schedule_bytes);
+
+unsigned xqc_send_ctl_calc_effective_cwnd(uint64_t raw_cwnd,
+    uint64_t so_sndbuf);
 
 xqc_bool_t xqc_send_packet_cwnd_allows(xqc_send_ctl_t *send_ctl, 
     xqc_packet_out_t *packet_out, uint32_t schedule_bytes, xqc_usec_t now);
@@ -283,6 +337,10 @@ xqc_packet_number_t xqc_send_ctl_get_pkt_num_gap(xqc_send_ctl_t *send_ctl, xqc_p
 /* bytes per second */
 uint64_t xqc_send_ctl_get_est_bw(xqc_send_ctl_t *send_ctl);
 uint64_t xqc_send_ctl_get_pacing_rate(xqc_send_ctl_t *send_ctl);
+
+void xqc_send_ctl_diag_record_ack_mp(xqc_send_ctl_t *send_ctl,
+    xqc_usec_t now, xqc_usec_t generation_delay, int has_gap,
+    xqc_packet_number_t largest_ack);
 
 xqc_int_t xqc_send_ctl_detect_optimistic_ack_attack(xqc_send_ctl_t *send_ctl, 
     xqc_pn_ctl_t *pn_ctl, xqc_ack_info_t *const ack_info, xqc_usec_t ack_recv_time);

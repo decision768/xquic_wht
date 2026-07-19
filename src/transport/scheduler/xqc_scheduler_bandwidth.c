@@ -4,6 +4,9 @@
 #include "src/transport/xqc_send_ctl.h"
 
 #include <stdint.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <string.h>
 
 #define XQC_BW_FILL_RATIO_NUM  9
 #define XQC_BW_FILL_RATIO_DEN  10
@@ -12,9 +15,60 @@
 #define XQC_BW_BETA_DEN        10
 
 typedef struct {
+    xqc_bool_t in_use;
+    uint64_t path_id;
+    uint64_t samples;
+    int64_t score_sum;
+    uint64_t available_bytes_sum;
+    int64_t last_score;
+    uint64_t last_available_bytes;
+} xqc_bandwidth_path_diag_t;
+
+typedef struct {
     xqc_bool_t  has_last_path;
     uint64_t    last_path_id;
+    xqc_sched_diag_t diag;
+    uint64_t selected_available;
+    uint64_t selected_standby;
+    uint64_t selected_original_reinject;
+    int64_t selected_score_sum;
+    uint64_t selected_available_bytes_sum;
+    xqc_bandwidth_path_diag_t path_diag[XQC_MAX_PATHS_COUNT];
 } xqc_bandwidth_scheduler_t;
+
+static void
+xqc_bandwidth_scheduler_record_path(xqc_bandwidth_scheduler_t *scheduler,
+    xqc_path_ctx_t *path, int64_t score, uint64_t available_bytes)
+{
+    if (!scheduler || !scheduler->diag.enabled || !path) {
+        return;
+    }
+    xqc_bandwidth_path_diag_t *free_slot = NULL;
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        if (scheduler->path_diag[i].in_use
+            && scheduler->path_diag[i].path_id == path->path_id)
+        {
+            free_slot = &scheduler->path_diag[i];
+            break;
+        }
+        if (!scheduler->path_diag[i].in_use && free_slot == NULL) {
+            free_slot = &scheduler->path_diag[i];
+        }
+    }
+    if (!free_slot) {
+        return;
+    }
+    if (!free_slot->in_use) {
+        memset(free_slot, 0, sizeof(*free_slot));
+        free_slot->in_use = XQC_TRUE;
+        free_slot->path_id = path->path_id;
+    }
+    free_slot->samples++;
+    free_slot->score_sum += score;
+    free_slot->available_bytes_sum += available_bytes;
+    free_slot->last_score = score;
+    free_slot->last_available_bytes = available_bytes;
+}
 
 static size_t
 xqc_bandwidth_scheduler_size()
@@ -27,8 +81,8 @@ xqc_bandwidth_scheduler_init(void *scheduler, xqc_log_t *log, xqc_scheduler_para
 {
     xqc_bandwidth_scheduler_t *s = (xqc_bandwidth_scheduler_t *)scheduler;
     if (s) {
-        s->has_last_path = XQC_FALSE;
-        s->last_path_id = 0;
+        memset(s, 0, sizeof(*s));
+        xqc_scheduler_diag_init(&s->diag, "bw", params);
     }
 }
 
@@ -203,6 +257,9 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
     uint64_t bytes_on_path = 0;
     xqc_bool_t has_active_path = XQC_FALSE;
     xqc_bool_t has_sendable_path = XQC_FALSE;
+    xqc_bool_t selected_from_available = XQC_FALSE;
+    xqc_bool_t selected_from_standby = XQC_FALSE;
+    xqc_bool_t selected_original = XQC_FALSE;
 
     if (cc_blocked) {
         *cc_blocked = XQC_FALSE;
@@ -219,9 +276,16 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
 
         has_active_path = XQC_TRUE;
 
-        if (!xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd)) {
+        xqc_sched_path_eval_t evaluation;
+        if (!xqc_scheduler_evaluate_path(path, packet_out, check_cwnd,
+            &evaluation))
+        {
+            xqc_scheduler_diag_record_evaluation(
+                bandwidth ? &bandwidth->diag : NULL, path, &evaluation);
             continue;
         }
+        xqc_scheduler_diag_record_evaluation(
+            bandwidth ? &bandwidth->diag : NULL, path, &evaluation);
 
         has_sendable_path = XQC_TRUE;
 
@@ -269,6 +333,14 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
         available_srtt, available_score, available_cnt);
     xqc_bandwidth_scheduler_compute_scores(standby_cwnd, standby_inflight,
         standby_srtt, standby_score, standby_cnt);
+    for (size_t i = 0; i < available_cnt; i++) {
+        xqc_bandwidth_scheduler_record_path(bandwidth, available_paths[i],
+            available_score[i], available_bytes[i]);
+    }
+    for (size_t i = 0; i < standby_cnt; i++) {
+        xqc_bandwidth_scheduler_record_path(bandwidth, standby_paths[i],
+            standby_score[i], standby_bytes[i]);
+    }
 
     xqc_path_ctx_t *best_path = NULL;
     uint64_t best_available = 0;
@@ -277,22 +349,31 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
     best_path = xqc_bandwidth_scheduler_pick_path(bandwidth, available_paths,
         available_bytes, available_srtt, available_score, available_cnt,
         &best_available, &best_score);
+    selected_from_available = best_path != NULL;
 
     if (best_path == NULL) {
         best_path = xqc_bandwidth_scheduler_pick_path(bandwidth, standby_paths,
             standby_bytes, standby_srtt, standby_score, standby_cnt,
             &best_available, &best_score);
+        selected_from_standby = best_path != NULL;
     }
 
     if (best_path == NULL && original_path != NULL
         && !(packet_out->po_flag & XQC_POF_REINJECT_DIFF_PATH))
     {
         best_path = original_path;
+        selected_original = XQC_TRUE;
     }
 
     if (best_path == NULL) {
         xqc_log(conn->log, XQC_LOG_DEBUG,
                 "|bandwidth scheduler|No available paths to schedule|conn:%p|", conn);
+        xqc_scheduler_diag_record_decision(
+            bandwidth ? &bandwidth->diag : NULL, NULL,
+            packet_out ? packet_out->po_used_size : 0,
+            has_active_path && !has_sendable_path);
+        xqc_scheduler_diag_maybe_tick(
+            bandwidth ? &bandwidth->diag : NULL, conn, 0);
         return NULL;
     }
 
@@ -302,11 +383,63 @@ xqc_bandwidth_scheduler_get_path(void *scheduler,
             xqc_frame_type_2_str(conn->engine, packet_out->po_frame_types),
             best_available, (long)best_score);
 
+    if (bandwidth && bandwidth->diag.enabled) {
+        bandwidth->selected_available += selected_from_available;
+        bandwidth->selected_standby += selected_from_standby;
+        bandwidth->selected_original_reinject += selected_original;
+        bandwidth->selected_score_sum += best_score;
+        bandwidth->selected_available_bytes_sum += best_available;
+    }
+    xqc_scheduler_diag_record_decision(
+        bandwidth ? &bandwidth->diag : NULL, best_path,
+        packet_out ? packet_out->po_used_size : 0, XQC_FALSE);
+    xqc_scheduler_diag_maybe_tick(
+        bandwidth ? &bandwidth->diag : NULL, conn, 0);
+
     return best_path;
+}
+
+static void
+xqc_bandwidth_scheduler_conn_close_diag(void *scheduler,
+    xqc_connection_t *conn)
+{
+    xqc_bandwidth_scheduler_t *bandwidth = scheduler;
+    if (!bandwidth || !bandwidth->diag.enabled
+        || bandwidth->diag.summary_emitted)
+    {
+        return;
+    }
+    printf("[diag_bw_summary] selected_available=%" PRIu64
+           " selected_standby=%" PRIu64
+           " selected_original_reinject=%" PRIu64
+           " selected_score_sum=%" PRId64
+           " selected_available_bytes_sum=%" PRIu64 "\n",
+           bandwidth->selected_available, bandwidth->selected_standby,
+           bandwidth->selected_original_reinject,
+           bandwidth->selected_score_sum,
+           bandwidth->selected_available_bytes_sum);
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
+        xqc_bandwidth_path_diag_t *path = &bandwidth->path_diag[i];
+        if (!path->in_use) {
+            continue;
+        }
+        printf("[diag_bw_path] id=%" PRIu64 " samples=%" PRIu64
+               " score_avg=%" PRId64 " score_last=%" PRId64
+               " available_bytes_avg=%" PRIu64
+               " available_bytes_last=%" PRIu64 "\n", path->path_id,
+               path->samples,
+               path->samples ? path->score_sum / (int64_t)path->samples : 0,
+               path->last_score,
+               path->samples
+                   ? path->available_bytes_sum / path->samples : 0,
+               path->last_available_bytes);
+    }
+    xqc_scheduler_diag_close(&bandwidth->diag, conn);
 }
 
 const xqc_scheduler_callback_t xqc_bandwidth_scheduler_cb = {
     .xqc_scheduler_size             = xqc_bandwidth_scheduler_size,
     .xqc_scheduler_init             = xqc_bandwidth_scheduler_init,
     .xqc_scheduler_get_path         = xqc_bandwidth_scheduler_get_path,
+    .xqc_scheduler_conn_close_diag  = xqc_bandwidth_scheduler_conn_close_diag,
 };

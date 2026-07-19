@@ -1603,6 +1603,10 @@ xqc_write_ack_mp_to_one_packet(xqc_connection_t *conn, xqc_path_ctx_t *path,
     conn->ack_flag &= ~(1 << (pns + path->path_id * XQC_PNS_N));
 
     path->path_send_ctl->ctl_ack_sent_cnt++;
+    xqc_send_ctl_diag_record_ack_mp(path->path_send_ctl, now,
+        path->path_send_ctl->ctl_largest_recv_time[pns] > 0
+            ? now - path->path_send_ctl->ctl_largest_recv_time[pns] : 0,
+        has_gap, largest_ack);
 
     return XQC_OK;
 

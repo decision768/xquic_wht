@@ -1,12 +1,12 @@
-# V5.4 Direct Fair RX 优化说明
+# V5.4 Direct Fair RX 与多路径诊断优化说明
 
 ## 1. 版本定位
 
 本版本的分支版本号为 `V5.4`，代码基线来自 `v5.5.3`。本次修改聚焦客户端双链路 GET 接收路径，目标是消除旧 RX 架构中的跨路径耦合，并补齐路径生命周期和诊断统计。
 
-本版本不修改：
+本版本不修改以下传输行为：
 
-- adaptive、BBR 等拥塞控制或多路径调度算法；
+- adaptive、RAP、BW 的选路策略，以及 BBR 拥塞控制参数；
 - HTTP/3 GET 分片策略；
 - 客户端异步写盘机制；
 - 服务端 GET 文件 `pread()` 发送流程；
@@ -48,7 +48,7 @@ POST 的主要大流量方向是客户端发送，旧客户端 RX 队列主要�
 两个持久化 EV_READ 事件
 -> 同一个 Libevent 线程公平仲裁
 -> 每次回调只执行一个公平轮
--> 每条路径在本轮最多读取 16 个 UDP 包
+-> 每条路径在本轮最多读取 64 个 UDP 包
 -> 每次回调结束后轮转下一次回调的起始路径
 -> 非空回调调用一次 xqc_engine_finish_recv()
 -> 返回 Libevent，未读空的 socket 依靠水平触发再次唤醒
@@ -57,16 +57,16 @@ POST 的主要大流量方向是客户端发送，旧客户端 RX 队列主要�
 固定接收策略：
 
 ```text
-per_path_packets = 16
+per_path_packets = 64
 rounds_per_callback = 1（固定行为，不是独立控制参数）
 ```
 
-Linux 主路径使用 `recvmmsg()`；其他平台使用最多 16 次非阻塞 `recvfrom()`。批量缓冲区在路径准备阶段从堆上分配并复用，不在回调栈上放置大数组。
+Linux 主路径使用 `recvmmsg()`；其他平台使用最多 64 次非阻塞 `recvfrom()`。批量缓冲区在路径准备阶段从堆上分配并复用，不在回调栈上放置大数组。
 
 启动时会输出：
 
 ```text
-[resolved-rx] mode=direct_fair_recvmmsg per_path=16 rounds=1
+[resolved-rx] mode=direct_fair_recvmmsg per_path=64 rounds=1
 ```
 
 非 Linux 平台的 mode 为 `direct_fair_recvfrom`。
@@ -85,23 +85,23 @@ xqc_engine_finish_recv(engine);
 
 这样 ACK、定时器、HTTP/3 回调和拥塞控制反馈不会等待一个无界队列全部排空。
 
-单路径模式下每次回调最多读取 16 个包；双路径模式下每次回调最多读取 32 个包。若任一路径仍有未读数据，Libevent 会在后续事件循环中继续触发回调。`callback_us` 等时间统计继续保留，但不再参与是否继续收包的控制。
+单路径模式下每次回调最多读取 64 个包；双路径模式下每次回调最多读取 128 个包。若任一路径仍有未读数据，Libevent 会在后续事件循环中继续触发回调。`callback_us` 等时间统计继续保留，但不再参与是否继续收包的控制。
 
 单路径持续可读时，回调行为为：
 
 ```text
-回调 N：A 最多读取 16 包 -> finish_recv() -> 返回 Libevent
-回调 N+1：A 最多读取 16 包 -> finish_recv() -> 返回 Libevent
+回调 N：A 最多读取 64 包 -> finish_recv() -> 返回 Libevent
+回调 N+1：A 最多读取 64 包 -> finish_recv() -> 返回 Libevent
 ```
 
 双路径持续可读时，回调行为为：
 
 ```text
-回调 N：A 最多读取 16 包 -> B 最多读取 16 包 -> finish_recv()
-回调 N+1：B 最多读取 16 包 -> A 最多读取 16 包 -> finish_recv()
+回调 N：A 最多读取 64 包 -> B 最多读取 64 包 -> finish_recv()
+回调 N+1：B 最多读取 64 包 -> A 最多读取 64 包 -> finish_recv()
 ```
 
-例如 A 的内核队列有 100 包、B 有 1 包，第一次回调最多处理 A 的 16 包和 B 的 1 包；A 剩余数据使其 socket 继续保持可读，后续回调从 B 开始检查并继续处理 A，不等待 B 凑满批量，也不等待固定时间。
+例如 A 的内核队列有 100 包、B 有 1 包，第一次回调最多处理 A 的 64 包和 B 的 1 包；A 剩余数据使其 socket 继续保持可读，后续回调从 B 开始检查并继续处理 A，不等待 B 凑满批量，也不等待固定时间。
 
 ## 5. 路径生命周期和错误安全
 
@@ -182,7 +182,7 @@ process_errors=...
 
 - 双链路两条路径的 `packets/bytes` 都持续增长；
 - 慢路径不存在长时间零服务；
-- `batch_max` 不超过 16；
+- `batch_max` 不超过 64；
 - `finish_gap_us` 和 `callback_us` 不出现持续性大尖峰；
 - `process_errors`、`reentry_skips` 和异常释放次数保持可解释。
 
@@ -215,7 +215,7 @@ metric=app_submit_not_delivered
 
 每个 H3 连接拥有独立 CID、字节数、流数和时间状态。连接关闭时恢复监听级 user data 后再释放连接级统计对象，避免并发连接互相覆盖。
 
-`app_submit_mbps` 只表示服务端把响应体提交给 XQUIC 的速度。网络实际交付仍以调度器 ACK 统计的 `delivered_mbps` 为准。
+`app_submit_mbps` 只表示服务端把响应体提交给 XQUIC 的速度。实际网络收益应以客户端 GET 完成速率和文件校验为主；adaptive 还可以参考其关闭汇总中的 `delivered_mbps`，RAP 和 BW 不输出该字段，应结合 `[diag_ack_path]`、`[diag_bbr_*]` 和 `[diag_sched_*]` 分析。
 
 ## 9. 主要修改文件
 
@@ -227,8 +227,20 @@ metric=app_submit_not_delivered
 | `mini/mini_client_main.c` | 最终诊断/engine 销毁顺序及失败分支指针初始化。 |
 | `mini/CMakeLists.txt` | Linux `mini_client` 增加 `_GNU_SOURCE`，启用 `recvmmsg()` 声明。 |
 | `mini/mini_server.h` | H3 连接级 GET 提交统计和监听对象关联。 |
+| `mini/mini_server.c` | mini 服务端调度器解析、诊断配置读取、启动日志和连接参数下发。 |
 | `mini/mini_server_cb.c` | 每连接统计上下文、墙钟 GET 提交窗口及指标语义。 |
 | `mini/mini_server_main.c` | 初始化失败分支的安全清理。 |
+| `mini/client_config.txt`、`mini/server_config.txt` | `mp_diag` 和 `mp_diag_interval_ms` 的 mini 默认配置。 |
+| `include/xquic/xquic.h`、`src/transport/xqc_conn.c` | 调度诊断参数、XQUIC 核心默认值和周期边界处理。 |
+| `src/transport/scheduler/xqc_scheduler_common.c/.h` | 公共 CWND 评估、阻塞原因分类和统一调度周期/关闭日志。 |
+| `src/transport/scheduler/xqc_scheduler_adaptive.c` | adaptive 选择、probe、fallback、warmup 快照和重注入原因诊断，不改变选路策略。 |
+| `src/transport/scheduler/xqc_scheduler_rap.c` | RAP 轻量诊断状态、min-RTT/重注入选择计数和关闭汇总。 |
+| `src/transport/scheduler/xqc_scheduler_bandwidth.c` | BW 路径 score、available bytes、available/standby/重注入选择诊断。 |
+| `src/transport/xqc_send_ctl.c/.h` | ACK、BBR 样本、app-limited、CWND/pacing 阻塞、发送 burst 和 ACK_MP 生成统计。 |
+| `src/transport/xqc_packet_out.c` | 在真实 ACK_MP 生成成功路径记录 ACK gap、generation delay 和 largest-ACK delta。 |
+| `tests/unittest/xqc_scheduler_diag_test.c/.h` | CWND 阻塞分类、`check_cwnd=0`、边界值和 socket 发送缓冲上限测试。 |
+| `tests/CMakeLists.txt`、`tests/unittest/main.c` | 在启用 CUnit 的测试构建入口中注册新增调度诊断单元测试。 |
+| `CMakeLists.txt`、`cmake/CMakeLists.txt` | 同步 act、bw、fastprobe、adaptive 等调度器源文件清单，避免构建脚本覆盖后丢失调度器对象。 |
 
 ## 10. 最终静态 Review 结论
 
@@ -243,13 +255,19 @@ metric=app_submit_not_delivered
 - engine 销毁后不再查询连接统计；
 - 服务端 GET 提交统计为真正的 H3 连接级状态；
 - 非文件 GET 不会污染文件 GET 的统计窗口；
+- ACK_MP 生成统计只挂在真实 `xqc_write_ack_mp_to_one_packet()` 成功路径；
+- 调度层与发送控制共用 `xqc_send_ctl_can_send()` 作为可发送判断的真值来源；
+- `blocked_real` 和 `blocked_scheduled` 互斥，adaptive 的 CWND、重注入排除和其他资格拒绝不再混记；
+- adaptive 的 CWND fallback 和 reinject fallback 分开计数，warmup 结束快照不会混入 BULK 数据；
+- adaptive、RAP、BW 都提供统一的调度 tick、summary 和每路径汇总；
+- 根目录和构建脚本模板的调度器源文件清单已同步；
 - `git diff --check` 未发现补丁空白错误。
 
 本机没有目标 Linux/ARM 编译和运行环境，因此本次只完成代码级静态 review，没有执行编译、ASan、网络传输或文件校验测试。
 
 ## 11. 目标环境验证建议
 
-必须从干净构建目录重新配置，不能直接复用可能包含旧绝对路径的 `CMakeCache.txt`：
+必须从干净构建目录重新配置，不能直接复用可能包含旧绝对路径的 `CMakeCache.txt`。还必须先确认实际使用的 CMake 入口：`xqc_build.sh` 会将 `cmake/CMakeLists.txt` 复制到根目录，该模板在 `XQC_ENABLE_TESTING=ON` 时加入 `tests` 和 `tests/unittest`；当前直接使用未覆盖的根 `CMakeLists.txt` 时，该选项只加入 mini，不会编译 CUnit。需要运行新增单元测试时，应使用目标构建脚本/模板，并在配置结果中确认已生成 CUnit 测试目标：
 
 ```bash
 rm -rf build
@@ -271,6 +289,11 @@ make -j
 7. recvmmsg 正常、EAGAIN、EINTR 和真实错误
 8. 下载完成、超时和连接关闭
 9. 每种模式至少 10 次交替测试
+10. `mp_diag=0`，确认不输出新增周期和关闭汇总
+11. `mp_diag_interval_ms=100/250/5000`，确认周期生效；非法值回退 250 ms 且只警告一次
+12. 分别使用 `mp_sched=adaptive`、`rap`、`bw` 执行单链路和双链路 GET
+13. 确认三个调度器都输出 `[diag_sched_tick]`、`[diag_sched_summary]`、`[diag_sched_path]` 及对应专属汇总
+14. 对比诊断开启/关闭的中位吞吐、客户端/服务端 CPU 和日志行数
 ```
 
 重点验收：
@@ -281,10 +304,49 @@ make -j
 - 相比旧版本，主机侧可观测 RX 延迟下降，双链路 GET 吞吐提升或相同吞吐下 CPU 降低；
 - 单链路和双链路中位吞吐回退均不超过 5%，且无新增内核 UDP 接收丢包；
 - 服务端 `app_submit_mbps` 不再跨连接或重复累计；
-- 实际网络收益以 `delivered_mbps` 和客户端 GET 完成速率判断。
+- 实际网络收益以客户端 GET 完成速率为主；adaptive 可辅助参考 `delivered_mbps`，RAP/BW 使用 ACK、BBR 和调度诊断联合解释；
+- 诊断开启相对关闭的中位吞吐回退目标不超过 3%，硬上限不超过 5%；
+- 每端 100 MB 测试的新增诊断日志目标不超过 300 行。
 
 如果 RX 回调和 `finish_recv` 延迟已经明显改善，但双链路 GET 吞吐仍没有提升，应停止扩大本补丁范围，另行分析 adaptive 带宽估算、ACK 交付率和路径调度，不在本版本继续混改调度器。
 
 ## 12. 回退方式
 
 本版本直接替换旧共享队列 RX 实现，没有保留运行时或编译时开关。现场回退应使用修改前的旧版本二进制和对应静态库，不建议只替换 `mini_client` 而保留不匹配的库文件。
+
+## 13. 多路径调度、CWND、ACK 和 pacing 诊断
+
+本轮保持 RX=64、调度策略、BBR、warmup 和 probe 行为不变，只增加诊断。mini 客户端和服务端配置支持：
+
+```text
+mp_diag=1
+mp_diag_interval_ms=250
+```
+
+mini 默认开启，周期范围为 100～5000 ms；非法周期回退到 250 ms 并警告一次。XQUIC 核心默认关闭。切换 `mp_sched=adaptive`、`rap` 或 `bw` 时，三者都输出相同口径的 `[diag_sched_tick]`、`[diag_sched_summary]` 和 `[diag_sched_path]`。
+
+`xqc_scheduler_params_t` 增加了诊断开关和周期字段，没有新增对外公开 API；内部新增有效 CWND 计算和调度评估辅助函数。mini 和 XQUIC 静态库必须整体重新编译，不能混用修改前后的对象文件。
+
+CWND 阻塞分为两个互斥原因：
+
+- `blocked_real`：`bytes_in_flight + packet_size` 已超过有效 CWND，表示真实在途数据已占满窗口；
+- `blocked_scheduled`：真实 inflight 尚能容纳该包，但加上 `path_schedule_bytes` 后超过有效 CWND，表示用户态路径发送队列预占窗口。
+
+`effective_cwnd` 是 BBR/拥塞控制窗口和 socket 发送缓冲上限中的较小值。调度诊断和原发送控制共用 `xqc_send_ctl_can_send()` 作为可发送判断的真值来源；`headroom` 使用饱和减法，窗口不足时为 0，不发生无符号回绕。
+
+`[diag_sched_path]` 中的 `checks`、`blocked_real`、`blocked_scheduled`，以及 adaptive 旧汇总中的 `blocked_checks`，都是调度检查次数，不是时长。`send_cwnd_block_duration_us` 和 `pacing_block_duration_us` 从 packet 第一次实际发送检查失败累计到该 packet 后续获准发送；它们是多包累计等待，不能直接除以 GET 墙钟耗时解释为阻塞比例。pacing 与 CWND 分开计数。
+
+`first_block_cwnd`、`first_block_pacing` 和 `both_blocked_*_first` 记录同一 packet 首次观察到的阻塞顺序，用来判断 pacing 是否通常先于 CWND 生效。
+
+每路径 send control 还输出：
+
+```text
+[diag_ack_path]  ACK帧、确认包/字节、同路径/跨路径ACK和间隔直方图
+[diag_bbr_tick]  BBR模式、带宽样本、app-limited、CWND、inflight和pacing
+[diag_bbr_path]  有效/无效样本及delivery-rate范围
+[diag_send_path] 实际CWND/pacing阻塞、1ms发送burst和ACK_MP生成统计
+```
+
+`[diag_ack_path]` 统计发送端收到 ACK 的 inter-ACK gap 和 ACK delay，两个直方图的边界均为 `100、250、500、1000、2500、5000、10000、20000、50000、100000、+inf us`。`[diag_send_path]` 中的 `ack_gap_us_min/avg/max` 和 `ack_generation_delay_us_min/avg/max` 统计客户端生成 ACK_MP 的间隔和生成延迟，它们不是直方图。`mp_ack_on_any_path=0` 保持不变，same/cross 只用于验证 ACK 实际到达路径。
+
+adaptive 额外输出 probe 考虑、选择和拒绝原因。`probe_denied_secondary_cwnd` 只统计真实 CWND 拒绝，`probe_denied_secondary_reinject` 表示重注入时原路径被排除，`probe_denied_secondary_other` 保留给其他资格拒绝；`fallback_real_inflight` 和 `fallback_scheduled_reservation` 分别记录两类 CWND fallback，`picks_reinject_fallback` 单独记录重注入 fallback。`both_sendable` 等四个矩阵字段表示完成 CWND 和重注入资格过滤后的可选状态。warmup 结束时会冻结 `warmup_elapsed`、`warmup_sent` 和 `warmup_delivered`，后续 primary 切换继续输出该快照，不会混入 BULK 阶段累计值。RAP 输出 min-RTT、原路径 reinject 和无可发送路径统计；BW 输出 available/standby/original 选择以及 score/available-bytes 累计值。

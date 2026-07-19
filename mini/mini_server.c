@@ -42,6 +42,7 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
     }
 
     char line[512];
+    int mp_diag_interval_warned = 0;
     while (fgets(line, sizeof(line), fp)) {
         char *line_ptr = xqc_mini_svr_trim_space(line);
         if (line_ptr[0] == '\0' || line_ptr[0] == '#') {
@@ -102,6 +103,25 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
                 || strcmp(value, "adaptive") == 0) {
                 memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
                 strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
+            }
+
+        } else if (strcmp(key, "mp_diag") == 0) {
+            args->quic_cfg.mp_diag = (strcmp(value, "1") == 0
+                || strcasecmp(value, "true") == 0) ? 1 : 0;
+
+        } else if (strcmp(key, "mp_diag_interval_ms") == 0) {
+            char *endptr = NULL;
+            unsigned long interval = strtoul(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0'
+                && interval >= 100 && interval <= 5000)
+            {
+                args->quic_cfg.mp_diag_interval_ms = (uint32_t)interval;
+            } else {
+                if (!mp_diag_interval_warned) {
+                    fprintf(stderr, "[diag_mp_config] warning=invalid_interval value=%s fallback_ms=250\n", value);
+                    mp_diag_interval_warned = 1;
+                }
+                args->quic_cfg.mp_diag_interval_ms = 250;
             }
  
         }else if (strcmp(key, "kernel_sndbuf") == 0) {
@@ -215,6 +235,8 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     args->quic_cfg.cc = CC_TYPE_BBR;
     args->quic_cfg.multipath = 1;
     strncpy(args->quic_cfg.mp_sched, "adaptive", 32);
+    args->quic_cfg.mp_diag = 1;
+    args->quic_cfg.mp_diag_interval_ms = 250;
     strncpy(args->quic_cfg.ciphers, XQC_TLS_CIPHERS, CIPHER_SUIT_LEN - 1);
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
 
@@ -533,6 +555,9 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
     /* parse mp scheduler callback */
     xqc_scheduler_callback_t sched = xqc_mini_svr_get_sched_cb(args);
     const char *resolved_sched = xqc_mini_svr_resolve_sched_name(args);
+    printf("[diag_mp_config] enabled=%d interval_ms=%u scheduler=%s\n",
+        args->quic_cfg.mp_diag, args->quic_cfg.mp_diag_interval_ms,
+        resolved_sched);
     if (strcmp(args->quic_cfg.mp_sched, resolved_sched) != 0) {
         printf("[diag_server_sched] requested=%s resolved=%s warning=unknown_scheduler_fallback\n",
             args->quic_cfg.mp_sched, resolved_sched);
@@ -553,6 +578,10 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .init_idle_time_out = 60000,
         .enable_multipath = args->quic_cfg.multipath,
         .scheduler_callback = sched,
+        .scheduler_params = {
+            .mp_diag_enabled = args->quic_cfg.mp_diag,
+            .mp_diag_interval_ms = args->quic_cfg.mp_diag_interval_ms,
+        },
         .standby_path_probe_timeout = 1000,
         .adaptive_ack_frequency = 1,
         .anti_amplification_limit = 4,

@@ -8,6 +8,8 @@ stream_cnt=1
 # algorithm settings
 cc=bbr
 mp_sched=balanced
+mp_diag=1
+mp_diag_interval_ms=250
 
 # interface list (comma separated, up to MAX_PATH_CNT)
 interfaces=eth0

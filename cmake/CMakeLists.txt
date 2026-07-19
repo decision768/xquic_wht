@@ -206,6 +206,10 @@ set(
     "src/transport/scheduler/xqc_scheduler_backup_fec.c"
     "src/transport/scheduler/xqc_scheduler_rap.c"
     "src/transport/scheduler/xqc_scheduler_balanced.c"
+    "src/transport/scheduler/xqc_scheduler_act.c"
+    "src/transport/scheduler/xqc_scheduler_bandwidth.c"
+    "src/transport/scheduler/xqc_scheduler_fastprobe.c"
+    "src/transport/scheduler/xqc_scheduler_adaptive.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)

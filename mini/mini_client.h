@@ -123,6 +123,8 @@ typedef struct xqc_mini_cli_quic_config_s {
     /* multipath */
     int         multipath;     // mp option, 0: disable, 1: enable
     char        mp_sched[32];  // mp scheduler name
+    int         mp_diag;
+    uint32_t    mp_diag_interval_ms;
 
     /* congestion control */
     CC_TYPE     cc;             // cc algrithm, bbr/cubic

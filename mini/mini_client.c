@@ -13,7 +13,7 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_PER_PATH_PACKETS 16
+#define CLIENT_RX_PER_PATH_PACKETS 64
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
@@ -853,6 +853,8 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->quic_cfg.groups, XQC_TLS_GROUPS, TLS_GROUPS_LEN - 1);
     args->quic_cfg.multipath = 1;
     strncpy(args->quic_cfg.mp_sched, "balanced", sizeof(args->quic_cfg.mp_sched));
+    args->quic_cfg.mp_diag = 1;
+    args->quic_cfg.mp_diag_interval_ms = 250;
     args->quic_cfg.cc = CC_TYPE_BBR;
 
     /* init environmen args */
@@ -1036,6 +1038,9 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
+    settings->scheduler_params.mp_diag_enabled = args->quic_cfg.mp_diag;
+    settings->scheduler_params.mp_diag_interval_ms =
+        args->quic_cfg.mp_diag_interval_ms;
     settings->reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
     settings->adaptive_ack_frequency = 1;
     // settings->ack_frequency = 1;      
@@ -1050,6 +1055,9 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     //settings->max_datagram_frame_size = 1350;
     settings->mp_ping_on = 1;
     settings->mp_enable_reinjection = 1;
+    printf("[diag_mp_config] enabled=%d interval_ms=%u scheduler=%s\n",
+        args->quic_cfg.mp_diag, args->quic_cfg.mp_diag_interval_ms,
+        args->quic_cfg.mp_sched);
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -2249,6 +2257,7 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
     }
 
     char line[512];
+    int mp_diag_interval_warned = 0;
     while (fgets(line, sizeof(line), fp)) {
         char *line_ptr = xqc_mini_cli_trim_space(line);
         if (line_ptr[0] == '\0' || line_ptr[0] == '#') {
@@ -2341,6 +2350,25 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
                 || strcmp(value, "adaptive") == 0) {
                 memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
                 strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
+            }
+
+        } else if (strcmp(key, "mp_diag") == 0) {
+            args->quic_cfg.mp_diag = (strcmp(value, "1") == 0
+                || strcasecmp(value, "true") == 0) ? 1 : 0;
+
+        } else if (strcmp(key, "mp_diag_interval_ms") == 0) {
+            char *endptr = NULL;
+            unsigned long interval = strtoul(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0'
+                && interval >= 100 && interval <= 5000)
+            {
+                args->quic_cfg.mp_diag_interval_ms = (uint32_t)interval;
+            } else {
+                if (!mp_diag_interval_warned) {
+                    fprintf(stderr, "[diag_mp_config] warning=invalid_interval value=%s fallback_ms=250\n", value);
+                    mp_diag_interval_warned = 1;
+                }
+                args->quic_cfg.mp_diag_interval_ms = 250;
             }
  
         }

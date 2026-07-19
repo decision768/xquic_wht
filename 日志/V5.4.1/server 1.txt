@@ -1,0 +1,784 @@
+root@5g:~/test_xquic_server# ./mini_server
+[diag_mp_config] enabled=1 interval_ms=250 scheduler=adaptive
+[diag_server_sched] requested=adaptive resolved=adaptive
+[stats] create ipv4 socket fd: 8 success, bind socket to ip: 0.0.0.0, port: 8443
+[stats] xqc_mini_svr_h3_conn_create_notify 
+[diag_server_conn] h3_conn_create
+[mini_mp][h3_conn_create] both_active=0, active_path_cnt=1, mp_state=0, enable_mp=0, conn_info=0/1/0/a/0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,i100,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0-2,0-2,0-0,0-0,0-0,0-25,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0
+[diag_server_quic][h3_conn_create] send=0 recv=0 lost=0 loss_rate=0.000% spurious_loss=0 srtt_us=0 min_rtt_us=0 inflight=0 mp_state=0 enable_mp=0 total_app_bytes=0 standby_app_bytes=0
+[mini_mp][h3_conn_create] path=0, state=2, app_status=2, srtt=25000, send_bytes=0, recv_bytes=0
+[diag_server_path][h3_conn_create] idx=0 id=0 state=2 app_status=2 srtt_us=25000 send_bytes=0 recv_bytes=0 send_pkts=0 recv_pkts=0 recv_eff_bytes=0
+[diag_server_conn] handshake_finished
+[mini_mp][handshake_finished] both_active=0, active_path_cnt=1, mp_state=0, enable_mp=1, conn_info=1/1/1/a/a,1,1,1,0,0,0,0,0,0,0,13,15,15,18,0,0,i100,2,26,51,4,2,46,0,4,21,30,0,0,46,-630,2,59,84,20,3,46,0,0,44,4,5,19,0,44,4,3,14,0,44,4,4,17,0-2,0-2,0-0,0-0,0-0,0-42,0-3036,0-7682,0-8,0-15,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0
+[diag_server_quic][handshake_finished] send=8 recv=15 lost=0 loss_rate=0.000% spurious_loss=0 srtt_us=42391 min_rtt_us=42163 inflight=69 mp_state=0 enable_mp=1 total_app_bytes=117 standby_app_bytes=0
+[mini_mp][handshake_finished] path=0, state=2, app_status=2, srtt=42391, send_bytes=117, recv_bytes=0
+[diag_server_path][handshake_finished] idx=0 id=0 state=2 app_status=2 srtt_us=42391 send_bytes=117 recv_bytes=0 send_pkts=8 recv_pkts=15 recv_eff_bytes=0
+[diag_server_path_event] ready_to_create_path
+[mini_mp][ready_to_create_path] both_active=0, active_path_cnt=1, mp_state=0, enable_mp=1, conn_info=1/1/1/a/a,1,1,1,0,0,0,0,0,0,0,25,28,27,21,0,21,i100,4,32,41,100000,22,76,0,4,52,61,2000000,20,76,0,4,32,41,100000,21,76,0,4,22,100000,17,71,4,21,80,15,47,4,22,100000,16,71,0-2,0-2,0-0,0-0,0-0,0-39,0-4060,0-8252,0-16,0-27,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0
+[diag_server_quic][ready_to_create_path] send=16 recv=27 lost=0 loss_rate=0.000% spurious_loss=0 srtt_us=39682 min_rtt_us=29834 inflight=156 mp_state=0 enable_mp=1 total_app_bytes=308 standby_app_bytes=0
+[mini_mp][ready_to_create_path] path=0, state=2, app_status=2, srtt=39682, send_bytes=154, recv_bytes=154
+[diag_server_path][ready_to_create_path] idx=0 id=0 state=2 app_status=2 srtt_us=39682 send_bytes=154 recv_bytes=154 send_pkts=16 recv_pkts=27 recv_eff_bytes=0
+[diag_server_path_event] created path_id=1
+[mini_mp][path_created] both_active=0, active_path_cnt=1, mp_state=2, enable_mp=1, conn_info=1/1/1/a/a,2,1,1,0,0,0,0,0,0,0,27,34,33,21,0,21,i100,4,1191,1200,10001,0,300,0,4,52,61,2000000,29,96,0,4,52,61,2000000,30,96,0,4,22,100000,17,71,4,24,100000,18,96,4,24,100000,19,96,0-2,0-2,0-0,0-0,0-0,0-37,0-4140,0-8515,0-16,0-32,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,1-1,1-2,1-0,1-301,1-0,1-25,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0
+[diag_server_quic][path_created] send=16 recv=32 lost=0 loss_rate=0.000% spurious_loss=0 srtt_us=37365 min_rtt_us=29734 inflight=0 mp_state=2 enable_mp=1 total_app_bytes=308 standby_app_bytes=0
+[mini_mp][path_created] path=0, state=2, app_status=2, srtt=37365, send_bytes=154, recv_bytes=154
+[diag_server_path][path_created] idx=0 id=0 state=2 app_status=2 srtt_us=37365 send_bytes=154 recv_bytes=154 send_pkts=16 recv_pkts=32 recv_eff_bytes=0
+[diag_sched_tick] sched=adaptive elapsed_ms=298 path=0 active=1 selected_delta=17 cwnd=146870 effective_cwnd=146870 inflight=0 scheduled=14 headroom=146856 est_bw_Bps=56479 pacing_Bps=9824420 srtt_us=37365 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=298 path=1 active=0 selected_delta=0 cwnd=0 effective_cwnd=0 inflight=0 scheduled=44 headroom=0 est_bw_Bps=0 pacing_Bps=414285984 srtt_us=25000 app_limited=0 cwnd_limited=0
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 0
+[server] >>> Parsed Content-Length: 0 bytes
+x-stream-index: 0
+x-stream-count: 1
+x-stream-offset: 0
+x-total-length: 0
+=============================================================
+[warn] total length mismatch, header=0 file=104857600
+[diag_server_get] headers stream=0/1 offset=0 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=0 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 0
+[diag_server_get_submit][reset] stream=0/1 offset=0 len=4194304 metric=app_submit_not_delivered
+[diag_server_get] send_body_enter body_len=4194304 body_offset=0 use_file=1 stream=0/1
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=21.910 ms, app_submit_mbps=1531.467 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=0/1 offset=0 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=14241 h3_send_cnt=1 h3_send_bytes=4194304 h3_send_max_us=7626
+[diag_server_get_submit][summary] stream=0/1 completed=1 expected=1 bytes=4194304 wall_time_ms=21.939 app_submit_mbps=1529.442 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=0/1 offset=0 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=21.910 app_submit_mbps=1531.467 metric=app_submit_not_delivered conn_send_delta=0 conn_recv_delta=0 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=0 path_send_delta=0 path_recv_delta=0 inflight_end=149 srtt_start=37365 srtt_end=37365
+[diag_server_get_path][path_delta] stream=0/1 idx=0 id=0 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=37365 end_srtt=37365 end_send_bytes=154 end_recv_bytes=316
+[diag_server_get_path][path_delta] stream=0/1 idx=1 id=1 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=90165 end_srtt=90165 end_send_bytes=0 end_recv_bytes=0
+[diag_adaptive] conn=0x56f1920d2f1c event=warmup_start paths=2 bytes_per_path=262144
+[diag_bbr_tick] path=0 mode=STARTUP full_bw=0 est_bw_Bps=56479 sample_rate_Bps=333 sample_interval_us=176882 ack_elapse_us=176882 send_elapse_us=0 sample_app_limited=0 cwnd=146929 inflight=20616 scheduled=126000 pacing_Bps=9824420 srtt_us=54759 min_rtt_us=29734
+[diag_sched_tick] sched=adaptive elapsed_ms=612 path=0 active=1 selected_delta=127 cwnd=175900 effective_cwnd=175900 inflight=117600 scheduled=0 headroom=58300 est_bw_Bps=162273 pacing_Bps=9824420 srtt_us=74931 app_limited=0 cwnd_limited=1
+[diag_sched_tick] sched=adaptive elapsed_ms=612 path=1 active=1 selected_delta=159 cwnd=169936 effective_cwnd=169936 inflight=169200 scheduled=0 headroom=736 est_bw_Bps=791614 pacing_Bps=4187413 srtt_us=75040 app_limited=0 cwnd_limited=1
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 1
+x-stream-count: 25
+x-stream-offset: 4194304
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=1/25 offset=4194304 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=4194304 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 1
+[diag_server_get] send_body_enter body_len=4194304 body_offset=4194304 use_file=1 stream=1/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=21.582 ms, app_submit_mbps=1554.742 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=1/25 offset=4194304 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13631 h3_send_cnt=1 h3_send_bytes=4194304 h3_send_max_us=7932
+[diag_server_get_submit][summary] stream=1/25 completed=2 expected=25 bytes=8388608 wall_time_ms=181.091 app_submit_mbps=370.581 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=1/25 offset=4194304 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=21.582 app_submit_mbps=1554.742 metric=app_submit_not_delivered conn_send_delta=0 conn_recv_delta=0 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=0 path_send_delta=0 path_recv_delta=0 inflight_end=307200 srtt_start=74931 srtt_end=74931
+[diag_server_get_path][path_delta] stream=1/25 idx=0 id=0 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=74931 end_srtt=74931 end_send_bytes=169291 end_recv_bytes=463
+[diag_server_get_path][path_delta] stream=1/25 idx=1 id=1 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=75040 end_srtt=75040 end_send_bytes=193344 end_recv_bytes=0
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=791614 sample_rate_Bps=408245 sample_interval_us=158728 ack_elapse_us=158728 send_elapse_us=2596 sample_app_limited=1 cwnd=213136 inflight=126000 scheduled=0 pacing_Bps=4187413 srtt_us=83700 min_rtt_us=24698
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 2
+x-stream-count: 25
+x-stream-offset: 8388608
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=2/25 offset=8388608 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=8388608 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 2
+[diag_server_get] send_body_enter body_len=4194304 body_offset=8388608 use_file=1 stream=2/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=22.601 ms, app_submit_mbps=1484.644 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=2/25 offset=8388608 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=14757 h3_send_cnt=1 h3_send_bytes=4194304 h3_send_max_us=7827
+[diag_server_get_submit][summary] stream=2/25 completed=3 expected=25 bytes=12582912 wall_time_ms=204.754 app_submit_mbps=491.630 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=2/25 offset=8388608 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=22.601 app_submit_mbps=1484.644 metric=app_submit_not_delivered conn_send_delta=0 conn_recv_delta=0 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=0 path_send_delta=0 path_recv_delta=0 inflight_end=188412 srtt_start=83858 srtt_end=83858
+[diag_server_get_path][path_delta] stream=2/25 idx=0 id=0 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=83858 end_srtt=83858 end_send_bytes=189975 end_recv_bytes=1021
+[diag_server_get_path][path_delta] stream=2/25 idx=1 id=1 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=90192 end_srtt=90192 end_send_bytes=207936 end_recv_bytes=0
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 3
+x-stream-count: 25
+x-stream-offset: 12582912
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=3/25 offset=12582912 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=12582912 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 3
+[diag_server_get] send_body_enter body_len=4194304 body_offset=12582912 use_file=1 stream=3/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=18.868 ms, app_submit_mbps=1778.378 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=3/25 offset=12582912 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=11463 h3_send_cnt=1 h3_send_bytes=4194304 h3_send_max_us=7388
+[diag_server_get_submit][summary] stream=3/25 completed=4 expected=25 bytes=16777216 wall_time_ms=223.897 app_submit_mbps=599.462 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=3/25 offset=12582912 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=18.868 app_submit_mbps=1778.378 metric=app_submit_not_delivered conn_send_delta=0 conn_recv_delta=0 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=0 path_send_delta=0 path_recv_delta=0 inflight_end=188412 srtt_start=83858 srtt_end=83858
+[diag_server_get_path][path_delta] stream=3/25 idx=0 id=0 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=83858 end_srtt=83858 end_send_bytes=189975 end_recv_bytes=1021
+[diag_server_get_path][path_delta] stream=3/25 idx=1 id=1 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=90192 end_srtt=90192 end_send_bytes=207936 end_recv_bytes=0
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 4
+x-stream-count: 25
+x-stream-offset: 16777216
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=4/25 offset=16777216 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=16777216 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 4
+[diag_server_get] send_body_enter body_len=4194304 body_offset=16777216 use_file=1 stream=4/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=20.937 ms, app_submit_mbps=1602.638 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=4/25 offset=16777216 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13395 h3_send_cnt=1 h3_send_bytes=4194304 h3_send_max_us=7523
+[diag_server_get_submit][summary] stream=4/25 completed=5 expected=25 bytes=20971520 wall_time_ms=245.084 app_submit_mbps=684.550 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=4/25 offset=16777216 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=20.937 app_submit_mbps=1602.638 metric=app_submit_not_delivered conn_send_delta=0 conn_recv_delta=0 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=0 path_send_delta=0 path_recv_delta=0 inflight_end=188412 srtt_start=83858 srtt_end=83858
+[diag_server_get_path][path_delta] stream=4/25 idx=0 id=0 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=83858 end_srtt=83858 end_send_bytes=189975 end_recv_bytes=1021
+[diag_server_get_path][path_delta] stream=4/25 idx=1 id=1 state=2 app_status=2 send_delta=0 send_share=0.00% recv_delta=0 recv_eff_delta=0 send_pkts_delta=0 recv_pkts_delta=0 start_srtt=90192 end_srtt=90192 end_send_bytes=207936 end_recv_bytes=0
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 5
+x-stream-count: 25
+x-stream-offset: 20971520
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=5/25 offset=20971520 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=20971520 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 5
+[diag_server_get] send_body_enter body_len=4194304 body_offset=20971520 use_file=1 stream=5/25
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 6
+x-stream-count: 25
+x-stream-offset: 25165824
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=6/25 offset=25165824 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=25165824 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 6
+[diag_server_get] send_body_enter body_len=4194304 body_offset=25165824 use_file=1 stream=6/25
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 7
+x-stream-count: 25
+x-stream-offset: 29360128
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=7/25 offset=29360128 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=29360128 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 7
+[diag_server_get] send_body_enter body_len=4194304 body_offset=29360128 use_file=1 stream=7/25
+[diag_bbr_tick] path=0 mode=STARTUP full_bw=0 est_bw_Bps=593553 sample_rate_Bps=554019 sample_interval_us=264397 ack_elapse_us=264397 send_elapse_us=186440 sample_app_limited=1 cwnd=252700 inflight=40812 scheduled=170400 pacing_Bps=9824420 srtt_us=104417 min_rtt_us=29734
+[diag_adaptive] conn=0x56f1920d2f1c event=primary_select reason=warmup_complete primary=1 score=32563074 srtt=118822 probe=20.0 secondary=0 secondary_score=23855718
+[diag_adaptive_primary_path] reason=warmup_complete path=0 warmup_elapsed=276502 warmup_sent=310267 warmup_delivered=187442 est_bw=1019488 cwnd=273100 inflight=118821 scheduled=153600 srtt=105000 app_limited_samples=9 non_app_limited_samples=10 bbr_mode=0 full_bw_reached=0
+[diag_adaptive_primary_path] reason=warmup_complete path=1 warmup_elapsed=276502 warmup_sent=265088 warmup_delivered=205200 est_bw=897187 cwnd=246736 inflight=56400 scheduled=189600 srtt=118822 app_limited_samples=4 non_app_limited_samples=5 bbr_mode=0 full_bw_reached=0
+[diag_sched_tick] sched=adaptive elapsed_ms=863 path=0 active=1 selected_delta=1418 cwnd=901900 effective_cwnd=901900 inflight=901200 scheduled=0 headroom=700 est_bw_Bps=10161908 pacing_Bps=29317104 srtt_us=39654 app_limited=0 cwnd_limited=1
+[diag_sched_tick] sched=adaptive elapsed_ms=863 path=1 active=1 selected_delta=861 cwnd=571936 effective_cwnd=571936 inflight=506400 scheduled=64800 headroom=736 est_bw_Bps=6352337 pacing_Bps=18326492 srtt_us=37732 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=10829535 sample_rate_Bps=9741368 sample_interval_us=40405 ack_elapse_us=40405 send_elapse_us=30993 sample_app_limited=0 cwnd=888736 inflight=802224 scheduled=0 pacing_Bps=31243208 srtt_us=32609 min_rtt_us=24159
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=281.960 ms, app_submit_mbps=119.004 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=5/25 offset=20971520 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13456 h3_send_cnt=5 h3_send_bytes=4194304 h3_send_max_us=1148
+[diag_server_get_submit][summary] stream=5/25 completed=6 expected=25 bytes=25165824 wall_time_ms=527.309 app_submit_mbps=381.800 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=5/25 offset=20971520 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=281.960 app_submit_mbps=119.004 metric=app_submit_not_delivered conn_send_delta=5663 conn_recv_delta=101 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=6884546 path_send_delta=6884453 path_recv_delta=93 inflight_end=2625600 srtt_start=83858 srtt_end=74465
+[diag_server_get_path][path_delta] stream=5/25 idx=0 id=0 state=2 app_status=2 send_delta=3831637 send_share=55.66% recv_delta=93 recv_eff_delta=0 send_pkts_delta=3151 recv_pkts_delta=53 start_srtt=83858 end_srtt=74465 end_send_bytes=4021612 end_recv_bytes=1114
+[diag_server_get_path][path_delta] stream=5/25 idx=1 id=1 state=2 app_status=2 send_delta=3052816 send_share=44.34% recv_delta=0 recv_eff_delta=0 send_pkts_delta=2512 recv_pkts_delta=48 start_srtt=90192 end_srtt=62867 end_send_bytes=3260752 end_recv_bytes=0
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 8
+x-stream-count: 25
+x-stream-offset: 33554432
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=8/25 offset=33554432 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=33554432 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 8
+[diag_server_get] send_body_enter body_len=4194304 body_offset=33554432 use_file=1 stream=8/25
+[diag_bbr_tick] path=0 mode=STARTUP full_bw=0 est_bw_Bps=14406328 sample_rate_Bps=10553527 sample_interval_us=116435 ack_elapse_us=116435 send_elapse_us=46741 sample_app_limited=0 cwnd=1485100 inflight=1407600 scheduled=0 pacing_Bps=41562256 srtt_us=83060 min_rtt_us=26959
+[diag_sched_tick] sched=adaptive elapsed_ms=1117 path=0 active=1 selected_delta=3047 cwnd=1561900 effective_cwnd=1561900 inflight=1484400 scheduled=0 headroom=77500 est_bw_Bps=14406328 pacing_Bps=41562256 srtt_us=124389 app_limited=0 cwnd_limited=1
+[diag_sched_tick] sched=adaptive elapsed_ms=1117 path=1 active=1 selected_delta=2981 cwnd=1263136 effective_cwnd=1263136 inflight=1263024 scheduled=0 headroom=112 est_bw_Bps=12530777 pacing_Bps=36151292 srtt_us=94320 app_limited=0 cwnd_limited=1
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=12530777 sample_rate_Bps=11162739 sample_interval_us=109973 ack_elapse_us=109973 send_elapse_us=90134 sample_app_limited=0 cwnd=1263136 inflight=1219824 scheduled=0 pacing_Bps=36151292 srtt_us=101847 min_rtt_us=24159
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 9
+x-stream-count: 25
+x-stream-offset: 37748736
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=9/25 offset=37748736 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=37748736 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 9
+[diag_server_get] send_body_enter body_len=4194304 body_offset=37748736 use_file=1 stream=9/25
+[diag_bbr_tick] path=0 mode=STARTUP full_bw=0 est_bw_Bps=14406328 sample_rate_Bps=11174566 sample_interval_us=137455 ack_elapse_us=137455 send_elapse_us=130519 sample_app_limited=0 cwnd=1561900 inflight=1484400 scheduled=0 pacing_Bps=41562256 srtt_us=132258 min_rtt_us=26959
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 10
+x-stream-count: 25
+x-stream-offset: 41943040
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=10/25 offset=41943040 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=41943040 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 10
+[diag_server_get] send_body_enter body_len=4194304 body_offset=41943040 use_file=1 stream=10/25
+[diag_sched_tick] sched=adaptive elapsed_ms=1373 path=0 active=1 selected_delta=2243 cwnd=1491506 effective_cwnd=1491506 inflight=1106400 scheduled=384000 headroom=1106 est_bw_Bps=14406328 pacing_Bps=4993528 srtt_us=127609 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=1373 path=1 active=1 selected_delta=2369 cwnd=1299532 effective_cwnd=1299532 inflight=1264800 scheduled=0 headroom=34732 est_bw_Bps=12530777 pacing_Bps=4343423 srtt_us=103168 app_limited=0 cwnd_limited=1
+[diag_bbr_tick] path=1 mode=DRAIN full_bw=1 est_bw_Bps=12530777 sample_rate_Bps=11416156 sample_interval_us=110528 ack_elapse_us=109985 send_elapse_us=110528 sample_app_limited=0 cwnd=1299532 inflight=1052400 scheduled=212400 pacing_Bps=4343423 srtt_us=105474 min_rtt_us=24159
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=745.007 ms, app_submit_mbps=45.039 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=6/25 offset=25165824 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=14737 h3_send_cnt=8 h3_send_bytes=4194304 h3_send_max_us=1242
+[diag_server_get_submit][summary] stream=6/25 completed=7 expected=25 bytes=29360128 wall_time_ms=1004.846 app_submit_mbps=233.748 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=6/25 offset=25165824 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=745.007 app_submit_mbps=45.039 metric=app_submit_not_delivered conn_send_delta=13218 conn_recv_delta=317 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=16069335 path_send_delta=16068962 path_recv_delta=373 inflight_end=942000 srtt_start=83858 srtt_end=108818
+[diag_server_get_path][path_delta] stream=6/25 idx=0 id=0 state=2 app_status=2 send_delta=8158165 send_share=50.77% recv_delta=186 recv_eff_delta=0 send_pkts_delta=6709 recv_pkts_delta=159 start_srtt=83858 end_srtt=108818 end_send_bytes=8348140 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=6/25 idx=1 id=1 state=2 app_status=2 send_delta=7910797 send_share=49.23% recv_delta=187 recv_eff_delta=0 send_pkts_delta=6509 recv_pkts_delta=158 start_srtt=90192 end_srtt=101412 end_send_bytes=8118733 end_recv_bytes=187
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1088
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=14406328 sample_rate_Bps=7020757 sample_interval_us=58968 ack_elapse_us=42429 send_elapse_us=58968 sample_app_limited=0 cwnd=1414118 inflight=556800 scheduled=771600 pacing_Bps=14406328 srtt_us=58096 min_rtt_us=26959
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 11
+x-stream-count: 25
+x-stream-offset: 46137344
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=11/25 offset=46137344 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=46137344 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 11
+[diag_server_get] send_body_enter body_len=4194304 body_offset=46137344 use_file=1 stream=11/25
+[diag_sched_tick] sched=adaptive elapsed_ms=1624 path=0 active=1 selected_delta=2530 cwnd=1414118 effective_cwnd=1414118 inflight=595200 scheduled=775200 headroom=43718 est_bw_Bps=14406328 pacing_Bps=14406328 srtt_us=39992 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=1624 path=1 active=1 selected_delta=2450 cwnd=1327805 effective_cwnd=1327805 inflight=474000 scheduled=853805 headroom=0 est_bw_Bps=12530777 pacing_Bps=12530777 srtt_us=34269 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=13012170 sample_rate_Bps=9939174 sample_interval_us=38635 ack_elapse_us=36198 send_elapse_us=38635 sample_app_limited=0 cwnd=1356743 inflight=402000 scheduled=921005 pacing_Bps=13012170 srtt_us=32714 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:170
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=758.867 ms, app_submit_mbps=44.216 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=8/25 offset=33554432 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12939 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1182
+[diag_server_get_submit][summary] stream=8/25 completed=8 expected=25 bytes=33554432 wall_time_ms=1294.860 app_submit_mbps=207.308 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=8/25 offset=33554432 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=758.867 app_submit_mbps=44.216 metric=app_submit_not_delivered conn_send_delta=13499 conn_recv_delta=335 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=16411517 path_send_delta=16411236 path_recv_delta=281 inflight_end=1841405 srtt_start=79076 srtt_end=46640
+[diag_server_get_path][path_delta] stream=8/25 idx=0 id=0 state=2 app_status=2 send_delta=8349056 send_share=50.87% recv_delta=93 recv_eff_delta=0 send_pkts_delta=6866 recv_pkts_delta=168 start_srtt=79076 end_srtt=46640 end_send_bytes=12448492 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=8/25 idx=1 id=1 state=2 app_status=2 send_delta=8062180 send_share=49.13% recv_delta=188 recv_eff_delta=0 send_pkts_delta=6633 recv_pkts_delta=167 start_srtt=66568 end_srtt=54240 end_send_bytes=11445748 end_recv_bytes=281
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 12
+x-stream-count: 25
+x-stream-offset: 50331648
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=12/25 offset=50331648 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=50331648 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 12
+[diag_server_get] send_body_enter body_len=4194304 body_offset=50331648 use_file=1 stream=12/25
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=15293473 sample_rate_Bps=8719098 sample_interval_us=70466 ack_elapse_us=70466 send_elapse_us=37588 sample_app_limited=0 cwnd=1609994 inflight=798000 scheduled=734400 pacing_Bps=15293473 srtt_us=48895 min_rtt_us=24701
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=1121.328 ms, app_submit_mbps=29.924 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=7/25 offset=29360128 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12110 h3_send_cnt=10 h3_send_bytes=4194304 h3_send_max_us=1186
+[diag_server_get_submit][summary] stream=7/25 completed=9 expected=25 bytes=37748736 wall_time_ms=1396.099 app_submit_mbps=216.310 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=7/25 offset=29360128 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=1121.328 app_submit_mbps=29.924 metric=app_submit_not_delivered conn_send_delta=21368 conn_recv_delta=488 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=25978162 path_send_delta=25977601 path_recv_delta=561 inflight_end=1953005 srtt_start=83858 srtt_end=61894
+[diag_server_get_path][path_delta] stream=7/25 idx=0 id=0 state=2 app_status=2 send_delta=13632597 send_share=52.48% recv_delta=186 recv_eff_delta=0 send_pkts_delta=11211 recv_pkts_delta=244 start_srtt=83858 end_srtt=61894 end_send_bytes=13822572 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=7/25 idx=1 id=1 state=2 app_status=2 send_delta=12345004 send_share=47.52% recv_delta=375 recv_eff_delta=0 send_pkts_delta=10157 recv_pkts_delta=244 start_srtt=90192 end_srtt=68980 end_send_bytes=12552940 end_recv_bytes=375
+[diag_sched_tick] sched=adaptive elapsed_ms=1874 path=0 active=1 selected_delta=2665 cwnd=1609994 effective_cwnd=1609994 inflight=1200000 scheduled=409200 headroom=794 est_bw_Bps=15293473 pacing_Bps=15293473 srtt_us=64218 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=1874 path=1 active=1 selected_delta=2142 cwnd=1356743 effective_cwnd=1356743 inflight=919824 scheduled=436800 headroom=119 est_bw_Bps=13012170 pacing_Bps=13012170 srtt_us=67807 app_limited=0 cwnd_limited=0
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:204
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=13012170 sample_rate_Bps=11333117 sample_interval_us=85132 ack_elapse_us=85132 send_elapse_us=81935 sample_app_limited=0 cwnd=1356743 inflight=881424 scheduled=432000 pacing_Bps=13012170 srtt_us=71245 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 13
+x-stream-count: 25
+x-stream-offset: 54525952
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=13/25 offset=54525952 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=54525952 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 13
+[diag_server_get] send_body_enter body_len=4194304 body_offset=54525952 use_file=1 stream=13/25
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=15293473 sample_rate_Bps=10943912 sample_interval_us=116229 ack_elapse_us=116229 send_elapse_us=79710 sample_app_limited=0 cwnd=1609994 inflight=1500000 scheduled=66000 pacing_Bps=15293473 srtt_us=98661 min_rtt_us=24701
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=849.581 ms, app_submit_mbps=39.495 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=9/25 offset=37748736 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13932 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1153
+[diag_server_get_submit][summary] stream=9/25 completed=10 expected=25 bytes=41943040 wall_time_ms=1574.416 app_submit_mbps=213.123 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=9/25 offset=37748736 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=849.581 app_submit_mbps=39.495 metric=app_submit_not_delivered conn_send_delta=15739 conn_recv_delta=380 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=19134293 path_send_delta=19133917 path_recv_delta=376 inflight_end=2454019 srtt_start=131820 srtt_end=103218
+[diag_server_get_path][path_delta] stream=9/25 idx=0 id=0 state=2 app_status=2 send_delta=10094016 send_share=52.75% recv_delta=0 recv_eff_delta=0 send_pkts_delta=8301 recv_pkts_delta=187 start_srtt=131820 end_srtt=103218 end_send_bytes=16372524 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=9/25 idx=1 id=1 state=2 app_status=2 send_delta=9039901 send_share=47.25% recv_delta=376 recv_eff_delta=0 send_pkts_delta=7438 recv_pkts_delta=193 start_srtt=102915 end_srtt=70934 end_send_bytes=14677373 end_recv_bytes=469
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:2327
+[diag_sched_tick] sched=adaptive elapsed_ms=2124 path=0 active=1 selected_delta=2305 cwnd=1609994 effective_cwnd=1609994 inflight=1498800 scheduled=33600 headroom=77594 est_bw_Bps=15293473 pacing_Bps=19116842 srtt_us=118317 app_limited=0 cwnd_limited=1
+[diag_sched_tick] sched=adaptive elapsed_ms=2124 path=1 active=1 selected_delta=2291 cwnd=1265801 effective_cwnd=1265801 inflight=1106400 scheduled=158419 headroom=982 est_bw_Bps=13012170 pacing_Bps=13012170 srtt_us=78214 app_limited=0 cwnd_limited=0
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=769.021 ms, app_submit_mbps=43.633 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=10/25 offset=41943040 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13845 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1088
+[diag_server_get_submit][summary] stream=10/25 completed=11 expected=25 bytes=46137344 wall_time_ms=1674.849 app_submit_mbps=220.377 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=10/25 offset=41943040 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=769.021 app_submit_mbps=43.633 metric=app_submit_not_delivered conn_send_delta=14612 conn_recv_delta=340 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=17763181 path_send_delta=17762899 path_recv_delta=282 inflight_end=2611219 srtt_start=127609 srtt_end=119784
+[diag_server_get_path][path_delta] stream=10/25 idx=0 id=0 state=2 app_status=2 send_delta=9534656 send_share=53.68% recv_delta=0 recv_eff_delta=0 send_pkts_delta=7841 recv_pkts_delta=169 start_srtt=127609 end_srtt=119784 end_send_bytes=17452332 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=10/25 idx=1 id=1 state=2 app_status=2 send_delta=8228243 send_share=46.32% recv_delta=282 recv_eff_delta=0 send_pkts_delta=6771 recv_pkts_delta=171 start_srtt=103168 end_srtt=78214 end_send_bytes=15968800 end_recv_bytes=469
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:5996
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=13012170 sample_rate_Bps=10557281 sample_interval_us=109119 ack_elapse_us=109119 send_elapse_us=83636 sample_app_limited=0 cwnd=1265801 inflight=1141219 scheduled=90000 pacing_Bps=13012170 srtt_us=84920 min_rtt_us=24046
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=675.447 ms, app_submit_mbps=49.677 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=11/25 offset=46137344 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=11890 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1151
+[diag_server_get_submit][summary] stream=11/25 completed=12 expected=25 bytes=50331648 wall_time_ms=1771.486 app_submit_mbps=227.297 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=11/25 offset=46137344 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=675.447 app_submit_mbps=49.677 metric=app_submit_not_delivered conn_send_delta=13976 conn_recv_delta=300 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=16990306 path_send_delta=16990118 path_recv_delta=188 inflight_end=2661600 srtt_start=43553 srtt_end=132109
+[diag_server_get_path][path_delta] stream=11/25 idx=0 id=0 state=2 app_status=2 send_delta=8903552 send_share=52.40% recv_delta=0 recv_eff_delta=0 send_pkts_delta=7322 recv_pkts_delta=151 start_srtt=43553 end_srtt=132109 end_send_bytes=18580780 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=11/25 idx=1 id=1 state=2 app_status=2 send_delta=8086566 send_share=47.60% recv_delta=188 recv_eff_delta=0 send_pkts_delta=6654 recv_pkts_delta=149 start_srtt=42429 end_srtt=90825 end_send_bytes=17147104 end_recv_bytes=469
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=15293473 sample_rate_Bps=11358342 sample_interval_us=135231 ack_elapse_us=132805 send_elapse_us=135231 sample_app_limited=0 cwnd=1609994 inflight=1532400 scheduled=0 pacing_Bps=15293473 srtt_us=129915 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:4732
+[diag_sched_tick] sched=adaptive elapsed_ms=2375 path=0 active=1 selected_delta=2367 cwnd=1609994 effective_cwnd=1609994 inflight=1609200 scheduled=0 headroom=794 est_bw_Bps=15293473 pacing_Bps=11470105 srtt_us=130947 app_limited=0 cwnd_limited=1
+[diag_sched_tick] sched=adaptive elapsed_ms=2375 path=1 active=1 selected_delta=2363 cwnd=1335299 effective_cwnd=1335299 inflight=1165824 scheduled=169200 headroom=275 est_bw_Bps=13012170 pacing_Bps=13012170 srtt_us=101891 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=13012170 sample_rate_Bps=11270956 sample_interval_us=108866 ack_elapse_us=105369 send_elapse_us=108866 sample_app_limited=0 cwnd=1335299 inflight=1176000 scheduled=115200 pacing_Bps=13012170 srtt_us=102870 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 14
+x-stream-count: 25
+x-stream-offset: 58720256
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=14/25 offset=58720256 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=58720256 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 14
+[diag_server_get] send_body_enter body_len=4194304 body_offset=58720256 use_file=1 stream=14/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=754.199 ms, app_submit_mbps=44.490 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=12/25 offset=50331648 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12380 h3_send_cnt=10 h3_send_bytes=4194304 h3_send_max_us=1222
+[diag_server_get_submit][summary] stream=12/25 completed=13 expected=25 bytes=54525952 wall_time_ms=2050.777 app_submit_mbps=212.704 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=12/25 offset=50331648 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=754.199 app_submit_mbps=44.490 metric=app_submit_not_delivered conn_send_delta=15013 conn_recv_delta=336 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=18250117 path_send_delta=18249929 path_recv_delta=188 inflight_end=2754013 srtt_start=46640 srtt_end=131931
+[diag_server_get_path][path_delta] stream=12/25 idx=0 id=0 state=2 app_status=2 send_delta=9340096 send_share=51.18% recv_delta=0 recv_eff_delta=0 send_pkts_delta=7681 recv_pkts_delta=165 start_srtt=46640 end_srtt=131931 end_send_bytes=21818988 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=12/25 idx=1 id=1 state=2 app_status=2 send_delta=8909833 send_share=48.82% recv_delta=188 recv_eff_delta=0 send_pkts_delta=7332 recv_pkts_delta=171 start_srtt=57747 end_srtt=95474 end_send_bytes=20382333 end_recv_bytes=563
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=15293473 sample_rate_Bps=11022921 sample_interval_us=139346 ack_elapse_us=136933 send_elapse_us=139346 sample_app_limited=0 cwnd=1609994 inflight=1532400 scheduled=0 pacing_Bps=15293473 srtt_us=131431 min_rtt_us=24701
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=671.372 ms, app_submit_mbps=49.979 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=13/25 offset=54525952 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=14566 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1021
+[diag_server_get_submit][summary] stream=13/25 completed=14 expected=25 bytes=58720256 wall_time_ms=2146.691 app_submit_mbps=218.831 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=13/25 offset=54525952 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=671.372 app_submit_mbps=49.979 metric=app_submit_not_delivered conn_send_delta=12802 conn_recv_delta=296 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=15561436 path_send_delta=15561342 path_recv_delta=94 inflight_end=2508624 srtt_start=74546 srtt_end=125701
+[diag_server_get_path][path_delta] stream=13/25 idx=0 id=0 state=2 app_status=2 send_delta=7604864 send_share=48.87% recv_delta=0 recv_eff_delta=0 send_pkts_delta=6254 recv_pkts_delta=146 start_srtt=74546 end_srtt=125701 end_send_bytes=22675052 end_recv_bytes=1207
+[diag_server_get_path][path_delta] stream=13/25 idx=1 id=1 state=2 app_status=2 send_delta=7956478 send_share=51.13% recv_delta=94 recv_eff_delta=0 send_pkts_delta=6548 recv_pkts_delta=150 start_srtt=68584 end_srtt=93935 end_send_bytes=21534541 end_recv_bytes=563
+[diag_sched_tick] sched=adaptive elapsed_ms=2625 path=0 active=1 selected_delta=2275 cwnd=1378570 effective_cwnd=1378570 inflight=1284000 scheduled=93600 headroom=970 est_bw_Bps=15293473 pacing_Bps=15293473 srtt_us=129493 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=2625 path=1 active=1 selected_delta=2463 cwnd=1295904 effective_cwnd=1295904 inflight=1182624 scheduled=112800 headroom=480 est_bw_Bps=12356827 pacing_Bps=12356827 srtt_us=94247 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12356827 sample_rate_Bps=11151286 sample_interval_us=100240 ack_elapse_us=100240 send_elapse_us=89583 sample_app_limited=0 cwnd=1295904 inflight=1210819 scheduled=40800 pacing_Bps=12356827 srtt_us=94620 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 15
+x-stream-count: 25
+x-stream-offset: 62914560
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=15/25 offset=62914560 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=62914560 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 15
+[diag_server_get] send_body_enter body_len=4194304 body_offset=62914560 use_file=1 stream=15/25
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 16
+x-stream-count: 25
+x-stream-offset: 67108864
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=16/25 offset=67108864 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=67108864 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 16
+[diag_server_get] send_body_enter body_len=4194304 body_offset=67108864 use_file=1 stream=16/25
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=15293473 sample_rate_Bps=9813763 sample_interval_us=137379 ack_elapse_us=127941 send_elapse_us=137379 sample_app_limited=0 cwnd=1387072 inflight=1224000 scheduled=118800 pacing_Bps=15293473 srtt_us=120607 min_rtt_us=24701
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=449.472 ms, app_submit_mbps=74.653 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=14/25 offset=58720256 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12518 h3_send_cnt=6 h3_send_bytes=4194304 h3_send_max_us=1064
+[diag_server_get_submit][summary] stream=14/25 completed=15 expected=25 bytes=62914560 wall_time_ms=2404.932 app_submit_mbps=209.285 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=14/25 offset=58720256 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=449.472 app_submit_mbps=74.653 metric=app_submit_not_delivered conn_send_delta=8176 conn_recv_delta=203 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=9938071 path_send_delta=9937882 path_recv_delta=189 inflight_end=2229005 srtt_start=134702 srtt_end=112024
+[diag_server_get_path][path_delta] stream=14/25 idx=0 id=0 state=2 app_status=2 send_delta=4824493 send_share=48.55% recv_delta=189 recv_eff_delta=0 send_pkts_delta=3968 recv_pkts_delta=103 start_srtt=134702 end_srtt=112024 end_send_bytes=25518681 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=14/25 idx=1 id=1 state=2 app_status=2 send_delta=5113389 send_share=51.45% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4208 recv_pkts_delta=100 start_srtt=102870 end_srtt=99842 end_send_bytes=24361181 end_recv_bytes=563
+[diag_sched_tick] sched=adaptive elapsed_ms=2876 path=0 active=1 selected_delta=2268 cwnd=1227055 effective_cwnd=1227055 inflight=1150800 scheduled=75600 headroom=655 est_bw_Bps=12664907 pacing_Bps=12664907 srtt_us=105637 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=2876 path=1 active=1 selected_delta=2409 cwnd=1346224 effective_cwnd=1346224 inflight=1026605 scheduled=319200 headroom=419 est_bw_Bps=12356827 pacing_Bps=12356827 srtt_us=92994 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12356827 sample_rate_Bps=10435074 sample_interval_us=107177 ack_elapse_us=95526 send_elapse_us=107177 sample_app_limited=0 cwnd=1346224 inflight=1065005 scheduled=237600 pacing_Bps=12356827 srtt_us=88157 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1081
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 17
+x-stream-count: 25
+x-stream-offset: 71303168
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=17/25 offset=71303168 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=71303168 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 17
+[diag_server_get] send_body_enter body_len=4194304 body_offset=71303168 use_file=1 stream=17/25
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=361.997 ms, app_submit_mbps=92.693 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=15/25 offset=62914560 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13711 h3_send_cnt=5 h3_send_bytes=4194304 h3_send_max_us=1068
+[diag_server_get_submit][summary] stream=15/25 completed=16 expected=25 bytes=67108864 wall_time_ms=2576.126 app_submit_mbps=208.402 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=15/25 offset=62914560 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=361.997 app_submit_mbps=92.693 metric=app_submit_not_delivered conn_send_delta=6359 conn_recv_delta=162 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=7730375 path_send_delta=7730185 path_recv_delta=190 inflight_end=1819200 srtt_start=127956 srtt_end=104549
+[diag_server_get_path][path_delta] stream=15/25 idx=0 id=0 state=2 app_status=2 send_delta=3820672 send_share=49.43% recv_delta=95 recv_eff_delta=0 send_pkts_delta=3142 recv_pkts_delta=77 start_srtt=127956 end_srtt=104549 end_send_bytes=27315929 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=15/25 idx=1 id=1 state=2 app_status=2 send_delta=3909513 send_share=50.57% recv_delta=95 recv_eff_delta=0 send_pkts_delta=3217 recv_pkts_delta=85 start_srtt=94516 end_srtt=68468 end_send_bytes=26250262 end_recv_bytes=658
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12664907 sample_rate_Bps=9794767 sample_interval_us=123372 ack_elapse_us=115251 send_elapse_us=123372 sample_app_limited=0 cwnd=1516653 inflight=1278605 scheduled=160800 pacing_Bps=9498680 srtt_us=105241 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 18
+x-stream-count: 25
+x-stream-offset: 75497472
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=18/25 offset=75497472 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=75497472 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 18
+[diag_server_get] send_body_enter body_len=4194304 body_offset=75497472 use_file=1 stream=18/25
+[diag_sched_tick] sched=adaptive elapsed_ms=3126 path=0 active=1 selected_delta=2310 cwnd=1516653 effective_cwnd=1516653 inflight=1181405 scheduled=258000 headroom=77248 est_bw_Bps=12664907 pacing_Bps=12664907 srtt_us=100011 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=3126 path=1 active=1 selected_delta=3284 cwnd=2054784 effective_cwnd=2054784 inflight=502800 scheduled=1551619 headroom=365 est_bw_Bps=12735473 pacing_Bps=12735473 srtt_us=36973 app_limited=0 cwnd_limited=0
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=388.612 ms, app_submit_mbps=86.344 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=16/25 offset=67108864 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12703 h3_send_cnt=6 h3_send_bytes=4194304 h3_send_max_us=1166
+[diag_server_get_submit][summary] stream=16/25 completed=17 expected=25 bytes=71303168 wall_time_ms=2696.115 app_submit_mbps=211.573 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=16/25 offset=67108864 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=388.612 app_submit_mbps=86.344 metric=app_submit_not_delivered conn_send_delta=6942 conn_recv_delta=172 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=8439902 path_send_delta=8439712 path_recv_delta=190 inflight_end=1745405 srtt_start=119988 srtt_end=103182
+[diag_server_get_path][path_delta] stream=16/25 idx=0 id=0 state=2 app_status=2 send_delta=4189741 send_share=49.64% recv_delta=0 recv_eff_delta=0 send_pkts_delta=3446 recv_pkts_delta=80 start_srtt=119988 end_srtt=103182 end_send_bytes=28661446 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=16/25 idx=1 id=1 state=2 app_status=2 send_delta=4249971 send_share=50.36% recv_delta=190 recv_eff_delta=0 send_pkts_delta=3496 recv_pkts_delta=92 start_srtt=103611 end_srtt=33684 end_send_bytes=27603683 end_recv_bytes=753
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 19
+x-stream-count: 25
+x-stream-offset: 79691776
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=19/25 offset=79691776 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=79691776 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 19
+[diag_server_get] send_body_enter body_len=4194304 body_offset=79691776 use_file=1 stream=19/25
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:986
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12735473 sample_rate_Bps=8510638 sample_interval_us=54144 ack_elapse_us=54144 send_elapse_us=38265 sample_app_limited=0 cwnd=2054784 inflight=481211 scheduled=1496419 pacing_Bps=12735473 srtt_us=36050 min_rtt_us=24046
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=311.157 ms, app_submit_mbps=107.838 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=17/25 offset=71303168 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12760 h3_send_cnt=6 h3_send_bytes=4194304 h3_send_max_us=1111
+[diag_server_get_submit][summary] stream=17/25 completed=18 expected=25 bytes=75497472 wall_time_ms=2801.784 app_submit_mbps=215.570 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=17/25 offset=71303168 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=311.157 app_submit_mbps=107.838 metric=app_submit_not_delivered conn_send_delta=5695 conn_recv_delta=138 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=6922975 path_send_delta=6922785 path_recv_delta=190 inflight_end=1860019 srtt_start=110157 srtt_end=107394
+[diag_server_get_path][path_delta] stream=17/25 idx=0 id=0 state=2 app_status=2 send_delta=3505133 send_share=50.63% recv_delta=0 recv_eff_delta=0 send_pkts_delta=2883 recv_pkts_delta=62 start_srtt=110157 end_srtt=107394 end_send_bytes=29856774 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=17/25 idx=1 id=1 state=2 app_status=2 send_delta=3417652 send_share=49.37% recv_delta=190 recv_eff_delta=0 send_pkts_delta=2812 recv_pkts_delta=76 start_srtt=88326 end_srtt=38211 end_send_bytes=28814865 end_recv_bytes=848
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1721
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12664907 sample_rate_Bps=11172635 sample_interval_us=109983 ack_elapse_us=109983 send_elapse_us=108532 sample_app_limited=0 cwnd=1516653 inflight=1387805 scheduled=94800 pacing_Bps=15831134 srtt_us=105241 min_rtt_us=24701
+[diag_sched_tick] sched=adaptive elapsed_ms=3377 path=0 active=1 selected_delta=2302 cwnd=1516653 effective_cwnd=1516653 inflight=1490400 scheduled=25200 headroom=1053 est_bw_Bps=12664907 pacing_Bps=12664907 srtt_us=109929 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=3377 path=1 active=1 selected_delta=2339 cwnd=2054784 effective_cwnd=2054784 inflight=728400 scheduled=1325405 headroom=979 est_bw_Bps=12735473 pacing_Bps=12735473 srtt_us=50501 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12735473 sample_rate_Bps=11767950 sample_interval_us=65262 ack_elapse_us=65262 send_elapse_us=58634 sample_app_limited=0 cwnd=2054784 inflight=837600 scheduled=1139424 pacing_Bps=9551605 srtt_us=54618 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 20
+x-stream-count: 25
+x-stream-offset: 83886080
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=20/25 offset=83886080 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=83886080 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 20
+[diag_server_get] send_body_enter body_len=4194304 body_offset=83886080 use_file=1 stream=20/25
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1767
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=479.632 ms, app_submit_mbps=69.959 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=18/25 offset=75497472 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=14543 h3_send_cnt=8 h3_send_bytes=4194304 h3_send_max_us=1220
+[diag_server_get_submit][summary] stream=18/25 completed=19 expected=25 bytes=79691776 wall_time_ms=3075.535 app_submit_mbps=207.292 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=18/25 offset=75497472 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=479.632 app_submit_mbps=69.959 metric=app_submit_not_delivered conn_send_delta=9185 conn_recv_delta=208 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=11165633 path_send_delta=11165443 path_recv_delta=190 inflight_end=2279424 srtt_start=104287 srtt_end=126768
+[diag_server_get_path][path_delta] stream=18/25 idx=0 id=0 state=2 app_status=2 send_delta=5465325 send_share=48.95% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4495 recv_pkts_delta=102 start_srtt=104287 end_srtt=126768 end_send_bytes=33033587 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=18/25 idx=1 id=1 state=2 app_status=2 send_delta=5700118 send_share=51.05% recv_delta=190 recv_eff_delta=0 send_pkts_delta=4690 recv_pkts_delta=106 start_srtt=52040 end_srtt=64866 end_send_bytes=32209388 end_recv_bytes=943
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 21
+x-stream-count: 25
+x-stream-offset: 88080384
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=21/25 offset=88080384 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=88080384 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 21
+[diag_server_get] send_body_enter body_len=4194304 body_offset=88080384 use_file=1 stream=21/25
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=11845727 sample_rate_Bps=10202626 sample_interval_us=143022 ack_elapse_us=143022 send_elapse_us=122992 sample_app_limited=0 cwnd=1466068 inflight=1344000 scheduled=44400 pacing_Bps=8884295 srtt_us=127316 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:911
+[diag_sched_tick] sched=adaptive elapsed_ms=3628 path=0 active=1 selected_delta=2262 cwnd=1466068 effective_cwnd=1466068 inflight=1305600 scheduled=159600 headroom=868 est_bw_Bps=11845727 pacing_Bps=11845727 srtt_us=118198 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=3628 path=1 active=1 selected_delta=1605 cwnd=1333611 effective_cwnd=1333611 inflight=937219 scheduled=319200 headroom=77192 est_bw_Bps=12302400 pacing_Bps=15378000 srtt_us=67476 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12302400 sample_rate_Bps=9535710 sample_interval_us=84947 ack_elapse_us=84947 send_elapse_us=73784 sample_app_limited=0 cwnd=1333611 inflight=1026000 scheduled=264000 pacing_Bps=12302400 srtt_us=71640 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1279
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=579.654 ms, app_submit_mbps=57.887 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=19/25 offset=79691776 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12417 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1197
+[diag_server_get_submit][summary] stream=19/25 completed=20 expected=25 bytes=83886080 wall_time_ms=3285.690 app_submit_mbps=204.246 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=19/25 offset=79691776 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=579.654 app_submit_mbps=57.887 metric=app_submit_not_delivered conn_send_delta=11096 conn_recv_delta=250 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=13486450 path_send_delta=13486260 path_recv_delta=190 inflight_end=2569824 srtt_start=103182 srtt_end=116555
+[diag_server_get_path][path_delta] stream=19/25 idx=0 id=0 state=2 app_status=2 send_delta=6528730 send_share=48.41% recv_delta=0 recv_eff_delta=0 send_pkts_delta=5370 recv_pkts_delta=123 start_srtt=103182 end_srtt=116555 end_send_bytes=35321504 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=19/25 idx=1 id=1 state=2 app_status=2 send_delta=6957530 send_share=51.59% recv_delta=190 recv_eff_delta=0 send_pkts_delta=5726 recv_pkts_delta=127 start_srtt=35011 end_srtt=83976 end_send_bytes=34692541 end_recv_bytes=1038
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 22
+x-stream-count: 25
+x-stream-offset: 92274688
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=22/25 offset=92274688 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=92274688 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 22
+[diag_server_get] send_body_enter body_len=4194304 body_offset=92274688 use_file=1 stream=22/25
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=11845727 sample_rate_Bps=9147080 sample_interval_us=155853 ack_elapse_us=155853 send_elapse_us=121045 sample_app_limited=0 cwnd=1290456 inflight=1246205 scheduled=66000 pacing_Bps=11845727 srtt_us=119887 min_rtt_us=24701
+[diag_sched_tick] sched=adaptive elapsed_ms=3878 path=0 active=1 selected_delta=2283 cwnd=1439458 effective_cwnd=1439458 inflight=1060800 scheduled=378605 headroom=53 est_bw_Bps=11845727 pacing_Bps=11845727 srtt_us=114894 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=3878 path=1 active=1 selected_delta=2367 cwnd=1333611 effective_cwnd=1333611 inflight=1057213 scheduled=232800 headroom=43598 est_bw_Bps=12302400 pacing_Bps=9226800 srtt_us=88165 app_limited=0 cwnd_limited=0
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=458.400 ms, app_submit_mbps=73.199 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=20/25 offset=83886080 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12015 h3_send_cnt=7 h3_send_bytes=4194304 h3_send_max_us=946
+[diag_server_get_submit][summary] stream=20/25 completed=21 expected=25 bytes=88080384 wall_time_ms=3429.948 app_submit_mbps=205.438 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=20/25 offset=83886080 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=458.400 app_submit_mbps=73.199 metric=app_submit_not_delivered conn_send_delta=8234 conn_recv_delta=203 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=10008036 path_send_delta=10007846 path_recv_delta=190 inflight_end=1946413 srtt_start=118308 srtt_end=112747
+[diag_server_get_path][path_delta] stream=20/25 idx=0 id=0 state=2 app_status=2 send_delta=4724781 send_share=47.21% recv_delta=0 recv_eff_delta=0 send_pkts_delta=3886 recv_pkts_delta=99 start_srtt=118308 end_srtt=112747 end_send_bytes=36631136 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=20/25 idx=1 id=1 state=2 app_status=2 send_delta=5283065 send_share=52.79% recv_delta=190 recv_eff_delta=0 send_pkts_delta=4348 recv_pkts_delta=104 start_srtt=54618 end_srtt=87461 end_send_bytes=36363338 end_recv_bytes=1133
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:5106
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12113311 sample_rate_Bps=9816716 sample_interval_us=93882 ack_elapse_us=84331 send_elapse_us=93882 sample_app_limited=0 cwnd=1322244 inflight=954019 scheduled=290400 pacing_Bps=12113311 srtt_us=78049 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 23
+x-stream-count: 25
+x-stream-offset: 96468992
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=23/25 offset=96468992 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=96468992 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 23
+[diag_server_get] send_body_enter body_len=4194304 body_offset=96468992 use_file=1 stream=23/25
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:3140
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12049924 sample_rate_Bps=11407388 sample_interval_us=97148 ack_elapse_us=97148 send_elapse_us=89108 sample_app_limited=0 cwnd=1492482 inflight=817200 scheduled=640800 pacing_Bps=12049924 srtt_us=81353 min_rtt_us=24701
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=550.035 ms, app_submit_mbps=61.004 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=21/25 offset=88080384 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=12759 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1166
+[diag_server_get_submit][summary] stream=21/25 completed=22 expected=25 bytes=92274688 wall_time_ms=3627.007 app_submit_mbps=203.528 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=21/25 offset=88080384 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=550.035 app_submit_mbps=61.004 metric=app_submit_not_delivered conn_send_delta=9912 conn_recv_delta=249 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=12046732 path_send_delta=12046542 path_recv_delta=190 inflight_end=1624248 srtt_start=126768 srtt_end=77944
+[diag_server_get_path][path_delta] stream=21/25 idx=0 id=0 state=2 app_status=2 send_delta=5767514 send_share=47.88% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4744 recv_pkts_delta=122 start_srtt=126768 end_srtt=77944 end_send_bytes=38819341 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=21/25 idx=1 id=1 state=2 app_status=2 send_delta=6279028 send_share=52.12% recv_delta=190 recv_eff_delta=0 send_pkts_delta=5168 recv_pkts_delta=127 start_srtt=64741 end_srtt=71025 end_send_bytes=38516384 end_recv_bytes=1228
+[stats] xqc_mini_svr_h3_request_create_notify success 
+========== [server] Received HTTP/3 Request Headers ==========
+:method: GET
+:scheme: https
+:path: /upload/ccc.bin
+host: test.xquic.com
+content-type: text/plain
+content-length: 4194304
+[server] >>> Parsed Content-Length: 4194304 bytes
+x-stream-index: 24
+x-stream-count: 25
+x-stream-offset: 100663296
+x-total-length: 104857600
+=============================================================
+[diag_server_get] headers stream=24/25 offset=100663296 len=4194304 total=104857600 metadata=1 path=/upload/ccc.bin resolved=./upload/ccc.bin
+[server] serving file data for ./upload/ccc.bin (4194304 bytes)
+[diag_server_get] response_start status=200 body_len=4194304 body_offset=100663296 use_file=1 path=./upload/ccc.bin
+[stats] response headers sent for stream 24
+[diag_server_get] send_body_enter body_len=4194304 body_offset=100663296 use_file=1 stream=24/25
+[diag_sched_tick] sched=adaptive elapsed_ms=4129 path=0 active=1 selected_delta=2545 cwnd=1498522 effective_cwnd=1498522 inflight=645600 scheduled=808800 headroom=44122 est_bw_Bps=12147750 pacing_Bps=12147750 srtt_us=72108 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=4129 path=1 active=1 selected_delta=2511 cwnd=1352365 effective_cwnd=1352365 inflight=727211 scheduled=624629 headroom=525 est_bw_Bps=12524627 pacing_Bps=9393470 srtt_us=69869 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12524627 sample_rate_Bps=10001594 sample_interval_us=99706 ack_elapse_us=99706 send_elapse_us=80474 sample_app_limited=0 cwnd=1383411 inflight=751840 scheduled=597619 pacing_Bps=12524627 srtt_us=70681 min_rtt_us=24046
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=485.375 ms, app_submit_mbps=69.131 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=22/25 offset=92274688 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=11643 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1136
+[diag_server_get_submit][summary] stream=22/25 completed=23 expected=25 bytes=96468992 wall_time_ms=3833.819 app_submit_mbps=201.301 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=22/25 offset=92274688 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=485.375 app_submit_mbps=69.131 metric=app_submit_not_delivered conn_send_delta=8875 conn_recv_delta=231 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=10786946 path_send_delta=10786755 path_recv_delta=191 inflight_end=1477219 srtt_start=116622 srtt_end=56113
+[diag_server_get_path][path_delta] stream=22/25 idx=0 id=0 state=2 app_status=2 send_delta=5360749 send_share=49.70% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4409 recv_pkts_delta=115 start_srtt=116622 end_srtt=56113 end_send_bytes=41158925 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=22/25 idx=1 id=1 state=2 app_status=2 send_delta=5426006 send_share=50.30% recv_delta=191 recv_eff_delta=0 send_pkts_delta=4466 recv_pkts_delta=116 start_srtt=86762 end_srtt=55830 end_send_bytes=40860307 end_recv_bytes=1324
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12511292 sample_rate_Bps=10877003 sample_interval_us=66636 ack_elapse_us=59931 send_elapse_us=66636 sample_app_limited=0 cwnd=1520972 inflight=680400 scheduled=763200 pacing_Bps=12511292 srtt_us=53807 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:4749
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:2839
+[diag_sched_tick] sched=adaptive elapsed_ms=4379 path=0 active=1 selected_delta=2451 cwnd=1520972 effective_cwnd=1520972 inflight=746400 scheduled=730800 headroom=43772 est_bw_Bps=12511292 pacing_Bps=12511292 srtt_us=55721 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=4379 path=1 active=1 selected_delta=2395 cwnd=1383411 effective_cwnd=1383411 inflight=862229 scheduled=520819 headroom=363 est_bw_Bps=12524627 pacing_Bps=12524627 srtt_us=56423 app_limited=0 cwnd_limited=0
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=391.513 ms, app_submit_mbps=85.705 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=23/25 offset=96468992 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=11659 h3_send_cnt=7 h3_send_bytes=4194304 h3_send_max_us=1122
+[diag_server_get_submit][summary] stream=23/25 completed=24 expected=25 bytes=100663296 wall_time_ms=3931.170 app_submit_mbps=204.852 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=23/25 offset=96468992 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=391.513 app_submit_mbps=85.705 metric=app_submit_not_delivered conn_send_delta=7323 conn_recv_delta=182 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=8900811 path_send_delta=8900715 path_recv_delta=96 inflight_end=1653029 srtt_start=80536 srtt_end=55884
+[diag_server_get_path][path_delta] stream=23/25 idx=0 id=0 state=2 app_status=2 send_delta=4415296 send_share=49.61% recv_delta=0 recv_eff_delta=0 send_pkts_delta=3631 recv_pkts_delta=91 start_srtt=80536 end_srtt=55884 end_send_bytes=42356685 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=23/25 idx=1 id=1 state=2 app_status=2 send_delta=4485419 send_share=50.39% recv_delta=96 recv_eff_delta=0 send_pkts_delta=3692 recv_pkts_delta=91 start_srtt=77669 end_srtt=58004 end_send_bytes=42052632 end_recv_bytes=1324
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12524627 sample_rate_Bps=11493555 sample_interval_us=70529 ack_elapse_us=70529 send_elapse_us=65974 sample_app_limited=0 cwnd=1383411 inflight=796819 scheduled=542400 pacing_Bps=12524627 srtt_us=62719 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:3459
+[server] response body submitted to XQUIC. send_len=4194304 bytes, time=455.775 ms, app_submit_mbps=73.621 metric=app_submit_not_delivered
+[diag_server_io][response_done] stream=24/25 offset=100663296 len=4194304 file_read_cnt=1 file_read_bytes=4194304 file_read_max_us=13365 h3_send_cnt=9 h3_send_bytes=4194304 h3_send_max_us=1162
+[diag_server_get_submit][summary] stream=24/25 completed=25 expected=25 bytes=104857600 wall_time_ms=4109.681 app_submit_mbps=204.118 metric=app_submit_not_delivered
+[diag_server_get_path][response_done] stream=24/25 offset=100663296 len=4194304 start_both=1 end_both=1 start_active=2 end_active=2 start_mp_state=1 end_mp_state=1 enable_mp=1 duration_ms=455.775 app_submit_mbps=73.621 metric=app_submit_not_delivered conn_send_delta=9073 conn_recv_delta=214 conn_lost_delta=0 loss_delta_rate=0.000% loss_rate_end=0.000% app_delta=11028704 path_send_delta=11028704 path_recv_delta=0 inflight_end=1835429 srtt_start=72488 srtt_end=66936
+[diag_server_get_path][path_delta] stream=24/25 idx=0 id=0 state=2 app_status=2 send_delta=5516992 send_share=50.02% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4537 recv_pkts_delta=106 start_srtt=72488 end_srtt=66936 end_send_bytes=44639117 end_recv_bytes=1396
+[diag_server_get_path][path_delta] stream=24/25 idx=1 id=1 state=2 app_status=2 send_delta=5511712 send_share=49.98% recv_delta=0 recv_eff_delta=0 send_pkts_delta=4536 recv_pkts_delta=108 start_srtt=68295 end_srtt=65137 end_send_bytes=44389248 end_recv_bytes=1324
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12511292 sample_rate_Bps=11479097 sample_interval_us=77358 ack_elapse_us=74979 send_elapse_us=77358 sample_app_limited=0 cwnd=1264882 inflight=902400 scheduled=319200 pacing_Bps=12511292 srtt_us=67410 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:2767
+[diag_sched_tick] sched=adaptive elapsed_ms=4629 path=0 active=1 selected_delta=2282 cwnd=1264882 effective_cwnd=1264882 inflight=924000 scheduled=340800 headroom=82 est_bw_Bps=12511292 pacing_Bps=15639115 srtt_us=69082 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=4629 path=1 active=1 selected_delta=2559 cwnd=1383411 effective_cwnd=1383411 inflight=915619 scheduled=466800 headroom=992 est_bw_Bps=12524627 pacing_Bps=12524627 srtt_us=67855 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12524627 sample_rate_Bps=11412554 sample_interval_us=84435 ack_elapse_us=84435 send_elapse_us=79316 sample_app_limited=0 cwnd=1207531 inflight=957600 scheduled=206400 pacing_Bps=12524627 srtt_us=73281 min_rtt_us=24046
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:4385
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12511292 sample_rate_Bps=11570845 sample_interval_us=89970 ack_elapse_us=89970 send_elapse_us=86373 sample_app_limited=0 cwnd=1264882 inflight=1083600 scheduled=138000 pacing_Bps=12511292 srtt_us=79998 min_rtt_us=24701
+[diag_sched_tick] sched=adaptive elapsed_ms=4879 path=0 active=1 selected_delta=2496 cwnd=1264882 effective_cwnd=1264882 inflight=1074000 scheduled=190800 headroom=82 est_bw_Bps=12511292 pacing_Bps=9383469 srtt_us=81057 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=4879 path=1 active=1 selected_delta=2280 cwnd=1199554 effective_cwnd=1199554 inflight=1032648 scheduled=166800 headroom=106 est_bw_Bps=12391926 pacing_Bps=12391926 srtt_us=79567 app_limited=0 cwnd_limited=0
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:4365
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12391926 sample_rate_Bps=11000644 sample_interval_us=94578 ack_elapse_us=94578 send_elapse_us=86447 sample_app_limited=0 cwnd=1199554 inflight=1059048 scheduled=97200 pacing_Bps=12391926 srtt_us=82805 min_rtt_us=24046
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12451803 sample_rate_Bps=10713218 sample_interval_us=100362 ack_elapse_us=100362 send_elapse_us=98679 sample_app_limited=0 cwnd=1087679 inflight=1044000 scheduled=0 pacing_Bps=15564754 srtt_us=91073 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:3745
+[diag_sched_tick] sched=adaptive elapsed_ms=5131 path=0 active=1 selected_delta=2315 cwnd=1125227 effective_cwnd=1125227 inflight=1004400 scheduled=120000 headroom=827 est_bw_Bps=12451803 pacing_Bps=9338852 srtt_us=82024 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=5131 path=1 active=1 selected_delta=2494 cwnd=1199554 effective_cwnd=1199554 inflight=1059600 scheduled=139200 headroom=754 est_bw_Bps=12391926 pacing_Bps=12391926 srtt_us=89280 app_limited=0 cwnd_limited=0
+[diag_bbr_tick] path=1 mode=PROBE_BW full_bw=1 est_bw_Bps=12391926 sample_rate_Bps=11183546 sample_interval_us=99953 ack_elapse_us=99953 send_elapse_us=99402 sample_app_limited=0 cwnd=1199554 inflight=1105829 scheduled=50400 pacing_Bps=12391926 srtt_us=87385 min_rtt_us=24046
+[diag_bbr_tick] path=0 mode=PROBE_BW full_bw=1 est_bw_Bps=12451803 sample_rate_Bps=11094628 sample_interval_us=86961 ack_elapse_us=86961 send_elapse_us=77748 sample_app_limited=0 cwnd=1193079 inflight=1088400 scheduled=61200 pacing_Bps=15564754 srtt_us=81740 min_rtt_us=24701
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1366
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:1566
+[diag_sched_tick] sched=adaptive elapsed_ms=5588 path=0 active=1 selected_delta=2105 cwnd=1200169 effective_cwnd=1200169 inflight=0 scheduled=0 headroom=1200169 est_bw_Bps=12566584 pacing_Bps=12566584 srtt_us=84550 app_limited=0 cwnd_limited=0
+[diag_sched_tick] sched=adaptive elapsed_ms=5588 path=1 active=1 selected_delta=2083 cwnd=1247762 effective_cwnd=1247762 inflight=0 scheduled=0 headroom=1247762 est_bw_Bps=12391926 pacing_Bps=12391926 srtt_us=83242 app_limited=0 cwnd_limited=0
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:618
+[diag_adaptive_probe] both_sendable=33 primary_only=43996 secondary_only=44209 neither_sendable=4375 probe_considered=92614 probe_selected=0 probe_denied_secondary_cwnd=48372 probe_denied_secondary_reinject=0 probe_denied_secondary_other=0 probe_denied_share_limit=33 probe_denied_no_secondary=0 fallback_real_inflight=4371 fallback_scheduled_reservation=39838
+[diag_sched_summary] sched=adaptive decisions=93459 active_no_sendable=4441 selected_packets=89018 selected_bytes=106760656
+[diag_sched_path] sched=adaptive id=0 checks=93459 sendable=44646 blocked_real=9424 blocked_scheduled=39389 selected_packets=44613 selected_bytes=53509391
+[diag_sched_path] sched=adaptive id=1 checks=93440 sendable=44529 blocked_real=4581 blocked_scheduled=44330 selected_packets=44405 selected_bytes=53251265
+[diag_adaptive_summary] event=conn_close phase=bulk duration_ms=5113.024 primary=1 final_probe_pct=0.0 min_probe_pct=0.0 max_probe_pct=25.0 picks_total=88999 picks_primary=44029 picks_probe=0 picks_cwnd_fallback=44209 picks_reinject_fallback=0 picks_warmup=761 picks_single=0 picks_best_fallback=0 picks_original=0 picks_reinject=0 no_sendable_calls=4441 primary_selects=1 primary_switches=0 adjustments=9 probe_up=1 probe_down=5 trial_keep=0 trial_revert=1 primary_queue_shift=0 secondary_queue_reduce=6
+[diag_adaptive_totals] duration_ms=5113.024 selected_bytes=106758200 app_sent_bytes=108184757 wire_sent_bytes=108185053 delivered_bytes=106748277 delivered_mbps=167.022 reinject_bytes=0 retrans_bytes=2432 lost_pkts=0
+[diag_adaptive_path] id=0 selected_picks=44594 selected_bytes=53506935 selected_share=50.12% app_sent_bytes=54220472 wire_sent_bytes=54220650 delivered_bytes=53507117 delivered_share=50.12% delivered_mbps=83.719 reinject_bytes=0 retrans_bytes=0 lost_pkts=0 blocked_checks=48813 srtt_us=84550 min_srtt_us=25000 queue_ratio=3.382 cwnd=1200169 inflight=0 est_bw_Bps=12566584 delivery_ema_Bps=89329170 capacity_ema_Bps=61224360 score=21971778 picks_primary=0 picks_probe=0 picks_cwnd_fallback=44209 picks_reinject_fallback=0 picks_warmup=385 picks_single=0 picks_reinject=0 reinject_selected_bytes=0
+[diag_adaptive_path] id=1 selected_picks=44405 selected_bytes=53251265 selected_share=49.88% app_sent_bytes=53964285 wire_sent_bytes=53964403 delivered_bytes=53241160 delivered_share=49.88% delivered_mbps=83.303 reinject_bytes=0 retrans_bytes=2432 lost_pkts=0 blocked_checks=48911 srtt_us=83242 min_srtt_us=32260 queue_ratio=2.580 cwnd=1247762 inflight=0 est_bw_Bps=12391926 delivery_ema_Bps=168770376 capacity_ema_Bps=111354607 score=50957134 picks_primary=44029 picks_probe=0 picks_cwnd_fallback=0 picks_reinject_fallback=0 picks_warmup=376 picks_single=0 picks_reinject=0 reinject_selected_bytes=0
+[stats] xqc_mini_svr_h3_request_close_notify success, cwnd_blocked:903
+[mini_mp][h3_conn_close] both_active=1, active_path_cnt=2, mp_state=1, enable_mp=1, conn_info=1/1/1/a/a,2,2,2,0,0,0,0,0,4441,8000,89046,2187,2186,104860366,0,777,i100,4,24,33,40000,1121,5590,0,4,24,33,0,1122,5590,0,4,24,33,0,1123,5590,0,4,1200,80,44466,5479,4,1200,80,44467,5479,4,17,40000,44468,5590,0-2,0-2,0-0,0-0,0-0,0-84,0-54225125,0-60853,0-44616,0-1098,0-0,0-0,0-0,0-0,0-0,0-0,0-0,0-0,1-2,1-2,1-0,1-301,1-0,1-83,1-53969281,1-54495,1-44410,1-1088,1-0,1-0,1-0,1-0,1-0,1-0,1-0,1-0
+[diag_server_quic][h3_conn_close] send=89026 recv=2186 lost=0 loss_rate=0.000% spurious_loss=2 srtt_us=84550 min_rtt_us=24701 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=108187631 standby_app_bytes=0
+[mini_mp][h3_conn_close] path=0, state=2, app_status=2, srtt=84550, send_bytes=54220626, recv_bytes=1396
+[diag_server_path][h3_conn_close] idx=0 id=0 state=2 app_status=2 srtt_us=84550 send_bytes=54220626 recv_bytes=1396 send_pkts=44616 recv_pkts=1098 recv_eff_bytes=0
+[mini_mp][h3_conn_close] path=1, state=2, app_status=2, srtt=83242, send_bytes=53964285, recv_bytes=1324
+[diag_server_path][h3_conn_close] idx=1 id=1 state=2 app_status=2 srtt_us=83242 send_bytes=53964285 recv_bytes=1324 send_pkts=44410 recv_pkts=1088 recv_eff_bytes=0
+[stats] xqc_mini_svr_h3_conn_close_notify success 
+[diag_ack_path] path=0 ack_frames=1051 acked_packets=44614 acked_bytes=53510432 same_path_ack=1051 cross_path_ack=0 inter_ack_gap_hist=92,119,88,40,65,222,329,81,11,0,3 ack_delay_hist=0,0,2,4,239,664,138,2,1,0,1
+[diag_bbr_path] path=0 sample_valid=1049 sample_ack_nothing=2 sample_interval_too_small=0 sample_app_limited=9 sample_non_app_limited=1040 sample_rate_min=333 sample_rate_avg=10621945 sample_rate_max=15293473
+[diag_send_path] path=0 send_cwnd_block_count=57 send_cwnd_block_duration_us=71986 pacing_block_count=3767 pacing_block_duration_us=3956971 first_block_cwnd=7 first_block_pacing=2375 both_blocked_cwnd_first=0 both_blocked_pacing_first=2 send_burst_events=2525 send_burst_packets=44631 send_burst_bytes=54225125 send_burst_max_packets=121 send_burst_max_bytes=145963 ack_mp_generated=12 ack_gap_us_min=45 ack_gap_us_avg=248139 ack_gap_us_max=1488758 ack_generation_delay_us_min=7 ack_generation_delay_us_avg=16248 ack_generation_delay_us_max=105013 largest_ack_delta_max=343 ack_has_gap=8
+[diag_ack_path] path=1 ack_frames=1053 acked_packets=44399 acked_bytes=53245896 same_path_ack=1053 cross_path_ack=0 inter_ack_gap_hist=170,241,130,56,13,23,247,164,5,1,2 ack_delay_hist=0,0,1,4,225,728,95,0,0,0,0
+[diag_bbr_path] path=1 sample_valid=1053 sample_ack_nothing=0 sample_interval_too_small=0 sample_app_limited=4 sample_non_app_limited=1049 sample_rate_min=23931 sample_rate_avg=10481232 sample_rate_max=13012170
+[diag_send_path] path=1 send_cwnd_block_count=0 send_cwnd_block_duration_us=0 pacing_block_count=4176 pacing_block_duration_us=4275638 first_block_cwnd=0 first_block_pacing=2591 both_blocked_cwnd_first=0 both_blocked_pacing_first=0 send_burst_events=2659 send_burst_packets=44415 send_burst_bytes=53969281 send_burst_max_packets=121 send_burst_max_bytes=147136 ack_mp_generated=16 ack_gap_us_min=4611 ack_gap_us_avg=248494 ack_gap_us_max=604355 ack_generation_delay_us_min=12 ack_generation_delay_us_avg=12736 ack_generation_delay_us_max=16849 largest_ack_delta_max=121 ack_has_gap=6
+
