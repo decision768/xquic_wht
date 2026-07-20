@@ -1530,8 +1530,14 @@ typedef struct xqc_path_metrics_s {
     uint64_t            path_pkt_recv_count;
     uint64_t            path_pkt_send_count;
 
+    /* Encoded bytes from packets carrying application data. */
     uint64_t            path_send_bytes;
+    /* All encoded QUIC bytes sent on this path. */
+    uint64_t            path_wire_send_bytes;
+    /* Bytes acknowledged by transport delivery accounting. */
+    uint64_t            path_delivered_bytes;
     uint64_t            path_send_reinject_bytes;
+    uint64_t            path_send_retrans_bytes;
 
     uint64_t            path_recv_bytes;
     uint64_t            path_recv_reinject_bytes;

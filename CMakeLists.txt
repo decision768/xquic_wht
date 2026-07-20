@@ -416,6 +416,7 @@ endif()
 set (
     XQC_SOURCE
     ${XQC_SOURCE}
+    "api/netins_udp.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
@@ -437,6 +438,27 @@ add_library(
     SHARED
     ${XQC_SOURCE}
 )
+
+option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
+if(NETINS_UDP_BUILD_TESTS)
+    enable_testing()
+    add_executable(netins_udp_unit_test
+        api/netins_udp.c
+        api/tests/test_netins_udp.c
+    )
+    target_include_directories(netins_udp_unit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(netins_udp_unit_test pthread)
+    add_test(NAME netins_udp_unit_test COMMAND netins_udp_unit_test)
+
+    add_library(netins_udp_example OBJECT
+        api/examples/netins_udp_snapshot_example.c
+    )
+    target_include_directories(netins_udp_example PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+endif()
 
 if(PLATFORM MATCHES "mac")
     target_link_libraries(
@@ -465,3 +487,17 @@ if(CMAKE_BUILD_TYPE STREQUAL MinSizeRel)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_STRIP} libxquic.so)
 endif()
+
+include(GNUInstallDirs)
+install(TARGETS xquic xquic-static
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(FILES include/xquic/netins_udp.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/xquic
+)
+install(FILES
+    api/README.md
+    api/examples/netins_udp_snapshot_example.c
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
+)

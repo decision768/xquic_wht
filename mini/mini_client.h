@@ -10,6 +10,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <event2/event.h>
+#include <xquic/netins_udp.h>
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
@@ -356,6 +357,10 @@ typedef struct xqc_mini_cli_user_conn_s {
 
     struct event            *ev_timeout;
     struct event            *ev_path_retry;
+    struct event            *ev_netins_udp_refresh;
+    netins_udp_t            *netins_udp;
+    int                     netins_udp_detached;
+    int                     netins_udp_reported_multipath;
     int                     rx_next_path_index;
     int                     rx_arbiter_running;
     int                     rx_shutdown;
@@ -477,6 +482,12 @@ xqc_mini_cli_user_conn_t *xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
 void xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_netins_udp_bind(xqc_mini_cli_user_conn_t *user_conn,
+    const xqc_cid_t *cid);
+void xqc_mini_cli_netins_udp_handshake_finished(
+    xqc_mini_cli_user_conn_t *user_conn);
+void xqc_mini_cli_netins_udp_connection_closed(
+    xqc_mini_cli_user_conn_t *user_conn, int conn_error);
 
 int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
 

@@ -625,6 +625,19 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
         && packet_in->pi_path_id < XQC_MAX_PATHS_COUNT)
     {
         stream->paths_info[packet_in->pi_path_id].path_recv_effective_bytes += stream_frame->data_length;
+
+        xqc_path_ctx_t *metric_path = xqc_conn_find_path_by_path_id(conn,
+            packet_in->pi_path_id);
+        if (metric_path != NULL && metric_path->path_send_ctl != NULL) {
+            metric_path->path_send_ctl->ctl_app_bytes_recv_effective +=
+                stream_frame->data_length;
+            if (packet_in->pi_flag & XQC_PIF_REINJECTED_REPLICA) {
+                stream->paths_info[packet_in->pi_path_id]
+                    .path_recv_effective_reinject_bytes += stream_frame->data_length;
+                metric_path->path_send_ctl
+                    ->ctl_app_bytes_recv_effective_reinject += stream_frame->data_length;
+            }
+        }
     }
 
     xqc_log(conn->log, XQC_LOG_DEBUG, "|stream_length:%ui|merged_offset_end:%ui|stream_id:%ui|",

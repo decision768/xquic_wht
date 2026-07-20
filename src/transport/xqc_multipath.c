@@ -642,7 +642,7 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state >= XQC_PATH_STATE_ACTIVE && paths_num < XQC_MAX_PATHS_COUNT) {
+        if (paths_num < XQC_MAX_PATHS_COUNT) {
 
             if (path == NULL || path->path_send_ctl == NULL) {
                 continue;
@@ -653,7 +653,14 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
             stats->paths_info[paths_num].path_pkt_recv_count = path->path_send_ctl->ctl_recv_count;
             stats->paths_info[paths_num].path_pkt_send_count = path->path_send_ctl->ctl_send_count;
             stats->paths_info[paths_num].path_send_bytes = path->path_send_ctl->ctl_app_bytes_send;
+            stats->paths_info[paths_num].path_wire_send_bytes = path->path_send_ctl->ctl_bytes_send;
+            stats->paths_info[paths_num].path_delivered_bytes = path->path_send_ctl->ctl_delivered;
+            stats->paths_info[paths_num].path_send_reinject_bytes = path->path_send_ctl->ctl_reinjected_bytes_send;
+            stats->paths_info[paths_num].path_send_retrans_bytes = path->path_send_ctl->ctl_retrans_bytes_send;
             stats->paths_info[paths_num].path_recv_bytes = path->path_send_ctl->ctl_app_bytes_recv;
+            stats->paths_info[paths_num].path_recv_reinject_bytes = path->path_send_ctl->ctl_reinjected_bytes_recv;
+            stats->paths_info[paths_num].path_recv_effective_bytes = path->path_send_ctl->ctl_app_bytes_recv_effective;
+            stats->paths_info[paths_num].path_recv_effective_reinject_bytes = path->path_send_ctl->ctl_app_bytes_recv_effective_reinject;
             stats->paths_info[paths_num].path_srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
             stats->paths_info[paths_num].path_app_status = path->app_path_status;
 

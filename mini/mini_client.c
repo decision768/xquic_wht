@@ -1,4 +1,5 @@
 #include "mini_client.h"
+#include "../api/netins_udp_internal.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <netdb.h>
@@ -13,6 +14,7 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
+#define XQC_MINI_NETINS_UDP_REFRESH_US 500000
 #define CLIENT_RX_PER_PATH_PACKETS 64
 
 struct xqc_mini_cli_rx_batch_s {
@@ -58,6 +60,152 @@ static void xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn);
 static void xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path,
     const char *reason);
 static void xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn);
+
+static void
+xqc_mini_cli_netins_udp_update_metadata(xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn == NULL || user_conn->netins_udp == NULL) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_PATH_CNT; ++i) {
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (path->path_id == XQC_MINI_PATH_ID_INVALID) {
+            continue;
+        }
+        (void)netins_udp_set_path_metadata(user_conn->netins_udp,
+            path->path_id,
+            path->interface_name[0] != '\0' ? path->interface_name : NULL,
+            path->local_addr, path->local_addrlen,
+            path->peer_addr, path->peer_addrlen);
+    }
+}
+
+static void
+xqc_mini_cli_netins_udp_refresh_cb(evutil_socket_t fd, short what, void *arg)
+{
+    (void)fd;
+    (void)what;
+    xqc_mini_cli_user_conn_t *user_conn = arg;
+    if (user_conn == NULL || user_conn->netins_udp == NULL
+        || user_conn->h3_conn == NULL)
+    {
+        return;
+    }
+
+    xqc_mini_cli_netins_udp_update_metadata(user_conn);
+    if (netins_udp_refresh(user_conn->netins_udp) != NETINS_UDP_OK
+        || user_conn->netins_udp_reported_multipath)
+    {
+        return;
+    }
+
+    netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    if (netins_udp_get_snapshot(user_conn->netins_udp, &snapshot)
+        == NETINS_UDP_OK && snapshot.path_count > 1)
+    {
+        user_conn->netins_udp_reported_multipath = 1;
+        printf("[netins_udp][client] multipath connection_id=%" PRIu64
+               " paths=%u active=%u available=%u\n",
+            snapshot.info.connection_id, snapshot.path_count,
+            snapshot.info.active_path_count,
+            snapshot.info.available_path_count);
+    }
+}
+
+int
+xqc_mini_cli_netins_udp_bind(xqc_mini_cli_user_conn_t *user_conn,
+    const xqc_cid_t *cid)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->netins_udp == NULL || cid == NULL)
+    {
+        return XQC_ERROR;
+    }
+
+    if (netins_udp_bind(user_conn->netins_udp, user_conn->ctx->engine, cid,
+        NETINS_UDP_ROLE_CLIENT) != NETINS_UDP_OK)
+    {
+        char error_message[NETINS_UDP_ERROR_MSG_LEN];
+        (void)netins_udp_get_last_error_msg(user_conn->netins_udp,
+            error_message, sizeof(error_message));
+        printf("[netins_udp][client] bind failed: %s\n", error_message);
+        return XQC_ERROR;
+    }
+
+    xqc_mini_cli_netins_udp_update_metadata(user_conn);
+    if (user_conn->ev_netins_udp_refresh != NULL) {
+        struct timeval interval = {0, XQC_MINI_NETINS_UDP_REFRESH_US};
+        if (event_add(user_conn->ev_netins_udp_refresh, &interval) != 0) {
+            (void)netins_udp_mark_error(user_conn->netins_udp, EIO,
+                "failed to start client netins UDP refresh timer");
+            (void)netins_udp_mark_closed(user_conn->netins_udp, EIO);
+            return XQC_ERROR;
+        }
+    }
+
+    netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
+    if (netins_udp_get_info(user_conn->netins_udp, &info) == NETINS_UDP_OK) {
+        netins_udp_snapshot_t registry_snapshot =
+            NETINS_UDP_SNAPSHOT_INITIALIZER;
+        int registry_result = netins_udp_get_snapshot_by_id(
+            info.connection_id, &registry_snapshot);
+        printf("[netins_udp][client] registered connection_id=%" PRIu64
+               " registry_query=%s\n",
+            info.connection_id,
+            registry_result == NETINS_UDP_OK ? "ok" : "failed");
+    }
+    return XQC_OK;
+}
+
+void
+xqc_mini_cli_netins_udp_handshake_finished(
+    xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn != NULL && user_conn->netins_udp != NULL) {
+        (void)netins_udp_mark_handshake_finished(user_conn->netins_udp);
+        netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
+        if (netins_udp_get_snapshot(user_conn->netins_udp, &snapshot)
+            == NETINS_UDP_OK)
+        {
+            printf("[netins_udp][client] connected connection_id=%" PRIu64
+                   " paths=%u active=%u validating=%u\n",
+                snapshot.info.connection_id, snapshot.path_count,
+                snapshot.info.active_path_count,
+                snapshot.info.validating_path_count);
+        }
+    }
+}
+
+void
+xqc_mini_cli_netins_udp_connection_closed(
+    xqc_mini_cli_user_conn_t *user_conn, int conn_error)
+{
+    if (user_conn == NULL || user_conn->netins_udp == NULL
+        || user_conn->netins_udp_detached)
+    {
+        return;
+    }
+    if (user_conn->ev_netins_udp_refresh != NULL) {
+        event_del(user_conn->ev_netins_udp_refresh);
+    }
+    xqc_mini_cli_netins_udp_update_metadata(user_conn);
+    (void)netins_udp_mark_closed(user_conn->netins_udp, conn_error);
+    user_conn->netins_udp_detached = 1;
+    netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    if (netins_udp_get_snapshot(user_conn->netins_udp, &snapshot)
+        == NETINS_UDP_OK)
+    {
+        printf("[netins_udp][client] closed connection_id=%" PRIu64
+               " state=%s error=%d paths=%u"
+               " wire_sent=%" PRIu64 " effective_recv=%" PRIu64 "\n",
+            snapshot.info.connection_id,
+            netins_udp_conn_state_name(snapshot.info.connection_state),
+            snapshot.info.conn_error, snapshot.path_count,
+            snapshot.statis.bytes_wire_sent,
+            snapshot.statis.bytes_recv_effective);
+    }
+}
 
 
 static uint64_t
@@ -2925,6 +3073,18 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
 
     user_conn->ctx = ctx;
     user_conn->download_fd = -1;
+    user_conn->netins_udp = netins_udp_new();
+    if (user_conn->netins_udp == NULL) {
+        printf("[netins_udp][client] disabled: adapter allocation failed\n");
+    } else {
+        user_conn->ev_netins_udp_refresh = event_new(ctx->eb, -1,
+            EV_PERSIST, xqc_mini_cli_netins_udp_refresh_cb, user_conn);
+        if (user_conn->ev_netins_udp_refresh == NULL) {
+            printf("[netins_udp][client] disabled: refresh timer allocation failed\n");
+            netins_udp_close(user_conn->netins_udp);
+            user_conn->netins_udp = NULL;
+        }
+    }
     user_conn->rx_next_path_index = 0;
     user_conn->rx_arbiter_running = 0;
     user_conn->rx_shutdown = 0;
@@ -3182,6 +3342,20 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         event_free(user_conn->ev_path_retry);
         user_conn->ev_path_retry = NULL;
     }
+    if (user_conn->ev_netins_udp_refresh != NULL) {
+        event_del(user_conn->ev_netins_udp_refresh);
+        event_free(user_conn->ev_netins_udp_refresh);
+        user_conn->ev_netins_udp_refresh = NULL;
+    }
+    if (user_conn->netins_udp != NULL) {
+        if (!user_conn->netins_udp_detached && user_conn->h3_conn != NULL
+            && user_conn->ctx != NULL && user_conn->ctx->engine != NULL)
+        {
+            xqc_mini_cli_netins_udp_connection_closed(user_conn, 0);
+        }
+        netins_udp_close(user_conn->netins_udp);
+        user_conn->netins_udp = NULL;
+    }
     
 
     free(user_conn);
@@ -3194,6 +3368,7 @@ xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn)
     if (user_conn == NULL) {
         return;
     }
+    xqc_mini_cli_netins_udp_connection_closed(user_conn, 0);
     xqc_mini_cli_stop_async_writer(user_conn);
     if (user_conn->download_fd >= 0) {
         close(user_conn->download_fd);

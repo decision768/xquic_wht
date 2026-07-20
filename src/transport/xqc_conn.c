@@ -4440,6 +4440,9 @@ xqc_conn_record_single(xqc_connection_t *c, xqc_packet_in_t *packet_in)
     /* update path stats */
     if (packet_in->pi_frame_types & (XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_DATAGRAM)) {
         path->path_send_ctl->ctl_app_bytes_recv += packet_in->buf_size;
+        if (packet_in->pi_flag & XQC_PIF_REINJECTED_REPLICA) {
+            path->path_send_ctl->ctl_reinjected_bytes_recv += packet_in->buf_size;
+        }
     }
 
     xqc_pn_ctl_t *pn_ctl = xqc_get_pn_ctl(c, path);
