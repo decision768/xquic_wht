@@ -2,8 +2,8 @@
 
 `netins_udp` exposes read-only UDP/QUIC connection status for the real XQUIC
 connections owned by `mini_client` and `mini_server`. It also provides an
-independent client connection-lifecycle API; application data transfer is not
-part of this connection-only revision yet.
+independent QUIC/H3 client with bounded, thread-safe HTTP/3 GET/POST send and
+receive queues.
 
 Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md).
 
@@ -19,7 +19,11 @@ QUIC/H3 client without starting `mini_client`:
 3. Call `netins_udp_client_create()` and `netins_udp_client_connect()`.
 4. Query the connection through `netins_udp_client_get_snapshot()` or the
    existing process-local registry.
-5. Release the connection and its private engine thread with
+5. Open HTTP/3 requests with `netins_udp_stream_open()`, submit POST body data
+   with `netins_udp_stream_send()`, and read responses with
+   `netins_udp_stream_recv()`.
+6. Close every stream with `netins_udp_stream_close()` and release the
+   connection and its private engine thread with
    `netins_udp_client_close()`.
 
 `netins_udp_client_connect()` blocks until the H3 handshake completes or the
@@ -34,10 +38,46 @@ named interfaces uses Linux `SO_BINDTODEVICE` and can require elevated network
 capabilities. Certificate verification uses the TLS library's default trust
 chain; custom CA loading is not part of this revision.
 
-This version intentionally covers connection lifecycle only. Application data
-send/receive and HTTP/3 request APIs will be added separately after the
-connection path is validated on Linux/AArch64. See
-`examples/netins_udp_connect_example.c`.
+## HTTP/3 data transfer
+
+Each `netins_udp_stream_t` represents one HTTP/3 request. `GET` sends its FIN
+with the request headers. `POST` requires an exact `request_body_length`; the
+implementation also adds the single-segment metadata expected by this
+project's `mini_server`.
+
+```c
+netins_udp_stream_config_t request;
+netins_udp_stream_config_init(&request);
+snprintf(request.method, sizeof(request.method), "GET");
+snprintf(request.path, sizeof(request.path), "/upload/ccc.bin");
+
+netins_udp_stream_t *stream = NULL;
+int ret = netins_udp_stream_open(client, &request, &stream);
+if (ret == NETINS_UDP_OK) {
+    ret = netins_udp_stream_wait_open(stream, 5000);
+}
+
+unsigned char data[64 * 1024];
+int fin = 0;
+while (ret == NETINS_UDP_OK && !fin) {
+    int64_t received = netins_udp_stream_recv(
+        stream, data, sizeof(data), &fin, 5000);
+    if (received < 0) {
+        ret = (int)received;
+    }
+}
+if (stream != NULL) {
+    (void)netins_udp_stream_close(stream, 5000);
+}
+```
+
+Send and receive calls operate on bounded queues. They never call XQUIC from
+the application thread. A timeout or a full/empty queue returns
+`NETINS_UDP_WOULD_BLOCK`; a positive send return may be smaller than the input,
+so the caller must retry the remainder. Close streams before closing their
+client.
+
+See `examples/netins_udp_connect_example.c` for connection setup.
 
 Build and run the standalone connection check with:
 

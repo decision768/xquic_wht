@@ -139,6 +139,13 @@ XQUIC_VERS_1.0 {
         netins_udp_client_get_snapshot;
         netins_udp_client_get_last_error_code;
         netins_udp_client_get_last_error_msg;
+        netins_udp_stream_config_init;
+        netins_udp_stream_open;
+        netins_udp_stream_wait_open;
+        netins_udp_stream_send;
+        netins_udp_stream_recv;
+        netins_udp_stream_get_info;
+        netins_udp_stream_close;
         netins_udp_client_close;
         netins_udp_new;
         netins_udp_close;

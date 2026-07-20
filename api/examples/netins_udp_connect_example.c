@@ -6,8 +6,8 @@
 
 /*
  * Minimal independent QUIC/H3 connection example. This code does not start or
- * reuse mini_client. Data send/receive APIs are intentionally not part of this
- * connection-lifecycle version yet.
+ * reuse mini_client. Open netins_udp_stream_t objects after this connection
+ * step when the application needs HTTP/3 GET/POST data transfer.
  */
 int
 netins_udp_connect_example(const char *server_address, uint16_t server_port,

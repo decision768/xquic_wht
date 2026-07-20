@@ -5,12 +5,13 @@
 NetIns UDP 是面向 XQUIC UDP/QUIC 的独立客户端连接与状态查询接口。它既可以读取
 `mini_client` 和 `mini_server` 已经建立的真实 QUIC 连接，也可以由第三方创建和
 关闭一条独立 QUIC/H3 客户端连接，并提供连接状态、多路径状态、每条路径地址、
-网卡名称、收发字节、RTT、丢包率、在途数据量和区间速率等信息。当前独立客户端
-版本尚未提供业务数据发送与接收。
+网卡名称、收发字节、RTT、丢包率、在途数据量和区间速率等信息。独立客户端还可
+通过 HTTP/3 stream API 发起 GET/POST 请求、发送请求正文并读取响应正文。
 
 NetIns UDP 与 MPTCP 版本 NetIns 的定位不同：
 
 - `netins_udp_client_*` 会为第三方创建 UDP socket、XQUIC engine 和连接线程。
+- `netins_udp_stream_*` 在该独立连接上提供真实的 HTTP/3 业务收发。
 - 原有 mini QUIC 连接仍由原客户端、服务端和 Libevent 线程管理。
 - 状态 getter 只读取缓存快照；第三方只能关闭自己创建的客户端，不能关闭或调度
   mini_client/mini_server 已有连接。
@@ -64,8 +65,8 @@ XQUIC 真实连接
 
 除读取已有连接外，本版本还提供独立客户端建连接口。它不启动或复用
 `mini_client`，而是为第三方对象单独创建 UDP socket、XQUIC engine 和后台
-`poll` 线程。当前阶段只负责建立、等待和关闭真实 QUIC/H3 连接，数据发送与接收
-接口将在建连生命周期通过 Linux/AArch64 实机验证后继续增加。
+`poll` 线程。第三方调用 `netins_udp_stream_send/recv` 时只访问有界内存队列，
+所有 XQUIC 请求创建、协议发送和回调读取仍由这个后台线程串行完成。
 
 ---
 
@@ -186,8 +187,101 @@ if (ret == NETINS_UDP_OK) {
 netins_udp_client_close(client);
 ```
 
-当前独立连接 API 没有提供 `send/recv`。连接成功只证明 QUIC/H3 握手和状态查询
-正常，不能用于传输业务正文。
+#### HTTP/3 stream 收发接口
+
+一条 `netins_udp_stream_t` 对应一个真实 HTTP/3 请求。GET 没有请求正文；POST 在
+打开 stream 前必须填写准确的 `request_body_length`。当前实现会为 POST 自动加入
+本项目 `mini_server` 所需的单分片上传头：`x-stream-index=0`、
+`x-stream-count=1`、`x-stream-offset=0` 和 `x-total-length`。
+
+```c
+void netins_udp_stream_config_init(netins_udp_stream_config_t *config);
+
+int netins_udp_stream_open(
+    netins_udp_client_t *client,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream);
+
+int netins_udp_stream_wait_open(
+    netins_udp_stream_t *stream, uint32_t timeout_ms);
+
+int64_t netins_udp_stream_send(
+    netins_udp_stream_t *stream, const void *data, size_t size,
+    int fin, uint32_t timeout_ms);
+
+int64_t netins_udp_stream_recv(
+    netins_udp_stream_t *stream, void *buffer, size_t capacity,
+    int *fin, uint32_t timeout_ms);
+
+int netins_udp_stream_get_info(
+    netins_udp_stream_t *stream, netins_udp_stream_info_t *out);
+
+int netins_udp_stream_close(
+    netins_udp_stream_t *stream, uint32_t timeout_ms);
+```
+
+调用约定：
+
+- `send()` 和 `recv()` 的正数返回值是本次实际接受或交付的正文大小。
+- `NETINS_UDP_WOULD_BLOCK` 表示队列暂时满/空或等待超时，调用方可以重试。
+- `send()` 允许部分接受，调用方必须继续发送尚未接受的数据。
+- POST 正文累计达到 `request_body_length` 后自动发送 FIN；提前 FIN 或超长正文返回错误。
+- `recv()` 返回 `0` 且 `fin=1` 表示响应正文已结束。
+- 调用 `netins_udp_client_close()` 前，应先关闭该客户端创建的所有 stream。
+
+**GET 示例：**
+
+```c
+netins_udp_stream_config_t request;
+netins_udp_stream_config_init(&request);
+snprintf(request.method, sizeof(request.method), "GET");
+snprintf(request.path, sizeof(request.path), "/upload/ccc.bin");
+
+netins_udp_stream_t *stream = NULL;
+int ret = netins_udp_stream_open(client, &request, &stream);
+if (ret == NETINS_UDP_OK) {
+    ret = netins_udp_stream_wait_open(stream, 5000);
+}
+
+unsigned char buffer[64 * 1024];
+int fin = 0;
+while (ret == NETINS_UDP_OK && !fin) {
+    int64_t n = netins_udp_stream_recv(
+        stream, buffer, sizeof(buffer), &fin, 5000);
+    if (n < 0) {
+        ret = (int)n;
+        break;
+    }
+    /* 使用 buffer[0..n)；例如写入调用方自己的文件。 */
+}
+(void)netins_udp_stream_close(stream, 5000);
+```
+
+**POST 正文循环：**
+
+```c
+netins_udp_stream_config_t request;
+netins_udp_stream_config_init(&request);
+snprintf(request.method, sizeof(request.method), "POST");
+snprintf(request.path, sizeof(request.path), "/upload/ccc.bin");
+request.request_body_length = body_size;
+
+netins_udp_stream_t *stream = NULL;
+int ret = netins_udp_stream_open(client, &request, &stream);
+size_t offset = 0;
+while (ret == NETINS_UDP_OK && offset < body_size) {
+    int64_t n = netins_udp_stream_send(stream, body + offset,
+        body_size - offset, 1, 5000);
+    if (n < 0) {
+        ret = (int)n;
+        break;
+    }
+    offset += (size_t)n;
+}
+```
+
+默认发送队列上限为 4 MiB，默认接收队列上限为 16 MiB，可在 stream 配置中调整。
+这两个队列是背压边界，不是传输总大小限制。
 
 可在构建目录中生成独立建连测试程序：
 
@@ -233,6 +327,8 @@ if (netins_udp_get_api_version() != NETINS_UDP_API_VERSION) {
 | `NETINS_UDP_NOT_FOUND` | -2 | 连接、路径或下标不存在 |
 | `NETINS_UDP_BUFFER_TOO_SMALL` | -3 | ID 数组或输出缓冲区容量不足 |
 | `NETINS_UDP_VERSION_MISMATCH` | -4 | API 版本或结构体大小不匹配 |
+| `NETINS_UDP_WOULD_BLOCK` | -5 | 队列暂时满/空或等待超时，可重试 |
+| `NETINS_UDP_CLOSED` | -6 | stream 或连接已经关闭 |
 
 ---
 
@@ -870,7 +966,7 @@ void third_party_poll_udp_server(void)
 
 - 公共头文件：`include/xquic/netins_udp.h`
 - API 实现：`src/netins_udp/netins_udp.c`
-- 独立客户端建连实现：`src/netins_udp/netins_udp_client.c`
+- 独立客户端建连与 HTTP/3 收发实现：`src/netins_udp/netins_udp_client.c`
 - 查询示例：`api/examples/netins_udp_snapshot_example.c`
 - 独立建连示例：`api/examples/netins_udp_connect_example.c`
 - 内部接口：`src/netins_udp/netins_udp_internal.h`
@@ -998,9 +1094,9 @@ NetIns UDP 注册表只存在于创建连接的当前进程中。独立 API 客�
 ### 2. 连接控制与只读状态的边界
 
 `netins_udp_client_*` 可以创建和关闭它自己拥有的客户端连接。状态 getter 仍然
-只读，当前不提供以下能力：
+只读；`netins_udp_stream_*` 只控制该独立客户端创建的 HTTP/3 请求。当前不提供
+以下能力：
 
-- 主动发送或接收业务数据
 - 修改拥塞控制、调度器或 ACK 参数
 - 控制 mini_client/mini_server 已有连接
 - 手工冻结或切换某一条路径
@@ -1011,8 +1107,10 @@ NetIns UDP 注册表只存在于创建连接的当前进程中。独立 API 客�
 ### 3. 线程安全
 
 公开查询函数可以从第三方线程调用。接口通过互斥锁复制缓存快照，不会从第三方
-线程直接调用 XQUIC 引擎。独立客户端的 XQUIC engine 只由其私有后台线程驱动。
-日志回调可能运行在引擎线程，必须保持轻量。
+线程直接调用 XQUIC 引擎。`stream_send/recv` 同样只操作加锁的有界队列；独立客户
+端的 XQUIC engine 始终只由其私有后台线程驱动。单个 stream 可以由发送线程和接收
+线程分别使用，但客户端关闭与 stream API 调用应由业务层按“先关闭 stream、再关闭
+client”的顺序同步。日志回调可能运行在引擎线程，必须保持轻量。
 
 ### 4. 查询频率
 

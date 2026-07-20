@@ -10,11 +10,12 @@
  * 多路径状态、每条路径地址、收发字节、RTT、丢包率和区间速率等信息。
  *
  * 与 TCP/MPTCP 版本的 netins 接口不同：
- * 1. netins_udp_client_* 可独立创建和关闭客户端连接，但当前尚不发送业务正文；
- * 2. mini_client/mini_server 已有连接仍由原程序和 Libevent 线程管理；
- * 3. 状态 getter 只读取缓存快照，不能修改调度、拥塞或已有 mini 连接；
- * 4. 注册表只在当前进程内有效，connection_id 不是 QUIC CID；
- * 5. 第三方代码必须与连接宿主使用同一份 netins_udp 实现。
+ * 1. netins_udp_client_* 可独立创建和关闭客户端连接；
+ * 2. netins_udp_stream_* 在独立客户端连接上发送 HTTP/3 请求和收发业务正文；
+ * 3. mini_client/mini_server 已有连接仍由原程序和 Libevent 线程管理；
+ * 4. 状态 getter 只读取缓存快照，不能修改调度、拥塞或已有 mini 连接；
+ * 5. 注册表只在当前进程内有效，connection_id 不是 QUIC CID；
+ * 6. 第三方代码必须与连接宿主使用同一份 netins_udp 实现。
  *
  * 线程说明：所有公开查询函数均可从第三方线程调用。查询函数只复制互斥锁
  * 保护的缓存快照，不会在第三方线程中调用 XQUIC 引擎。mini 程序在
@@ -49,6 +50,8 @@ extern "C" {
 #define NETINS_UDP_API_VERSION            1U
 /** 单个连接最多输出的路径数量，与当前 XQUIC 路径上限一致。 */
 #define NETINS_UDP_MAX_PATHS              8U
+/** 独立客户端最多同时持有的 HTTP/3 stream 数量。 */
+#define NETINS_UDP_MAX_STREAMS            128U
 /** ALPN 字符串缓冲区长度。 */
 #define NETINS_UDP_ALPN_LEN               64U
 /** XQUIC 连接诊断字符串缓冲区长度。 */
@@ -67,6 +70,16 @@ extern "C" {
 #define NETINS_UDP_SERVER_NAME_LEN        256U
 /** 当前独立客户端连接接口的版本。 */
 #define NETINS_UDP_CLIENT_API_VERSION     1U
+/** 当前 HTTP/3 stream 收发接口的版本。 */
+#define NETINS_UDP_STREAM_API_VERSION     1U
+/** HTTP 方法缓冲区长度。 */
+#define NETINS_UDP_METHOD_LEN             16U
+/** HTTP scheme 缓冲区长度。 */
+#define NETINS_UDP_SCHEME_LEN             16U
+/** HTTP 请求路径缓冲区长度。 */
+#define NETINS_UDP_REQUEST_PATH_LEN       1024U
+/** HTTP Content-Type 缓冲区长度。 */
+#define NETINS_UDP_CONTENT_TYPE_LEN       128U
 /** 无效的进程内 connection_id。 */
 #define NETINS_UDP_INVALID_CONNECTION_ID  UINT64_MAX
 
@@ -74,6 +87,8 @@ extern "C" {
 typedef struct netins_udp_s netins_udp_t;
 /** 不透明的独立 QUIC/H3 客户端对象。 */
 typedef struct netins_udp_client_s netins_udp_client_t;
+/** 不透明的 HTTP/3 请求/stream 对象。 */
+typedef struct netins_udp_stream_s netins_udp_stream_t;
 
 /** API 函数返回值。 */
 typedef enum netins_udp_result_e {
@@ -81,7 +96,9 @@ typedef enum netins_udp_result_e {
     NETINS_UDP_ERROR = -1,             /**< 通用错误，详细信息通过 last_error 获取。 */
     NETINS_UDP_NOT_FOUND = -2,         /**< 连接或路径不存在，可能已经关闭。 */
     NETINS_UDP_BUFFER_TOO_SMALL = -3,  /**< 输出缓冲区或 ID 数组容量不足。 */
-    NETINS_UDP_VERSION_MISMATCH = -4   /**< API 版本或结构体大小不匹配。 */
+    NETINS_UDP_VERSION_MISMATCH = -4,  /**< API 版本或结构体大小不匹配。 */
+    NETINS_UDP_WOULD_BLOCK = -5,       /**< 暂无数据/空间，或等待超时，可重试。 */
+    NETINS_UDP_CLOSED = -6             /**< stream 或连接已经关闭。 */
 } netins_udp_result_t;
 
 /** 当前连接位于客户端还是服务端。 */
@@ -125,6 +142,16 @@ typedef enum netins_udp_log_level_e {
     NETINS_UDP_LOG_LEVEL_WARN = 2,  /**< 可恢复的异常。 */
     NETINS_UDP_LOG_LEVEL_ERROR = 3  /**< 错误信息。 */
 } netins_udp_log_level_t;
+
+/** HTTP/3 stream 生命周期。 */
+typedef enum netins_udp_stream_state_e {
+    NETINS_UDP_STREAM_STATE_NEW = 0,      /**< 对象已创建，尚未建立 XQUIC stream。 */
+    NETINS_UDP_STREAM_STATE_OPENING = 1,  /**< 正在创建 stream 或发送请求头。 */
+    NETINS_UDP_STREAM_STATE_OPEN = 2,     /**< 请求头已发送，可以收发正文。 */
+    NETINS_UDP_STREAM_STATE_CLOSING = 3,  /**< 正在主动关闭。 */
+    NETINS_UDP_STREAM_STATE_CLOSED = 4,   /**< 正文结束或 stream 已关闭。 */
+    NETINS_UDP_STREAM_STATE_ERROR = 5     /**< stream 因错误关闭。 */
+} netins_udp_stream_state_t;
 
 /**
  * 独立 QUIC/H3 客户端配置。
@@ -173,6 +200,76 @@ typedef struct netins_udp_client_config_s {
 /** 独立客户端配置的零值初始化器；推荐再调用 config_init() 设置默认值。 */
 #define NETINS_UDP_CLIENT_CONFIG_INITIALIZER \
     { sizeof(netins_udp_client_config_t), NETINS_UDP_CLIENT_API_VERSION }
+
+/**
+ * HTTP/3 请求配置。
+ *
+ * 当前接口面向 GET 和 POST。POST 必须在 open 前提供准确的
+ * request_body_length；这也让接口能与当前 mini_server 的 Content-Length
+ * 和单分片上传元数据规则直接兼容。
+ */
+typedef struct netins_udp_stream_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    /** HTTP 方法，默认 "GET"。 */
+    char method[NETINS_UDP_METHOD_LEN];
+    /** HTTP scheme，默认 "https"。 */
+    char scheme[NETINS_UDP_SCHEME_LEN];
+    /** 请求路径，默认 "/"。 */
+    char path[NETINS_UDP_REQUEST_PATH_LEN];
+    /** HTTP authority/host；为空时使用客户端 server_name/server_address。 */
+    char authority[NETINS_UDP_SERVER_NAME_LEN];
+    /** 请求正文类型，默认 "application/octet-stream"。 */
+    char content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    /** POST 请求正文总字节数；GET 必须为 0。 */
+    uint64_t request_body_length;
+    /** 调用方尚未被 XQUIC 消费的发送数据上限，0 使用默认 4 MiB。 */
+    size_t send_queue_limit_bytes;
+    /** 等待调用方读取的响应正文上限，0 使用默认 16 MiB。 */
+    size_t recv_queue_limit_bytes;
+    uint64_t reserved[8];
+} netins_udp_stream_config_t;
+
+#define NETINS_UDP_STREAM_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_stream_config_t), NETINS_UDP_STREAM_API_VERSION }
+
+/** HTTP/3 stream 的实时状态和业务字节计数。 */
+typedef struct netins_udp_stream_info_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    /** netins_udp_stream_state_t。 */
+    int state;
+    /** HTTP 响应状态码；尚未收到响应头时为 0。 */
+    int response_status;
+    int request_headers_sent;
+    int response_headers_received;
+    int send_finished;
+    int recv_finished;
+    /** XQUIC stream 错误码；正常时为 0。 */
+    int stream_error;
+    uint32_t reserved32;
+    /** XQUIC stream_id；创建完成前为 UINT64_MAX。 */
+    uint64_t stream_id;
+    uint64_t request_body_length;
+    /** 已由 netins_udp_stream_send() 接受并复制的正文总量。 */
+    uint64_t bytes_accepted;
+    /** 已由 XQUIC 接受的请求正文总量。 */
+    uint64_t bytes_sent;
+    /** 已从 XQUIC 读取并进入接收队列的响应正文总量。 */
+    uint64_t bytes_received;
+    /** 已通过 netins_udp_stream_recv() 交付给调用方的正文总量。 */
+    uint64_t bytes_delivered;
+    /** 当前发送、接收队列中的字节数。 */
+    size_t send_queue_bytes;
+    size_t recv_queue_bytes;
+    /** 响应 Content-Length；响应没有该字段时为 0。 */
+    uint64_t response_content_length;
+    char response_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    uint64_t reserved[8];
+} netins_udp_stream_info_t;
+
+#define NETINS_UDP_STREAM_INFO_INITIALIZER \
+    { sizeof(netins_udp_stream_info_t), NETINS_UDP_STREAM_API_VERSION }
 
 /**
  * 日志回调。
@@ -472,6 +569,61 @@ NETINS_UDP_PUBLIC int netins_udp_client_get_last_error_code(
 /** 将独立客户端最后一次错误说明复制到调用方缓冲区。 */
 NETINS_UDP_PUBLIC int netins_udp_client_get_last_error_msg(
     netins_udp_client_t *client, char *buffer, size_t buffer_len);
+
+/** 使用推荐值初始化 HTTP/3 stream 配置。 */
+NETINS_UDP_PUBLIC void netins_udp_stream_config_init(
+    netins_udp_stream_config_t *config);
+
+/**
+ * 在已完成握手的独立客户端上创建一个 HTTP/3 请求。
+ *
+ * 本函数把创建任务交给客户端引擎线程后立即返回。调用方可以马上用 send()
+ * 排队 POST 正文，也可以调用 wait_open() 等待请求头真正发送完成。
+ */
+NETINS_UDP_PUBLIC int netins_udp_stream_open(
+    netins_udp_client_t *client,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream);
+
+/** 等待 HTTP/3 请求头发送完成；timeout_ms=0 表示只检查当前状态。 */
+NETINS_UDP_PUBLIC int netins_udp_stream_wait_open(
+    netins_udp_stream_t *stream, uint32_t timeout_ms);
+
+/**
+ * 复制请求正文到有界发送队列。
+ *
+ * @return >=0 为本次接受的字节数；负数为 netins_udp_result_t。
+ * @note timeout_ms=0 为非阻塞。队列空间不足时允许部分写入；调用方必须继续
+ *       发送剩余数据。fin 仅在本次全部数据被接受时生效。POST 达到配置的
+ *       request_body_length 时也会自动发送 FIN。
+ */
+NETINS_UDP_PUBLIC int64_t netins_udp_stream_send(
+    netins_udp_stream_t *stream, const void *data, size_t size,
+    int fin, uint32_t timeout_ms);
+
+/**
+ * 从有界接收队列读取响应正文。
+ *
+ * @param fin 输出 1 表示响应正文已经结束且队列已读空。
+ * @return >0 为读取字节数；0 只用于返回 EOF；负数为 netins_udp_result_t。
+ * @note timeout_ms=0 为非阻塞；暂时无数据返回 NETINS_UDP_WOULD_BLOCK。
+ */
+NETINS_UDP_PUBLIC int64_t netins_udp_stream_recv(
+    netins_udp_stream_t *stream, void *buffer, size_t capacity,
+    int *fin, uint32_t timeout_ms);
+
+/** 获取 stream 状态、HTTP 响应信息和业务字节计数。 */
+NETINS_UDP_PUBLIC int netins_udp_stream_get_info(
+    netins_udp_stream_t *stream, netins_udp_stream_info_t *out);
+
+/**
+ * 关闭并释放 stream 句柄。
+ *
+ * timeout_ms=0 时只发起关闭；尚未完成返回 NETINS_UDP_WOULD_BLOCK，句柄仍有效。
+ * 返回 NETINS_UDP_OK 后句柄失效。调用 client_close() 前应先关闭其 stream。
+ */
+NETINS_UDP_PUBLIC int netins_udp_stream_close(
+    netins_udp_stream_t *stream, uint32_t timeout_ms);
 
 /**
  * 关闭连接、停止后台线程并释放独立客户端。
