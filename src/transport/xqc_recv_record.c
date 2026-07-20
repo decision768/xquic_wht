@@ -287,6 +287,7 @@ xqc_maybe_should_ack(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_pn_ctl_t 
     {
         path->path_flag |= XQC_PATH_FLAG_SHOULD_ACK_INIT << pns;
         conn->ack_flag |= (1 << (pns + path->path_id * XQC_PNS_N));
+        xqc_send_ctl_diag_record_ack_due(send_ctl, pns, now);
         
         xqc_timer_unset(&send_ctl->path_timer_manager, XQC_TIMER_ACK_INIT + pns);
 
@@ -390,4 +391,45 @@ xqc_ack_sent_record_on_ack(xqc_ack_sent_record_t *record, xqc_ack_info_t *ack_in
         }
     }
     return 0;
+}
+
+xqc_int_t
+xqc_recv_record_build_ack_snapshot(const xqc_recv_record_t *recv_record,
+    uint64_t conn_generation, uint64_t path_id,
+    uint64_t path_generation, uint64_t key_generation,
+    uint64_t snapshot_generation, xqc_pkt_num_space_t pns,
+    xqc_usec_t largest_recv_time, xqc_usec_t snapshot_time,
+    xqc_path_ack_snapshot_t *snapshot)
+{
+    if (recv_record == NULL || snapshot == NULL || pns >= XQC_PNS_N) {
+        return -XQC_EPARAM;
+    }
+
+    xqc_memzero(snapshot, sizeof(*snapshot));
+    snapshot->conn_generation = conn_generation;
+    snapshot->path_id = path_id;
+    snapshot->path_generation = path_generation;
+    snapshot->key_generation = key_generation;
+    snapshot->snapshot_generation = snapshot_generation;
+    snapshot->pns = pns;
+    snapshot->largest_recv_time = largest_recv_time;
+    snapshot->snapshot_time = snapshot_time;
+
+    xqc_list_head_t *pos, *next;
+    xqc_list_for_each_safe(pos, next,
+                           (xqc_list_head_t *)&recv_record->list_head)
+    {
+        if (snapshot->range_count >= XQC_MAX_ACK_RANGE_CNT) {
+            break;
+        }
+        xqc_pktno_range_node_t *node = xqc_list_entry(pos,
+            xqc_pktno_range_node_t, list);
+        snapshot->ranges[snapshot->range_count++] = node->pktno_range;
+    }
+
+    if (snapshot->range_count == 0) {
+        return -XQC_ENULLPTR;
+    }
+    snapshot->largest_received = snapshot->ranges[0].high;
+    return XQC_OK;
 }

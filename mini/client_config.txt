@@ -7,6 +7,7 @@ stream_cnt=1
 
 # algorithm settings
 cc=bbr
+rx_arch=parallel_ingress
 mp_sched=balanced
 mp_diag=1
 mp_diag_interval_ms=250

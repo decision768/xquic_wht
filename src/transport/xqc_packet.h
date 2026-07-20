@@ -100,5 +100,9 @@ xqc_pkt_type_t xqc_state_to_pkt_type(xqc_connection_t *conn);
  */
 xqc_int_t xqc_packet_process_single(xqc_connection_t *c, xqc_packet_in_t *packet_in);
 
+xqc_int_t xqc_conn_deferred_rx_init(xqc_connection_t *conn);
+void xqc_conn_deferred_rx_destroy(xqc_connection_t *conn);
+xqc_int_t xqc_conn_apply_deferred_rx_frames(xqc_connection_t *conn);
+
 
 #endif /* _XQC_PACKET_H_INCLUDED_ */

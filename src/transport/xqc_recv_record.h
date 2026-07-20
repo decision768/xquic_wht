@@ -31,6 +31,20 @@ typedef struct xqc_recv_record_s {
 
 #define XQC_MAX_ACK_RANGE_CNT 64
 
+typedef struct xqc_path_ack_snapshot_s {
+    uint64_t                conn_generation;
+    uint64_t                path_id;
+    uint64_t                path_generation;
+    uint64_t                key_generation;
+    uint64_t                snapshot_generation;
+    xqc_pkt_num_space_t     pns;
+    xqc_packet_number_t     largest_received;
+    xqc_usec_t              largest_recv_time;
+    xqc_usec_t              snapshot_time;
+    uint32_t                range_count;
+    xqc_pktno_range_t       ranges[XQC_MAX_ACK_RANGE_CNT];
+} xqc_path_ack_snapshot_t;
+
 typedef struct xqc_ack_info_s {
     xqc_pkt_num_space_t     pns;
     uint64_t                path_id;
@@ -63,6 +77,14 @@ void xqc_recv_record_move(xqc_recv_record_t *dst, xqc_recv_record_t *src);
 xqc_pkt_range_status xqc_recv_record_add(xqc_recv_record_t *recv_record, xqc_packet_number_t packet_number);
 
 xqc_packet_number_t xqc_recv_record_largest(xqc_recv_record_t *recv_record);
+
+xqc_int_t xqc_recv_record_build_ack_snapshot(
+    const xqc_recv_record_t *recv_record,
+    uint64_t conn_generation, uint64_t path_id,
+    uint64_t path_generation, uint64_t key_generation,
+    uint64_t snapshot_generation, xqc_pkt_num_space_t pns,
+    xqc_usec_t largest_recv_time, xqc_usec_t snapshot_time,
+    xqc_path_ack_snapshot_t *snapshot);
 
 void xqc_maybe_should_ack(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_pn_ctl_t *pn_ctl, xqc_pkt_num_space_t pns, int out_of_order, xqc_usec_t now);
 

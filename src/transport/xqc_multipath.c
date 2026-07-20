@@ -96,6 +96,11 @@ xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid, uint64
     path->app_path_status_send_seq_num = 0;
     path->app_path_status_recv_seq_num = 0;
     path->path_id = path_id;
+    path->rx_generation = ++conn->next_path_rx_generation;
+    for (xqc_pkt_num_space_t pns = 0; pns < XQC_PNS_N; pns++) {
+        atomic_init(&path->ack_snapshot_published[pns], 0);
+        atomic_init(&path->ack_snapshot_committed[pns], 0);
+    }
 
     path->path_pn_ctl = xqc_pn_ctl_create(conn);
     if (path->path_pn_ctl == NULL) {

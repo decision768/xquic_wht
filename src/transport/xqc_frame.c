@@ -57,6 +57,58 @@ static const char * const frame_type_2_str[XQC_FRAME_NUM] = {
     [XQC_FRAME_REPAIR_SYMBOL]        = "FEC_REPAIR",
 };
 
+static xqc_int_t
+xqc_scan_read_vint(const unsigned char **pos, const unsigned char *end,
+    uint64_t *value)
+{
+    int vlen = xqc_vint_read(*pos, end, value);
+    if (vlen < 0) {
+        return -XQC_EVINTREAD;
+    }
+    *pos += vlen;
+    return XQC_OK;
+}
+
+static xqc_int_t
+xqc_scan_ack_body(const unsigned char **pos, const unsigned char *end,
+    xqc_bool_t has_ecn)
+{
+    uint64_t largest_acked, ack_delay, range_count, first_range;
+    uint64_t gap, range;
+
+    if (xqc_scan_read_vint(pos, end, &largest_acked) != XQC_OK
+        || xqc_scan_read_vint(pos, end, &ack_delay) != XQC_OK
+        || xqc_scan_read_vint(pos, end, &range_count) != XQC_OK
+        || xqc_scan_read_vint(pos, end, &first_range) != XQC_OK)
+    {
+        return -XQC_EVINTREAD;
+    }
+    if (first_range > largest_acked
+        || range_count > (uint64_t)(end - *pos) / 2)
+    {
+        return -XQC_EILLEGAL_FRAME;
+    }
+
+    for (uint64_t i = 0; i < range_count; ++i) {
+        if (xqc_scan_read_vint(pos, end, &gap) != XQC_OK
+            || xqc_scan_read_vint(pos, end, &range) != XQC_OK)
+        {
+            return -XQC_EVINTREAD;
+        }
+    }
+
+    if (has_ecn) {
+        uint64_t ect0, ect1, ce;
+        if (xqc_scan_read_vint(pos, end, &ect0) != XQC_OK
+            || xqc_scan_read_vint(pos, end, &ect1) != XQC_OK
+            || xqc_scan_read_vint(pos, end, &ce) != XQC_OK)
+        {
+            return -XQC_EVINTREAD;
+        }
+    }
+    return XQC_OK;
+}
+
 const char *
 xqc_frame_type_2_str(xqc_engine_t *engine, xqc_frame_type_bit_t type_bit)
 {
@@ -168,6 +220,146 @@ xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream, xqc_stream
         }
     }
 
+    return XQC_OK;
+}
+
+
+xqc_int_t
+xqc_scan_frames(const unsigned char *payload, size_t payload_len,
+    xqc_rx_frame_desc_t *frames, uint32_t frame_capacity,
+    uint32_t *frame_count, xqc_frame_type_bit_t *frame_types,
+    xqc_bool_t *deferable)
+{
+    if (payload == NULL || frames == NULL || frame_capacity == 0
+        || frame_count == NULL || frame_types == NULL || deferable == NULL)
+    {
+        return -XQC_EPARAM;
+    }
+
+    const unsigned char *p = payload;
+    const unsigned char *end = payload + payload_len;
+    uint32_t count = 0;
+
+    *frame_count = 0;
+    *frame_types = 0;
+    *deferable = XQC_FALSE;
+
+    if (payload_len == 0) {
+        return XQC_OK;
+    }
+
+    while (p < end) {
+        const unsigned char *frame_begin = p;
+        uint64_t frame_type = 0;
+        uint64_t value = 0;
+        int vlen = xqc_vint_read(p, end, &frame_type);
+        if (vlen < 0) {
+            return -XQC_EVINTREAD;
+        }
+        p += vlen;
+
+        switch (frame_type) {
+        case 0x00:
+            while (p < end && *p == 0x00) {
+                p++;
+            }
+            *frame_types |= XQC_FRAME_BIT_PADDING;
+            break;
+
+        case 0x01:
+            *frame_types |= XQC_FRAME_BIT_PING;
+            break;
+
+        case 0x02:
+        case 0x03:
+            if (xqc_scan_ack_body(&p, end, frame_type == 0x03) != XQC_OK) {
+                return -XQC_EILLEGAL_FRAME;
+            }
+            *frame_types |= XQC_FRAME_BIT_ACK;
+            break;
+
+        case 0x08:
+        case 0x09:
+        case 0x0a:
+        case 0x0b:
+        case 0x0c:
+        case 0x0d:
+        case 0x0e:
+        case 0x0f:
+            vlen = xqc_vint_read(p, end, &value); /* stream ID */
+            if (vlen < 0) {
+                return -XQC_EVINTREAD;
+            }
+            p += vlen;
+
+            if (frame_type & 0x04) {
+                vlen = xqc_vint_read(p, end, &value); /* offset */
+                if (vlen < 0) {
+                    return -XQC_EVINTREAD;
+                }
+                p += vlen;
+            }
+
+            if (frame_type & 0x02) {
+                vlen = xqc_vint_read(p, end, &value); /* length */
+                if (vlen < 0) {
+                    return -XQC_EVINTREAD;
+                }
+                p += vlen;
+                if (value > (uint64_t)(end - p)) {
+                    return -XQC_EILLEGAL_FRAME;
+                }
+                p += value;
+
+            } else {
+                p = end;
+            }
+            *frame_types |= XQC_FRAME_BIT_STREAM;
+            break;
+
+        case 0x30:
+            p = end;
+            *frame_types |= XQC_FRAME_BIT_DATAGRAM;
+            break;
+
+        case 0x31:
+            vlen = xqc_vint_read(p, end, &value);
+            if (vlen < 0) {
+                return -XQC_EVINTREAD;
+            }
+            p += vlen;
+            if (value > (uint64_t)(end - p)) {
+                return -XQC_EILLEGAL_FRAME;
+            }
+            p += value;
+            *frame_types |= XQC_FRAME_BIT_DATAGRAM;
+            break;
+
+        case XQC_TRANS_FRAME_TYPE_MP_ACK0:
+            if (xqc_scan_read_vint(&p, end, &value) != XQC_OK
+                || xqc_scan_ack_body(&p, end, XQC_FALSE) != XQC_OK)
+            {
+                return -XQC_EILLEGAL_FRAME;
+            }
+            *frame_types |= XQC_FRAME_BIT_ACK_MP;
+            break;
+
+        default:
+            /* Control and extension frames retain the original serial path. */
+            return XQC_OK;
+        }
+
+        if (count >= frame_capacity) {
+            return XQC_OK;
+        }
+        frames[count].frame_type = frame_type;
+        frames[count].payload_offset = (uint32_t)(frame_begin - payload);
+        frames[count].payload_length = (uint32_t)(p - frame_begin);
+        count++;
+    }
+
+    *frame_count = count;
+    *deferable = XQC_TRUE;
     return XQC_OK;
 }
 

@@ -35,6 +35,65 @@
 
 /* maximum accumulated number of xqc_engine_packet_process */
 #define XQC_MAX_PACKET_PROCESS_BATCH 100
+#define XQC_DEFERRED_RX_WORK_CAPACITY 128
+#define XQC_RX_FRAME_DESC_CAPACITY 64
+
+typedef struct xqc_deferred_rx_work_s {
+    struct xqc_deferred_rx_work_s    *next;
+    uint64_t                          conn_generation;
+    uint64_t                          path_generation;
+    uint64_t                          key_generation;
+    xqc_packet_in_t                   packet_in;
+    unsigned char                     decrypted[XQC_MAX_PACKET_IN_LEN];
+    xqc_rx_frame_desc_t               frames[XQC_RX_FRAME_DESC_CAPACITY];
+    uint32_t                          frame_count;
+} xqc_deferred_rx_work_t;
+
+typedef struct xqc_target_rx_diag_s {
+    xqc_bool_t enabled;
+    uint64_t packet_process_count;
+    uint64_t packet_process_us;
+    uint64_t conn_process_packet_count;
+    uint64_t conn_process_packet_us;
+    uint64_t packet_parse_us;
+    uint64_t packet_decrypt_us;
+    uint64_t frame_process_us;
+    uint64_t pkt_processed_us;
+    uint64_t internal_engine_run_count;
+    uint64_t internal_engine_run_us;
+    uint64_t engine_conn_run_count;
+    uint64_t engine_conn_run_us;
+    uint64_t crypto_read_us;
+    uint64_t crypto_write_us;
+    uint64_t app_read_us;
+    uint64_t app_write_us;
+    uint64_t ack_build_count;
+    uint64_t ack_build_us;
+    uint64_t ack_early_flush_count;
+    uint64_t ack_early_flush_us;
+    uint64_t schedule_send_us;
+    uint64_t socket_send_count;
+    uint64_t socket_send_us;
+    uint64_t frame_scan_count;
+    uint64_t frame_scan_us;
+    uint64_t deferred_rx_queued;
+    uint64_t deferred_rx_applied;
+    uint64_t deferred_rx_fallback;
+    uint64_t deferred_rx_pool_exhausted;
+    uint64_t deferred_rx_apply_error;
+} xqc_target_rx_diag_t;
+
+#define XQC_TARGET_RX_DIAG_START(conn)                                      \
+    ((conn)->target_rx_diag.enabled ? xqc_monotonic_timestamp() : 0)
+
+#define XQC_TARGET_RX_DIAG_ADD(conn, field, start) do {                     \
+    if ((start) != 0) {                                                     \
+        xqc_usec_t _target_rx_diag_end = xqc_monotonic_timestamp();         \
+        if (_target_rx_diag_end >= (start)) {                               \
+            (conn)->target_rx_diag.field += _target_rx_diag_end - (start);  \
+        }                                                                   \
+    }                                                                       \
+} while (0)
 
 #define XQC_MAX_RECV_WINDOW (512 * 1024 * 1024)
 
@@ -306,6 +365,17 @@ struct xqc_connection_s {
     uint32_t                        retry_count;
     uint32_t                        conn_close_count;
     uint32_t                        packet_need_process_count; /* xqc_engine_packet_process number */
+    uint64_t                        rx_generation;
+    uint64_t                        next_path_rx_generation;
+    uint64_t                        key_generation;
+    xqc_bool_t                      target_ack_immediate_flush;
+    xqc_bool_t                      deferred_rx_enabled;
+    xqc_deferred_rx_work_t         *deferred_rx_pool;
+    xqc_deferred_rx_work_t         *deferred_rx_free;
+    xqc_deferred_rx_work_t         *deferred_rx_pending_head;
+    xqc_deferred_rx_work_t         *deferred_rx_pending_tail;
+    uint32_t                        deferred_rx_pending_count;
+    xqc_target_rx_diag_t            target_rx_diag;
 
     xqc_conn_state_t                conn_state;
     xqc_memory_pool_t              *conn_pool;
@@ -515,6 +585,7 @@ xqc_int_t xqc_conn_server_on_alpn(xqc_connection_t *conn, const unsigned char *a
 
 ssize_t xqc_path_send_one_packet(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_packet_out_t *packet_out);
 void xqc_conn_send_packets(xqc_connection_t *conn);
+void xqc_conn_flush_high_priority_packets(xqc_connection_t *conn);
 void xqc_conn_send_packets_batch(xqc_connection_t *conn);
 
 void xqc_conn_check_path_utilization(xqc_connection_t *conn);

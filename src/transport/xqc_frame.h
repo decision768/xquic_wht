@@ -89,6 +89,12 @@ typedef enum {
     XQC_FRAME_BIT_NUM                   = 1ULL << XQC_FRAME_NUM,
 } xqc_frame_type_bit_t;
 
+typedef struct xqc_rx_frame_desc_s {
+    uint64_t frame_type;
+    uint32_t payload_offset;
+    uint32_t payload_length;
+} xqc_rx_frame_desc_t;
+
 
 /*
  * Ack-eliciting Packet:  A QUIC packet that contains frames other than
@@ -129,6 +135,11 @@ unsigned int xqc_crypto_frame_header_size(uint64_t offset, size_t length);
 xqc_int_t xqc_insert_stream_frame(xqc_connection_t *conn, xqc_stream_t *stream, xqc_stream_frame_t *new_frame);
 
 xqc_int_t xqc_process_frames(xqc_connection_t *conn, xqc_packet_in_t *packet_in);
+
+xqc_int_t xqc_scan_frames(const unsigned char *payload, size_t payload_len,
+    xqc_rx_frame_desc_t *frames, uint32_t frame_capacity,
+    uint32_t *frame_count, xqc_frame_type_bit_t *frame_types,
+    xqc_bool_t *deferable);
 
 xqc_int_t xqc_process_padding_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in);
 

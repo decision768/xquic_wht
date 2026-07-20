@@ -6,6 +6,10 @@
 #include <strings.h>
 #include <fcntl.h>
 #include <limits.h>
+#if defined(__linux__)
+#include <poll.h>
+#include <sys/eventfd.h>
+#endif
 
 #define CHUNK_SIZE (8 * 1024)
 #define XQC_STREAM_RANGE_SIZE_DEFAULT (4 * 1024 * 1024)
@@ -13,7 +17,20 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_PER_PATH_PACKETS 64
+#define CLIENT_RX_PER_PATH_PACKETS 512
+
+#ifndef XQC_TARGET_ACK_FIRST
+#define XQC_TARGET_ACK_FIRST 1
+#endif
+#ifndef XQC_TARGET_RX_WORK_COMPAT
+#define XQC_TARGET_RX_WORK_COMPAT 0
+#endif
+#ifndef XQC_TARGET_ACK_SNAPSHOT
+#define XQC_TARGET_ACK_SNAPSHOT 1
+#endif
+#ifndef XQC_TARGET_DEFERRED_FRAME_APPLY
+#define XQC_TARGET_DEFERRED_FRAME_APPLY 1
+#endif
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
@@ -29,11 +46,18 @@ static const uint64_t xqc_mini_cli_rx_hist_bounds[XQC_MINI_RX_HIST_BUCKETS] = {
 };
 
 static const char *
-xqc_mini_cli_rx_mode(void)
+xqc_mini_cli_rx_mode(const xqc_mini_cli_user_conn_t *user_conn)
 {
 #if defined(__linux__)
+    if (user_conn != NULL && user_conn->ctx != NULL
+        && user_conn->ctx->args != NULL
+        && user_conn->ctx->args->net_cfg.parallel_rx)
+    {
+        return "parallel_ingress_recvmmsg";
+    }
     return "direct_fair_recvmmsg";
 #else
+    (void)user_conn;
     return "direct_fair_recvfrom";
 #endif
 }
@@ -55,6 +79,12 @@ static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t
 static int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
 static void xqc_mini_cli_socket_event_callback(int fd, short what, void *arg);
 static void xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn);
+static void xqc_mini_cli_drain_path_rings(xqc_mini_cli_user_conn_t *user_conn,
+    int triggering_path_index);
+static int xqc_mini_cli_start_path_rx_worker(xqc_mini_cli_user_path_t *path);
+static void xqc_mini_cli_stop_path_rx_worker(xqc_mini_cli_user_path_t *path);
+static void *xqc_mini_cli_path_rx_worker_main(void *arg);
+static void xqc_mini_cli_path_work_ready_callback(int fd, short what, void *arg);
 static void xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path,
     const char *reason);
 static void xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn);
@@ -91,6 +121,27 @@ xqc_mini_cli_diag_update_max_u64(uint64_t *value, uint64_t candidate)
         }
 
     } while (!__sync_bool_compare_and_swap(value, old_value, candidate));
+}
+
+static void
+xqc_mini_cli_diag_ring_full_begin(xqc_mini_cli_user_path_t *path,
+    xqc_usec_t now)
+{
+    xqc_mini_cli_diag_inc_u64(&path->rx_diag.ring_full_count);
+    (void)__sync_bool_compare_and_swap(&path->rx_diag.ring_full_since_us, 0,
+                                       (uint64_t)now);
+}
+
+static void
+xqc_mini_cli_diag_ring_full_end(xqc_mini_cli_user_path_t *path,
+    xqc_usec_t now)
+{
+    uint64_t start = __sync_lock_test_and_set(
+        &path->rx_diag.ring_full_since_us, 0);
+    if (start != 0 && now >= start) {
+        xqc_mini_cli_diag_update_max_u64(&path->rx_diag.ring_full_max_us,
+                                          (uint64_t)(now - start));
+    }
 }
 
 static void
@@ -397,6 +448,11 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
     if (user_conn == NULL) {
         return;
     }
+    if (!force && user_conn->ctx != NULL && user_conn->ctx->args != NULL
+        && !user_conn->ctx->args->quic_cfg.mp_diag)
+    {
+        return;
+    }
 
     xqc_usec_t now_us = xqc_now();
     xqc_mini_cli_diag_stats_t *stats = &user_conn->diag_stats;
@@ -422,19 +478,23 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
         scene = "unknown";
     }
 
-    printf("[diag_rx][%s] mode=%s"
+    printf("[diag_rx_stage][%s] mode=%s"
            " arbiter_calls=%" PRIu64 " empty_calls=%" PRIu64
            " fair_rounds=%" PRIu64 " packets=%" PRIu64 " bytes=%" PRIu64
            " callback_us_p50=%" PRIu64 " p95=%" PRIu64
            " p99=%" PRIu64 " max=%" PRIu64
            " finish_recv=%" PRIu64 " finish_gap_us_p50=%" PRIu64
            " p95=%" PRIu64 " p99=%" PRIu64 " max=%" PRIu64
+           " finish_recv_run_us=%" PRIu64
+           " finish_recv_run_max_us=%" PRIu64
            " dispatch_delay_us_p50=%" PRIu64 " p95=%" PRIu64
+           " p99=%" PRIu64 " max=%" PRIu64
+           " path_service_wait_us_p50=%" PRIu64 " p95=%" PRIu64
            " p99=%" PRIu64 " max=%" PRIu64
            " reentry_skips=%" PRIu64 " deferred_releases=%" PRIu64
            " socket_ev_read=%" PRIu64 " socket_ev_write=%" PRIu64
            " dispatch_metric=post_socket_read_dispatch_not_kernel_queue\n",
-           scene, xqc_mini_cli_rx_mode(),
+           scene, xqc_mini_cli_rx_mode(user_conn),
            stats->rx_arbiter_calls, stats->rx_arbiter_empty_calls,
            stats->rx_fair_round_count, stats->rx_datagram_count,
            stats->rx_byte_count,
@@ -447,10 +507,16 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
            xqc_mini_cli_rx_hist_percentile(&stats->finish_gap_us, 95),
            xqc_mini_cli_rx_hist_percentile(&stats->finish_gap_us, 99),
            stats->finish_gap_us.max,
+           stats->finish_recv_run_us,
+           stats->finish_recv_run_max_us,
            xqc_mini_cli_rx_hist_percentile(&stats->dispatch_delay_us, 50),
            xqc_mini_cli_rx_hist_percentile(&stats->dispatch_delay_us, 95),
            xqc_mini_cli_rx_hist_percentile(&stats->dispatch_delay_us, 99),
            stats->dispatch_delay_us.max,
+           xqc_mini_cli_rx_hist_percentile(&stats->path_service_wait_us, 50),
+           xqc_mini_cli_rx_hist_percentile(&stats->path_service_wait_us, 95),
+           xqc_mini_cli_rx_hist_percentile(&stats->path_service_wait_us, 99),
+           stats->path_service_wait_us.max,
            stats->rx_reentry_skip_count, stats->rx_deferred_release_count,
            stats->socket_ev_read_count, stats->socket_ev_write_count);
 
@@ -463,16 +529,31 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
                " batch_max=%" PRIu64
                " service_gap_us_p50=%" PRIu64 " p95=%" PRIu64
                " p99=%" PRIu64 " max=%" PRIu64
-               " process_errors=%" PRIu64 "\n",
+               " process_errors=%" PRIu64
+               " recvmmsg_us=%" PRIu64 " packet_process_us=%" PRIu64
+               " ring_published=%" PRIu64 " ring_consumed=%" PRIu64
+               " ring_full=%" PRIu64 " ring_full_max_us=%" PRIu64
+               " ring_max_depth=%" PRIu64 "\n",
                scene, i, path->path_id,
                path->interface_name[0] != '\0' ? path->interface_name : "(default)",
-               path_diag->event_count, path_diag->batch_call_count,
-               path_diag->eagain_count, path_diag->packet_count,
-               path_diag->byte_count, path_diag->batch_max,
+               xqc_mini_cli_diag_load_u64(&path_diag->event_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->batch_call_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->eagain_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->packet_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->byte_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->batch_max),
                xqc_mini_cli_rx_hist_percentile(&path_diag->service_gap, 50),
                xqc_mini_cli_rx_hist_percentile(&path_diag->service_gap, 95),
                xqc_mini_cli_rx_hist_percentile(&path_diag->service_gap, 99),
-               path_diag->service_gap.max, path_diag->process_error_count);
+               path_diag->service_gap.max,
+               xqc_mini_cli_diag_load_u64(&path_diag->process_error_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->recvmmsg_us),
+               xqc_mini_cli_diag_load_u64(&path_diag->packet_process_us),
+               xqc_mini_cli_diag_load_u64(&path_diag->ring_published),
+               xqc_mini_cli_diag_load_u64(&path_diag->ring_consumed),
+               xqc_mini_cli_diag_load_u64(&path_diag->ring_full_count),
+               xqc_mini_cli_diag_load_u64(&path_diag->ring_full_max_us),
+               xqc_mini_cli_diag_load_u64(&path_diag->ring_max_depth));
     }
 
     if (user_conn->ctx != NULL && user_conn->ctx->engine != NULL && user_conn->h3_conn != NULL) {
@@ -839,6 +920,11 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     args->net_cfg.user_send_buf_size = CHUNK_SIZE;
     args->net_cfg.user_recv_buf_size = XQC_PACKET_BUF_LEN;
     args->net_cfg.stream_range_size = XQC_STREAM_RANGE_SIZE_DEFAULT;
+#if defined(__linux__)
+    args->net_cfg.parallel_rx = 1;
+#else
+    args->net_cfg.parallel_rx = 0;
+#endif
 
     strncpy(args->net_cfg.server_addr, DEFAULT_IP, sizeof(args->net_cfg.server_addr) - 1);
     args->net_cfg.server_addr[sizeof(args->net_cfg.server_addr) - 1] = '\0';
@@ -1613,6 +1699,14 @@ xqc_mini_cli_alloc_rx_batch(xqc_mini_cli_user_path_t *path)
     {
         capacity = user_conn->ctx->args->net_cfg.user_recv_buf_size;
     }
+#if defined(__linux__)
+    if (user_conn != NULL && user_conn->ctx != NULL
+        && user_conn->ctx->args->net_cfg.parallel_rx
+        && capacity > XQC_MAX_PACKET_IN_LEN)
+    {
+        capacity = XQC_MAX_PACKET_IN_LEN;
+    }
+#endif
 
     xqc_mini_cli_rx_batch_t *batch = calloc(1, sizeof(*batch));
     if (batch == NULL) {
@@ -1649,14 +1743,33 @@ xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path, const char *rea
     int path_index = user_conn != NULL ? (int)(path - user_conn->paths) : -1;
     uint64_t old_path_id = path->path_id;
     int old_fd = path->fd;
-    int had_io = path->ev_socket != NULL || path->rx_batch != NULL || path->fd >= 0;
+    int had_io = path->ev_socket != NULL || path->ev_rx_ready != NULL
+        || path->rx_batch != NULL || path->fd >= 0;
 
     path->is_active = 0;
+    xqc_mini_cli_stop_path_rx_worker(path);
+    xqc_mini_cli_diag_ring_full_end(path, xqc_now());
     if (path->ev_socket != NULL) {
         event_del(path->ev_socket);
         event_free(path->ev_socket);
         path->ev_socket = NULL;
     }
+    if (path->ev_rx_ready != NULL) {
+        event_del(path->ev_rx_ready);
+        event_free(path->ev_rx_ready);
+        path->ev_rx_ready = NULL;
+    }
+#if defined(__linux__)
+    if (path->rx_ready_fd >= 0) {
+        close(path->rx_ready_fd);
+        path->rx_ready_fd = -1;
+    }
+    if (path->rx_space_fd >= 0) {
+        close(path->rx_space_fd);
+        path->rx_space_fd = -1;
+    }
+#endif
+    xqc_mini_spsc_ring_destroy(&path->rx_ring);
     if (path->rx_batch != NULL) {
         free(path->rx_batch->storage);
         path->rx_batch->storage = NULL;
@@ -1670,7 +1783,9 @@ xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path, const char *rea
 
     path->get_local_addr = 0;
     path->prepared = 0;
+    path->parallel_rx = 0;
     path->path_id = XQC_MINI_PATH_ID_INVALID;
+    path->rx_generation++;
     path->rx_release_pending = 0;
     path->consecutive_write_failures = 0;
 
@@ -1695,6 +1810,9 @@ xqc_mini_cli_release_path_io(xqc_mini_cli_user_path_t *path, const char *reason)
     if (user_conn != NULL && user_conn->rx_arbiter_running) {
         if (path->ev_socket != NULL) {
             event_del(path->ev_socket);
+        }
+        if (path->ev_rx_ready != NULL) {
+            event_del(path->ev_rx_ready);
         }
         if (!path->rx_release_pending) {
             path->rx_release_pending = 1;
@@ -1773,12 +1891,49 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
         return XQC_ERROR;
     }
 
-    path->ev_socket = event_new(ctx->eb, path->fd, EV_READ | EV_PERSIST,
-        xqc_mini_cli_socket_event_callback, path);
-    if (path->ev_socket == NULL) {
-        printf("[error] create RX event failed for path[%d]\n", path_index);
-        xqc_mini_cli_release_path_io_now(path, "event_new_failed");
-        return XQC_ERROR;
+#if defined(__linux__)
+    if (ctx->args->net_cfg.parallel_rx
+        && xqc_mini_spsc_ring_init(&path->rx_ring,
+                                   XQC_MINI_RX_RING_CAPACITY) == 0)
+    {
+        path->rx_ready_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        path->rx_space_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+        if (path->rx_ready_fd >= 0 && path->rx_space_fd >= 0) {
+            path->ev_rx_ready = event_new(ctx->eb, path->rx_ready_fd,
+                EV_READ | EV_PERSIST,
+                xqc_mini_cli_path_work_ready_callback, path);
+            path->parallel_rx = path->ev_rx_ready != NULL;
+        }
+    }
+
+    if (ctx->args->net_cfg.parallel_rx && !path->parallel_rx) {
+        if (path->ev_rx_ready != NULL) {
+            event_free(path->ev_rx_ready);
+            path->ev_rx_ready = NULL;
+        }
+        if (path->rx_ready_fd >= 0) {
+            close(path->rx_ready_fd);
+            path->rx_ready_fd = -1;
+        }
+        if (path->rx_space_fd >= 0) {
+            close(path->rx_space_fd);
+            path->rx_space_fd = -1;
+        }
+        xqc_mini_spsc_ring_destroy(&path->rx_ring);
+        printf("[diag_rx_path_state] action=fallback_direct idx=%d"
+               " reason=parallel_rx_resource_allocation_failed\n",
+               path_index);
+    }
+#endif
+
+    if (!path->parallel_rx) {
+        path->ev_socket = event_new(ctx->eb, path->fd, EV_READ | EV_PERSIST,
+            xqc_mini_cli_socket_event_callback, path);
+        if (path->ev_socket == NULL) {
+            printf("[error] create RX event failed for path[%d]\n", path_index);
+            xqc_mini_cli_release_path_io_now(path, "event_new_failed");
+            return XQC_ERROR;
+        }
     }
 
     path->prepared = 1;
@@ -1950,12 +2105,19 @@ xqc_mini_cli_process_rx_packet(xqc_mini_cli_user_path_t *path,
     path->rx_diag.packet_count++;
     path->rx_diag.byte_count += recv_size;
 
+    xqc_usec_t packet_process_start = ctx->args->quic_cfg.mp_diag
+        ? xqc_now() : 0;
     xqc_int_t ret = xqc_engine_packet_process(ctx->engine, packet_buf, recv_size,
         path->local_addr, path->local_addrlen,
         path->peer_addr, path->peer_addrlen,
         recv_time, user_conn);
+    xqc_usec_t packet_process_end = packet_process_start != 0 ? xqc_now() : 0;
+    if (packet_process_start != 0 && packet_process_end >= packet_process_start) {
+        xqc_mini_cli_diag_add_u64(&path->rx_diag.packet_process_us,
+            (uint64_t)(packet_process_end - packet_process_start));
+    }
     if (ret != XQC_OK) {
-        path->rx_diag.process_error_count++;
+        xqc_mini_cli_diag_inc_u64(&path->rx_diag.process_error_count);
     }
 
     return 1;
@@ -1976,9 +2138,8 @@ xqc_mini_cli_record_path_service(xqc_mini_cli_user_path_t *path,
             (uint64_t)(service_time - path->rx_diag.last_service_time));
     }
     path->rx_diag.last_service_time = service_time;
-    if (batch_packets > path->rx_diag.batch_max) {
-        path->rx_diag.batch_max = batch_packets;
-    }
+    xqc_mini_cli_diag_update_max_u64(&path->rx_diag.batch_max,
+                                      batch_packets);
 }
 static void
 xqc_mini_cli_handle_rx_error(xqc_mini_cli_user_path_t *path, int err)
@@ -2031,6 +2192,383 @@ xqc_mini_cli_handle_rx_error(xqc_mini_cli_user_path_t *path, int err)
 }
 
 
+#if defined(__linux__)
+static void
+xqc_mini_cli_eventfd_signal(int fd)
+{
+    uint64_t value = 1;
+    if (fd >= 0) {
+        ssize_t ignored = write(fd, &value, sizeof(value));
+        (void)ignored;
+    }
+}
+
+static void
+xqc_mini_cli_eventfd_drain(int fd)
+{
+    uint64_t value;
+    while (fd >= 0 && read(fd, &value, sizeof(value)) == sizeof(value)) {
+    }
+}
+
+static void *
+xqc_mini_cli_path_rx_worker_main(void *arg)
+{
+    xqc_mini_cli_user_path_t *path = arg;
+    xqc_mini_cli_rx_batch_t *batch = path->rx_batch;
+    struct pollfd fds[2];
+
+    fds[0].fd = path->fd;
+    fds[0].events = POLLIN;
+    fds[1].fd = path->rx_space_fd;
+    fds[1].events = POLLIN;
+
+    while (!atomic_load_explicit(&path->rx_ring.stopping,
+                                 memory_order_acquire))
+    {
+        uint32_t free_slots = xqc_mini_spsc_ring_free(&path->rx_ring);
+        if (free_slots > 0) {
+            xqc_mini_cli_diag_ring_full_end(path, xqc_now());
+        }
+        fds[0].events = free_slots > 0 ? POLLIN : 0;
+        int poll_ret = poll(fds, 2, -1);
+        if (poll_ret < 0) {
+            int err = get_sys_errno();
+            if (err == EINTR) {
+                continue;
+            }
+            __sync_lock_test_and_set(&path->rx_worker_errno, err);
+            xqc_mini_cli_eventfd_signal(path->rx_ready_fd);
+            break;
+        }
+
+        if (fds[1].revents & POLLIN) {
+            xqc_mini_cli_eventfd_drain(path->rx_space_fd);
+        }
+        if (atomic_load_explicit(&path->rx_ring.stopping,
+                                 memory_order_acquire))
+        {
+            break;
+        }
+        if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+            int err = EIO;
+            socklen_t err_len = sizeof(err);
+            if (getsockopt(path->fd, SOL_SOCKET, SO_ERROR, &err,
+                           &err_len) != 0 || err == 0)
+            {
+                err = EIO;
+            }
+            __sync_lock_test_and_set(&path->rx_worker_errno, err);
+            xqc_mini_cli_eventfd_signal(path->rx_ready_fd);
+            break;
+        }
+        if (!(fds[0].revents & POLLIN)) {
+            continue;
+        }
+
+        free_slots = xqc_mini_spsc_ring_free(&path->rx_ring);
+        if (free_slots == 0) {
+            xqc_mini_cli_diag_ring_full_begin(path, xqc_now());
+            continue;
+        }
+
+        uint32_t batch_limit = free_slots < CLIENT_RX_PER_PATH_PACKETS
+            ? free_slots : CLIENT_RX_PER_PATH_PACKETS;
+        for (uint32_t i = 0; i < batch_limit; i++) {
+            batch->iovecs[i].iov_base = batch->storage
+                + (size_t)i * batch->slot_capacity;
+            batch->iovecs[i].iov_len = batch->slot_capacity;
+            memset(&batch->messages[i].msg_hdr, 0,
+                sizeof(batch->messages[i].msg_hdr));
+            batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
+            batch->messages[i].msg_hdr.msg_iovlen = 1;
+            batch->messages[i].msg_len = 0;
+        }
+
+        xqc_usec_t syscall_start = path->user_conn->ctx->args->quic_cfg.mp_diag
+            ? xqc_now() : 0;
+        int received = recvmmsg(path->fd, batch->messages, batch_limit,
+                                MSG_DONTWAIT, NULL);
+        xqc_usec_t syscall_end = syscall_start != 0 ? xqc_now() : 0;
+        if (syscall_start != 0 && syscall_end >= syscall_start) {
+            xqc_mini_cli_diag_add_u64(&path->rx_diag.recvmmsg_us,
+                (uint64_t)(syscall_end - syscall_start));
+        }
+        xqc_mini_cli_diag_inc_u64(&path->rx_diag.batch_call_count);
+
+        if (received < 0) {
+            int err = get_sys_errno();
+            if (err == EAGAIN || err == EWOULDBLOCK) {
+                xqc_mini_cli_diag_inc_u64(&path->rx_diag.eagain_count);
+                continue;
+            }
+            if (err == EINTR) {
+                continue;
+            }
+            __sync_lock_test_and_set(&path->rx_worker_errno, err);
+            xqc_mini_cli_eventfd_signal(path->rx_ready_fd);
+            break;
+        }
+
+        xqc_usec_t recv_time = xqc_now();
+        xqc_mini_cli_diag_update_max_u64(&path->rx_diag.batch_max,
+                                          (uint64_t)received);
+        int notify = 0;
+        for (int i = 0; i < received; i++) {
+            if (batch->messages[i].msg_len == 0
+                || (batch->messages[i].msg_hdr.msg_flags & MSG_TRUNC))
+            {
+                xqc_mini_cli_diag_inc_u64(
+                    &path->rx_diag.process_error_count);
+                continue;
+            }
+            int was_empty = 0;
+            int push_ret = xqc_mini_spsc_ring_push(&path->rx_ring,
+                path->path_id, path->rx_generation, recv_time,
+                batch->storage + (size_t)i * batch->slot_capacity,
+                batch->messages[i].msg_len, &was_empty);
+            if (push_ret != 1) {
+                if (!atomic_load_explicit(&path->rx_ring.stopping,
+                                          memory_order_acquire))
+                {
+                    xqc_mini_cli_diag_ring_full_begin(path, xqc_now());
+                }
+                break;
+            }
+            notify |= was_empty;
+            xqc_mini_cli_diag_inc_u64(&path->rx_diag.ring_published);
+            uint64_t depth = xqc_mini_spsc_ring_size(&path->rx_ring);
+            xqc_mini_cli_diag_update_max_u64(&path->rx_diag.ring_max_depth,
+                                              depth);
+        }
+
+        if (notify) {
+            xqc_mini_cli_eventfd_signal(path->rx_ready_fd);
+        }
+    }
+
+    return NULL;
+}
+
+static int
+xqc_mini_cli_start_path_rx_worker(xqc_mini_cli_user_path_t *path)
+{
+    if (path == NULL || path->rx_thread_running) {
+        return XQC_OK;
+    }
+
+    atomic_store_explicit(&path->rx_ring.stopping, 0,
+                          memory_order_release);
+    path->rx_worker_errno = 0;
+    int ret = pthread_create(&path->rx_thread, NULL,
+                             xqc_mini_cli_path_rx_worker_main, path);
+    if (ret != 0) {
+        path->rx_worker_errno = ret;
+        return XQC_ERROR;
+    }
+    path->rx_thread_running = 1;
+    return XQC_OK;
+}
+
+static void
+xqc_mini_cli_stop_path_rx_worker(xqc_mini_cli_user_path_t *path)
+{
+    if (path == NULL) {
+        return;
+    }
+
+    xqc_mini_spsc_ring_stop(&path->rx_ring);
+    xqc_mini_cli_eventfd_signal(path->rx_space_fd);
+    if (path->rx_thread_running) {
+        pthread_join(path->rx_thread, NULL);
+        path->rx_thread_running = 0;
+    }
+}
+#else
+static void *
+xqc_mini_cli_path_rx_worker_main(void *arg)
+{
+    (void)arg;
+    return NULL;
+}
+
+static int
+xqc_mini_cli_start_path_rx_worker(xqc_mini_cli_user_path_t *path)
+{
+    (void)path;
+    return XQC_ERROR;
+}
+
+static void
+xqc_mini_cli_stop_path_rx_worker(xqc_mini_cli_user_path_t *path)
+{
+    (void)path;
+}
+#endif
+
+static void
+xqc_mini_cli_drain_path_rings(xqc_mini_cli_user_conn_t *user_conn,
+    int triggering_path_index)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->engine == NULL || user_conn->rx_shutdown)
+    {
+        return;
+    }
+
+    xqc_mini_cli_diag_stats_t *stats = &user_conn->diag_stats;
+    if (user_conn->rx_arbiter_running) {
+        xqc_mini_cli_diag_inc_u64(&stats->rx_reentry_skip_count);
+        return;
+    }
+
+    user_conn->rx_arbiter_running = 1;
+    xqc_mini_cli_diag_inc_u64(&stats->rx_arbiter_calls);
+    xqc_usec_t callback_start = xqc_now();
+    int round_packets = 0;
+    xqc_usec_t path_service_start[MAX_PATH_CNT] = {0};
+    (void)triggering_path_index;
+    int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
+
+    for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
+        int path_index = (start_index + offset) % MAX_PATH_CNT;
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[path_index];
+        int path_packets = 0;
+        int consumed_slots = 0;
+
+        while (path_packets < XQC_MINI_RX_ENGINE_QUANTUM) {
+            const xqc_mini_rx_slot_t *slot =
+                xqc_mini_spsc_ring_peek(&path->rx_ring);
+            if (slot == NULL) {
+                break;
+            }
+
+            if (path->is_active && slot->path_id == path->path_id
+                && slot->path_generation == path->rx_generation)
+            {
+                if (path_packets == 0) {
+                    path_service_start[path_index] = xqc_now();
+                }
+                xqc_mini_cli_process_rx_packet(path, slot->data, slot->len,
+                                                slot->recv_time);
+                path_packets++;
+                round_packets++;
+            }
+
+            xqc_mini_spsc_ring_consume(&path->rx_ring);
+            consumed_slots++;
+            xqc_mini_cli_diag_inc_u64(&path->rx_diag.ring_consumed);
+            if (user_conn->rx_shutdown) {
+                break;
+            }
+        }
+
+        if (path_packets > 0) {
+            xqc_mini_cli_record_path_service(path, xqc_now(), path_packets);
+        }
+#if defined(__linux__)
+        if (consumed_slots > 0) {
+            xqc_mini_cli_eventfd_signal(path->rx_space_fd);
+        }
+#endif
+        if (user_conn->rx_shutdown) {
+            break;
+        }
+    }
+
+    user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
+    if (path_service_start[0] != 0 && path_service_start[1] != 0) {
+        uint64_t wait_us = path_service_start[0] >= path_service_start[1]
+            ? path_service_start[0] - path_service_start[1]
+            : path_service_start[1] - path_service_start[0];
+        xqc_mini_cli_rx_hist_record(&stats->path_service_wait_us, wait_us);
+    }
+    if (round_packets > 0) {
+        xqc_mini_cli_diag_inc_u64(&stats->rx_fair_round_count);
+        xqc_mini_cli_diag_add_u64(&stats->rx_round_packet_count,
+                                  (uint64_t)round_packets);
+        xqc_usec_t finish_time = xqc_now();
+        if (stats->rx_last_finish_recv_us != 0
+            && finish_time >= stats->rx_last_finish_recv_us)
+        {
+            xqc_mini_cli_rx_hist_record(&stats->finish_gap_us,
+                (uint64_t)(finish_time - stats->rx_last_finish_recv_us));
+        }
+        stats->rx_last_finish_recv_us = finish_time;
+        xqc_mini_cli_diag_inc_u64(&stats->finish_recv_count);
+        xqc_usec_t finish_run_start = user_conn->ctx->args->quic_cfg.mp_diag
+            ? xqc_now() : 0;
+        xqc_engine_finish_recv(user_conn->ctx->engine);
+        if (finish_run_start != 0) {
+            xqc_usec_t finish_run_end = xqc_now();
+            if (finish_run_end >= finish_run_start) {
+                uint64_t elapsed = finish_run_end - finish_run_start;
+                xqc_mini_cli_diag_add_u64(&stats->finish_recv_run_us,
+                                           elapsed);
+                xqc_mini_cli_diag_update_max_u64(
+                    &stats->finish_recv_run_max_us, elapsed);
+            }
+        }
+
+    } else {
+        xqc_mini_cli_diag_inc_u64(&stats->rx_arbiter_empty_calls);
+    }
+
+    xqc_usec_t callback_end = xqc_now();
+    if (callback_end >= callback_start) {
+        xqc_mini_cli_rx_hist_record(&stats->rx_callback_us,
+            (uint64_t)(callback_end - callback_start));
+    }
+
+    user_conn->rx_arbiter_running = 0;
+
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        int worker_errno = __sync_lock_test_and_set(&path->rx_worker_errno, 0);
+        if (worker_errno != 0 && path->is_active) {
+            xqc_mini_cli_handle_rx_error(path, worker_errno);
+        }
+        if (path->rx_release_pending) {
+            xqc_mini_cli_release_path_io_now(path, "deferred_release");
+        }
+    }
+
+    if (user_conn->rx_free_pending) {
+        xqc_mini_cli_free_user_conn(user_conn);
+        return;
+    }
+
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (path->ev_rx_ready != NULL
+            && xqc_mini_spsc_ring_size(&path->rx_ring) > 0)
+        {
+            event_active(path->ev_rx_ready, EV_READ, 0);
+        }
+    }
+
+    xqc_mini_cli_diag_maybe_log(user_conn, "parallel_rx", 0);
+}
+
+static void
+xqc_mini_cli_path_work_ready_callback(int fd, short what, void *arg)
+{
+    xqc_mini_cli_user_path_t *path = arg;
+    if (path == NULL || path->user_conn == NULL || !(what & EV_READ)) {
+        return;
+    }
+
+#if defined(__linux__)
+    xqc_mini_cli_eventfd_drain(fd);
+#else
+    (void)fd;
+#endif
+    xqc_mini_cli_diag_inc_u64(&path->rx_diag.event_count);
+    xqc_mini_cli_drain_path_rings(path->user_conn,
+        (int)(path - path->user_conn->paths));
+}
+
+
 static int
 xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
 {
@@ -2058,8 +2596,15 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
         batch->messages[i].msg_len = 0;
     }
 
+    xqc_usec_t syscall_start = user_conn->ctx->args->quic_cfg.mp_diag
+        ? xqc_now() : 0;
     int received = recvmmsg(path->fd, batch->messages,
         CLIENT_RX_PER_PATH_PACKETS, MSG_DONTWAIT, NULL);
+    xqc_usec_t syscall_end = syscall_start != 0 ? xqc_now() : 0;
+    if (syscall_start != 0 && syscall_end >= syscall_start) {
+        xqc_mini_cli_diag_add_u64(&path->rx_diag.recvmmsg_us,
+            (uint64_t)(syscall_end - syscall_start));
+    }
     if (received < 0) {
         int err = get_sys_errno();
         if (err == EAGAIN || err == EWOULDBLOCK) {
@@ -2131,17 +2676,29 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     stats->rx_arbiter_calls++;
     xqc_usec_t callback_start = xqc_now();
     int round_packets = 0;
+    xqc_usec_t path_service_start[MAX_PATH_CNT] = {0};
     int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
     for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
         int path_index = (start_index + offset) % MAX_PATH_CNT;
-        round_packets += xqc_mini_cli_recv_path_batch(
+        xqc_usec_t service_start = xqc_now();
+        int path_packets = xqc_mini_cli_recv_path_batch(
             &user_conn->paths[path_index]);
+        if (path_packets > 0) {
+            path_service_start[path_index] = service_start;
+            round_packets += path_packets;
+        }
         if (user_conn->rx_shutdown) {
             break;
         }
     }
 
     user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
+    if (path_service_start[0] != 0 && path_service_start[1] != 0) {
+        uint64_t wait_us = path_service_start[0] >= path_service_start[1]
+            ? path_service_start[0] - path_service_start[1]
+            : path_service_start[1] - path_service_start[0];
+        xqc_mini_cli_rx_hist_record(&stats->path_service_wait_us, wait_us);
+    }
     if (round_packets > 0) {
         stats->rx_fair_round_count++;
         stats->rx_round_packet_count += (uint64_t)round_packets;
@@ -2155,7 +2712,18 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
         }
         stats->rx_last_finish_recv_us = finish_time;
         stats->finish_recv_count++;
+        xqc_usec_t finish_run_start = user_conn->ctx->args->quic_cfg.mp_diag
+            ? xqc_now() : 0;
         xqc_engine_finish_recv(user_conn->ctx->engine);
+        if (finish_run_start != 0) {
+            xqc_usec_t finish_run_end = xqc_now();
+            if (finish_run_end >= finish_run_start) {
+                uint64_t elapsed = finish_run_end - finish_run_start;
+                stats->finish_recv_run_us += elapsed;
+                stats->finish_recv_run_max_us = xqc_max(
+                    stats->finish_recv_run_max_us, elapsed);
+            }
+        }
     } else {
         stats->rx_arbiter_empty_calls++;
     }
@@ -2304,6 +2872,14 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
             if (endptr != value && *endptr == '\0' && size > 0) {
                 args->net_cfg.stream_range_size = (size_t)size;
             }
+        }
+        else if (strcmp(key, "rx_arch") == 0) {
+#if defined(__linux__)
+            args->net_cfg.parallel_rx =
+                strcmp(value, "parallel_ingress") == 0;
+#else
+            args->net_cfg.parallel_rx = 0;
+#endif
         }
         else if (strcmp(key, "send_data_len") == 0) {
             char *endptr = NULL;
@@ -2725,7 +3301,58 @@ xqc_mini_cli_init_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_us
     path->is_active = 1;
     path->rx_release_pending = 0;
 
-    if (path->ev_socket == NULL || event_add(path->ev_socket, NULL) != 0) {
+    path->get_local_addr = 1;
+    path->local_addrlen = sizeof(struct sockaddr_in);
+    if (getsockname(path->fd, path->local_addr, &path->local_addrlen) != 0) {
+        path->get_local_addr = 0;
+        path->local_addrlen = 0;
+    }
+
+    int event_ret = 0;
+#if defined(__linux__)
+    if (path->parallel_rx) {
+        event_ret = path->ev_rx_ready == NULL
+            || event_add(path->ev_rx_ready, NULL) != 0;
+        if (!event_ret) {
+            event_ret = xqc_mini_cli_start_path_rx_worker(path) != XQC_OK;
+        }
+
+        if (event_ret) {
+            if (path->ev_rx_ready != NULL) {
+                event_del(path->ev_rx_ready);
+                event_free(path->ev_rx_ready);
+                path->ev_rx_ready = NULL;
+            }
+            if (path->rx_ready_fd >= 0) {
+                close(path->rx_ready_fd);
+                path->rx_ready_fd = -1;
+            }
+            if (path->rx_space_fd >= 0) {
+                close(path->rx_space_fd);
+                path->rx_space_fd = -1;
+            }
+            xqc_mini_spsc_ring_destroy(&path->rx_ring);
+            path->parallel_rx = 0;
+            path->ev_socket = event_new(user_conn->ctx->eb, path->fd,
+                EV_READ | EV_PERSIST, xqc_mini_cli_socket_event_callback,
+                path);
+            event_ret = path->ev_socket == NULL
+                || event_add(path->ev_socket, NULL) != 0;
+            if (!event_ret) {
+                printf("[diag_rx_path_state] action=fallback_direct idx=%d"
+                       " reason=parallel_rx_worker_start_failed\n",
+                       path_index);
+            }
+        }
+
+    } else
+#endif
+    {
+        event_ret = path->ev_socket == NULL
+            || event_add(path->ev_socket, NULL) != 0;
+    }
+
+    if (event_ret) {
         printf("[error] event_add failed for path[%d]\n", path_index);
         xqc_mini_cli_release_path_io(path, "event_add_failed");
         return XQC_ERROR;
@@ -2941,12 +3568,44 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->paths[i].path_id = XQC_MINI_PATH_ID_INVALID;
         user_conn->paths[i].rx_batch = NULL;
         user_conn->paths[i].rx_release_pending = 0;
+        user_conn->paths[i].rx_ready_fd = -1;
+        user_conn->paths[i].rx_space_fd = -1;
+        user_conn->paths[i].rx_generation = 1;
+        user_conn->paths[i].parallel_rx = 0;
         user_conn->paths[i].disabled_for_session = 0;
         user_conn->paths[i].last_recover_probe_time = 0;
     }
 
-    printf("[resolved-rx] mode=%s per_path=%d rounds=1\n",
-        xqc_mini_cli_rx_mode(), CLIENT_RX_PER_PATH_PACKETS);
+    size_t rx_batch_slot_capacity = ctx->args->net_cfg.user_recv_buf_size > 0
+        && ctx->args->net_cfg.user_recv_buf_size < XQC_PACKET_BUF_LEN
+        ? ctx->args->net_cfg.user_recv_buf_size : XQC_PACKET_BUF_LEN;
+#if defined(__linux__)
+    if (ctx->args->net_cfg.parallel_rx
+        && rx_batch_slot_capacity > XQC_MAX_PACKET_IN_LEN)
+    {
+        rx_batch_slot_capacity = XQC_MAX_PACKET_IN_LEN;
+    }
+#endif
+    size_t rx_memory_per_path =
+        rx_batch_slot_capacity * CLIENT_RX_PER_PATH_PACKETS
+        + (ctx->args->net_cfg.parallel_rx
+            ? sizeof(xqc_mini_rx_slot_t) * XQC_MINI_RX_RING_CAPACITY : 0);
+    printf("[resolved-rx] mode=%s per_path=%d ring_capacity=%d"
+           " engine_quantum=%d rounds=1\n",
+        xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
+        XQC_MINI_RX_RING_CAPACITY, XQC_MINI_RX_ENGINE_QUANTUM);
+    printf("[diag_target_xquic] baseline=c3f7834475f02ebb8faaf1f8f629e534167391c1"
+           " mode=%s rx_syscall_batch=%d"
+           " ring_capacity=%d engine_quantum=%d ack_first=%d"
+           " rx_work_compat=%d ack_snapshot=%d deferred_frame_apply=%d"
+           " parallel_auth=0 commit_owner=engine_thread"
+           " rx_memory_per_path=%zu rx_memory_total=%zu\n",
+        xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
+        XQC_MINI_RX_RING_CAPACITY, XQC_MINI_RX_ENGINE_QUANTUM,
+        XQC_TARGET_ACK_FIRST,
+        XQC_TARGET_RX_WORK_COMPAT, XQC_TARGET_ACK_SNAPSHOT,
+        XQC_TARGET_DEFERRED_FRAME_APPLY,
+        rx_memory_per_path, rx_memory_per_path * MAX_PATH_CNT);
 
     ret = xqc_mini_cli_promote_available_initial_interface(user_conn);
     if (ret != XQC_OK) {
@@ -3152,6 +3811,9 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         for (int i = 0; i < MAX_PATH_CNT; i++) {
             if (user_conn->paths[i].ev_socket != NULL) {
                 event_del(user_conn->paths[i].ev_socket);
+            }
+            if (user_conn->paths[i].ev_rx_ready != NULL) {
+                event_del(user_conn->paths[i].ev_rx_ready);
             }
         }
         printf("[diag_rx_path_state] action=defer_connection_free reason=arbiter_running\n");

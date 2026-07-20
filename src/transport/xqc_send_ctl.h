@@ -225,6 +225,21 @@ typedef struct xqc_send_ctl_s {
         xqc_packet_number_t last_largest_ack;
         uint64_t    largest_ack_delta_max;
         uint64_t    ack_has_gap;
+        xqc_usec_t  ack_due_time[XQC_PNS_N];
+        xqc_usec_t  last_auth_time[XQC_PNS_N];
+        uint64_t    auth_count;
+        uint64_t    recv_to_auth_sum_us;
+        uint64_t    recv_to_auth_max_us;
+        uint64_t    auth_to_due_sum_us;
+        uint64_t    auth_to_due_max_us;
+        uint64_t    ack_due_count;
+        uint64_t    ack_build_count;
+        uint64_t    ack_due_to_build_sum_us;
+        uint64_t    ack_due_to_build_max_us;
+        xqc_usec_t  ack_build_time[XQC_PNS_N];
+        uint64_t    ack_socket_send_count;
+        uint64_t    ack_build_to_send_sum_us;
+        uint64_t    ack_build_to_send_max_us;
     } diag;
 
 } xqc_send_ctl_t;
@@ -341,6 +356,14 @@ uint64_t xqc_send_ctl_get_pacing_rate(xqc_send_ctl_t *send_ctl);
 void xqc_send_ctl_diag_record_ack_mp(xqc_send_ctl_t *send_ctl,
     xqc_usec_t now, xqc_usec_t generation_delay, int has_gap,
     xqc_packet_number_t largest_ack);
+void xqc_send_ctl_diag_record_ack_due(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t now);
+void xqc_send_ctl_diag_record_auth(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t recv_time);
+void xqc_send_ctl_diag_record_ack_build(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t now);
+void xqc_send_ctl_diag_record_ack_sent(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns);
 
 xqc_int_t xqc_send_ctl_detect_optimistic_ack_attack(xqc_send_ctl_t *send_ctl, 
     xqc_pn_ctl_t *pn_ctl, xqc_ack_info_t *const ack_info, xqc_usec_t ack_recv_time);

@@ -683,10 +683,16 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
         goto fail;
     }
 
+    xc->rx_generation = 1;
+    xc->next_path_rx_generation = 0;
+    xc->key_generation = 1;
+
     xc->conn_settings = *settings;
 
     xqc_memcpy(xc->conn_settings.conn_option_str, settings->conn_option_str, XQC_CO_STR_MAX_LEN);
     xqc_conn_set_default_sched_params(&engine->default_conn_settings, &xc->conn_settings);
+    xc->target_rx_diag.enabled =
+        xc->conn_settings.scheduler_params.mp_diag_enabled;
 
     if (xc->conn_settings.max_udp_payload_size == 0) {
         xc->conn_settings.max_udp_payload_size = engine->default_conn_settings.max_udp_payload_size;
@@ -920,6 +926,10 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
     xc->conn_type = type;
     xc->conn_flag = 0;
     xc->conn_state = (type == XQC_CONN_TYPE_SERVER) ? XQC_CONN_STATE_SERVER_INIT : XQC_CONN_STATE_CLIENT_INIT;
+    if (xqc_conn_deferred_rx_init(xc) != XQC_OK) {
+        xqc_log(xc->log, XQC_LOG_WARN,
+                "|deferred rx pool unavailable, use serial frame apply|");
+    }
     xqc_log_event(xc->log, CON_CONNECTION_STATE_UPDATED, xc);
     xc->zero_rtt_count = 0;
     xc->conn_create_time = xqc_monotonic_timestamp();
@@ -1555,6 +1565,73 @@ xqc_conn_destroy(xqc_connection_t *xc)
             xc->scheduler, xc);
     }
 
+    xqc_target_rx_diag_t *target_diag = &xc->target_rx_diag;
+    if (target_diag->enabled && xc->conn_create_time != 0) {
+        xqc_usec_t target_lifetime_us = xqc_monotonic_timestamp()
+            - xc->conn_create_time;
+        double target_busy_ratio = target_lifetime_us > 0
+            ? (double)target_diag->engine_conn_run_us
+                / (double)target_lifetime_us
+            : 0.0;
+        printf("[diag_packet_core] packet_process_count=%" PRIu64
+           " packet_process_us=%" PRIu64
+           " conn_process_count=%" PRIu64
+           " conn_process_us=%" PRIu64
+           " parse_us=%" PRIu64 " decrypt_us=%" PRIu64
+           " frame_us=%" PRIu64 " pkt_processed_us=%" PRIu64 "\n",
+           target_diag->packet_process_count,
+           target_diag->packet_process_us,
+           target_diag->conn_process_packet_count,
+           target_diag->conn_process_packet_us,
+           target_diag->packet_parse_us,
+           target_diag->packet_decrypt_us,
+           target_diag->frame_process_us,
+               target_diag->pkt_processed_us);
+        printf("[diag_engine_run] conn_runs=%" PRIu64
+           " conn_run_us=%" PRIu64
+           " internal_runs=%" PRIu64 " internal_run_us=%" PRIu64
+           " crypto_read_us=%" PRIu64 " crypto_write_us=%" PRIu64
+           " app_read_us=%" PRIu64 " app_write_us=%" PRIu64
+           " ack_build_count=%" PRIu64 " ack_build_us=%" PRIu64
+           " ack_early_flush_count=%" PRIu64
+           " ack_early_flush_us=%" PRIu64
+           " schedule_send_us=%" PRIu64
+           " socket_send_count=%" PRIu64
+           " socket_send_us=%" PRIu64 "\n",
+           target_diag->engine_conn_run_count,
+           target_diag->engine_conn_run_us,
+           target_diag->internal_engine_run_count,
+           target_diag->internal_engine_run_us,
+           target_diag->crypto_read_us,
+           target_diag->crypto_write_us,
+           target_diag->app_read_us,
+           target_diag->app_write_us,
+           target_diag->ack_build_count,
+           target_diag->ack_build_us,
+               target_diag->ack_early_flush_count,
+               target_diag->ack_early_flush_us,
+               target_diag->schedule_send_us,
+               target_diag->socket_send_count,
+               target_diag->socket_send_us);
+        printf("[diag_engine_busy] lifetime_us=%" PRIu64
+           " engine_run_us=%" PRIu64 " busy_ratio=%.6f\n",
+           (uint64_t)target_lifetime_us,
+               target_diag->engine_conn_run_us, target_busy_ratio);
+        printf("[diag_rx_work] scan_count=%" PRIu64
+           " scan_us=%" PRIu64 " queued=%" PRIu64
+           " applied=%" PRIu64 " fallback=%" PRIu64
+           " pool_exhausted=%" PRIu64 " apply_error=%" PRIu64
+           " pending=%u\n",
+           target_diag->frame_scan_count,
+           target_diag->frame_scan_us,
+           target_diag->deferred_rx_queued,
+           target_diag->deferred_rx_applied,
+           target_diag->deferred_rx_fallback,
+           target_diag->deferred_rx_pool_exhausted,
+           target_diag->deferred_rx_apply_error,
+           xc->deferred_rx_pending_count);
+    }
+
     xqc_log_event(xc->log, CON_CONNECTION_CLOSED, xc);
 
     xqc_engine_remove_wakeup_queue(xc->engine, xc);
@@ -1660,6 +1737,8 @@ xqc_conn_destroy(xqc_connection_t *xc)
     if (xc->alpn) {
         xqc_free(xc->alpn);
     }
+
+    xqc_conn_deferred_rx_destroy(xc);
 
     /* free pool, must be the last thing to do */
     if (xc->conn_pool) {
@@ -1898,6 +1977,7 @@ xqc_conn_try_to_update_mss(xqc_connection_t *conn)
 ssize_t
 xqc_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, struct iovec *iov, int cnt)
 {
+    xqc_usec_t target_socket_start = XQC_TARGET_RX_DIAG_START(conn);
     ssize_t sent_size = 0;
     int sent_cnt = 0;
     
@@ -1965,6 +2045,10 @@ xqc_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, struct iovec *iov, 
         }
     }
 
+    if (target_socket_start != 0) {
+        conn->target_rx_diag.socket_send_count++;
+        XQC_TARGET_RX_DIAG_ADD(conn, socket_send_us, target_socket_start);
+    }
     return sent_cnt;
 }
 
@@ -2102,6 +2186,11 @@ xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t 
         }
 
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
+
+        if (packet_out->po_ack_offset > 0) {
+            xqc_send_ctl_diag_record_ack_sent(send_ctl,
+                packet_out->po_pkt.pkt_pns);
+        }
 
         xqc_conn_log_sent_packet(conn, packet_out, now);
 
@@ -2427,6 +2516,44 @@ xqc_conn_send_packets(xqc_connection_t *conn)
 
 }
 
+void
+xqc_conn_flush_high_priority_packets(xqc_connection_t *conn)
+{
+    xqc_list_head_t *head =
+        &conn->conn_send_queue->sndq_send_packets_high_pri;
+    xqc_list_head_t *ack_pos, *ack_next;
+    xqc_list_for_each_safe(ack_pos, ack_next, head) {
+        xqc_packet_out_t *packet_out = xqc_list_entry(
+            ack_pos, xqc_packet_out_t, po_list);
+        if (!(packet_out->po_frame_types
+              & (XQC_FRAME_BIT_ACK | XQC_FRAME_BIT_ACK_MP))
+            || !(packet_out->po_path_flag & XQC_PATH_SPECIFIED_BY_ACK))
+        {
+            continue;
+        }
+
+        xqc_path_ctx_t *ack_path = xqc_conn_find_path_by_path_id(
+            conn, packet_out->po_path_id);
+        if (ack_path != NULL) {
+            xqc_path_send_buffer_append(ack_path, packet_out,
+                &ack_path->path_schedule_buf[XQC_SEND_TYPE_NORMAL_HIGH_PRI]);
+        }
+    }
+
+    xqc_path_ctx_t *path;
+    xqc_list_head_t *pos, *next;
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (xqc_engine_is_sendmmsg_on(conn->engine, conn)) {
+            xqc_path_send_packets_batch(conn, path, head, XQC_FALSE,
+                                        XQC_SEND_TYPE_NORMAL_HIGH_PRI);
+        } else {
+            xqc_path_send_packets(conn, path, head, XQC_FALSE,
+                                  XQC_SEND_TYPE_NORMAL_HIGH_PRI);
+        }
+    }
+}
+
 xqc_int_t
 xqc_need_padding(xqc_connection_t *conn, xqc_packet_out_t *packet_out)
 {
@@ -2505,6 +2632,7 @@ xqc_conn_enc_packet(xqc_connection_t *conn,
 ssize_t
 xqc_send(xqc_connection_t *conn, xqc_path_ctx_t *path, unsigned char *data, unsigned int len)
 {
+    xqc_usec_t target_socket_start = XQC_TARGET_RX_DIAG_START(conn);
     ssize_t sent;
 
     if (conn->pkt_filter_cb) {
@@ -2565,6 +2693,11 @@ xqc_send(xqc_connection_t *conn, xqc_path_ctx_t *path, unsigned char *data, unsi
 
     xqc_log_event(conn->log, TRA_DATAGRAMS_SENT, sent, path->path_id);
 
+    if (target_socket_start != 0) {
+        conn->target_rx_diag.socket_send_count++;
+        XQC_TARGET_RX_DIAG_ADD(conn, socket_send_us, target_socket_start);
+    }
+
     return sent;
 }
 
@@ -2603,6 +2736,10 @@ xqc_send_packet_with_pn(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_packet
         return sent;
 
     } else {
+        if (packet_out->po_ack_offset > 0) {
+            xqc_send_ctl_diag_record_ack_sent(path->path_send_ctl,
+                packet_out->po_pkt.pkt_pns);
+        }
         xqc_log(conn->log, XQC_LOG_INFO,
                 "|<==|conn:%p|path:%ui|pkt_num:%ui|size:%ud|sent:%z|pkt_type:%s|frame:%s|inflight:%ud|now:%ui|stream_id:%ui|stream_offset:%ui|",
                 conn, path->path_id, packet_out->po_pkt.pkt_num, packet_out->po_used_size, sent,
@@ -4764,7 +4901,10 @@ xqc_conn_process_packet(xqc_connection_t *c,
         xqc_conn_log_recvd_packet(c, packet_in, packet_in_size, ret, recv_time);
 
         if (ret == XQC_OK) {
+            xqc_usec_t target_pkt_processed_start = XQC_TARGET_RX_DIAG_START(c);
             ret = xqc_conn_on_pkt_processed(c, packet_in, recv_time);
+            XQC_TARGET_RX_DIAG_ADD(c, pkt_processed_us,
+                                   target_pkt_processed_start);
 
         } else if (xqc_conn_tolerant_error(ret)) {
             /* ignore the remain bytes */
@@ -5095,6 +5235,7 @@ xqc_conn_confirm_key_update(xqc_connection_t *conn)
     ctx->cur_out_key_phase ^= 1;
     ctx->next_in_key_phase ^= 1;
     ctx->enc_pkt_cnt = 0;
+    conn->key_generation++;
 
     xqc_tls_set_1rtt_key_phase(conn->tls, ctx->cur_out_key_phase);
     xqc_log(conn->log, XQC_LOG_DEBUG, "|key phase changed to %ui|", ctx->cur_out_key_phase);

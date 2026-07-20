@@ -6,6 +6,8 @@
 #ifndef XQC_MULTIPATH_H
 #define XQC_MULTIPATH_H
 
+#include <stdatomic.h>
+
 #include <xquic/xquic_typedef.h>
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
@@ -89,6 +91,10 @@ struct xqc_path_ctx_s {
 
     /* Path_identifier */
     uint64_t            path_id;    /* path identifier */
+    uint64_t            rx_generation;
+    xqc_path_ack_snapshot_t ack_snapshot[XQC_PNS_N][2];
+    _Atomic uint64_t     ack_snapshot_published[XQC_PNS_N];
+    _Atomic uint64_t     ack_snapshot_committed[XQC_PNS_N];
     xqc_cid_t           path_scid;
     xqc_cid_t           path_dcid;
 

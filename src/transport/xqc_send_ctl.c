@@ -159,6 +159,82 @@ xqc_send_ctl_diag_record_ack_mp(xqc_send_ctl_t *send_ctl,
     send_ctl->diag.ack_has_gap += has_gap != 0;
 }
 
+void
+xqc_send_ctl_diag_record_auth(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t recv_time)
+{
+    if (send_ctl == NULL || !send_ctl->diag.enabled || pns >= XQC_PNS_N) {
+        return;
+    }
+    xqc_usec_t now = xqc_monotonic_timestamp();
+    uint64_t delay = now >= recv_time ? now - recv_time : 0;
+    send_ctl->diag.auth_count++;
+    send_ctl->diag.recv_to_auth_sum_us += delay;
+    send_ctl->diag.recv_to_auth_max_us = xqc_max(
+        send_ctl->diag.recv_to_auth_max_us, delay);
+    send_ctl->diag.last_auth_time[pns] = now;
+}
+
+void
+xqc_send_ctl_diag_record_ack_due(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t now)
+{
+    if (send_ctl == NULL || !send_ctl->diag.enabled || pns >= XQC_PNS_N) {
+        return;
+    }
+    if (send_ctl->diag.ack_due_time[pns] == 0) {
+        send_ctl->diag.ack_due_time[pns] = now;
+        send_ctl->diag.ack_due_count++;
+        if (send_ctl->diag.last_auth_time[pns] != 0) {
+            uint64_t delay = now >= send_ctl->diag.last_auth_time[pns]
+                ? now - send_ctl->diag.last_auth_time[pns] : 0;
+            send_ctl->diag.auth_to_due_sum_us += delay;
+            send_ctl->diag.auth_to_due_max_us = xqc_max(
+                send_ctl->diag.auth_to_due_max_us, delay);
+        }
+    }
+}
+
+void
+xqc_send_ctl_diag_record_ack_build(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns, xqc_usec_t now)
+{
+    if (send_ctl == NULL || !send_ctl->diag.enabled || pns >= XQC_PNS_N
+        || send_ctl->diag.ack_due_time[pns] == 0)
+    {
+        return;
+    }
+    uint64_t delay = now >= send_ctl->diag.ack_due_time[pns]
+        ? now - send_ctl->diag.ack_due_time[pns] : 0;
+    send_ctl->diag.ack_due_to_build_sum_us += delay;
+    send_ctl->diag.ack_due_to_build_max_us = xqc_max(
+        send_ctl->diag.ack_due_to_build_max_us, delay);
+    send_ctl->diag.ack_build_count++;
+    if (send_ctl->diag.ack_build_time[pns] == 0) {
+        send_ctl->diag.ack_build_time[pns] = now;
+    }
+    send_ctl->diag.ack_due_time[pns] = 0;
+}
+
+void
+xqc_send_ctl_diag_record_ack_sent(xqc_send_ctl_t *send_ctl,
+    xqc_pkt_num_space_t pns)
+{
+    if (send_ctl == NULL || !send_ctl->diag.enabled || pns >= XQC_PNS_N
+        || send_ctl->diag.ack_build_time[pns] == 0)
+    {
+        return;
+    }
+    xqc_usec_t now = xqc_monotonic_timestamp();
+    uint64_t delay = now >= send_ctl->diag.ack_build_time[pns]
+        ? now - send_ctl->diag.ack_build_time[pns] : 0;
+    send_ctl->diag.ack_socket_send_count++;
+    send_ctl->diag.ack_build_to_send_sum_us += delay;
+    send_ctl->diag.ack_build_to_send_max_us = xqc_max(
+        send_ctl->diag.ack_build_to_send_max_us, delay);
+    send_ctl->diag.ack_build_time[pns] = 0;
+}
+
 int 
 xqc_send_ctl_may_remove_unacked_dgram(xqc_connection_t *conn, xqc_packet_out_t *po)
 {
@@ -372,6 +448,49 @@ xqc_send_ctl_destroy(xqc_send_ctl_t *send_ctl)
                send_ctl->diag.ack_delay_hist[5], send_ctl->diag.ack_delay_hist[6],
                send_ctl->diag.ack_delay_hist[7], send_ctl->diag.ack_delay_hist[8],
                send_ctl->diag.ack_delay_hist[9], send_ctl->diag.ack_delay_hist[10]);
+        printf("[diag_ack_path_timeline] path=%" PRIu64
+               " auth_count=%" PRIu64
+               " ack_due_count=%" PRIu64
+               " ack_build_count=%" PRIu64
+               " ack_socket_send_count=%" PRIu64
+               " recv_to_auth_us_avg=%" PRIu64
+               " recv_to_auth_us_max=%" PRIu64
+               " auth_to_due_us_avg=%" PRIu64
+               " auth_to_due_us_max=%" PRIu64
+               " due_to_build_us_avg=%" PRIu64
+               " due_to_build_us_max=%" PRIu64
+               " build_to_socket_us_avg=%" PRIu64
+               " build_to_socket_us_max=%" PRIu64 "\n",
+               send_ctl->ctl_path->path_id,
+               send_ctl->diag.auth_count,
+               send_ctl->diag.ack_due_count,
+               send_ctl->diag.ack_build_count,
+               send_ctl->diag.ack_socket_send_count,
+               send_ctl->diag.auth_count
+                   ? send_ctl->diag.recv_to_auth_sum_us
+                       / send_ctl->diag.auth_count : 0,
+               send_ctl->diag.recv_to_auth_max_us,
+               send_ctl->diag.ack_due_count
+                   ? send_ctl->diag.auth_to_due_sum_us
+                       / send_ctl->diag.ack_due_count : 0,
+               send_ctl->diag.auth_to_due_max_us,
+               send_ctl->diag.ack_build_count
+                   ? send_ctl->diag.ack_due_to_build_sum_us
+                       / send_ctl->diag.ack_build_count : 0,
+               send_ctl->diag.ack_due_to_build_max_us,
+               send_ctl->diag.ack_socket_send_count
+                   ? send_ctl->diag.ack_build_to_send_sum_us
+                       / send_ctl->diag.ack_socket_send_count : 0,
+               send_ctl->diag.ack_build_to_send_max_us);
+        printf("[diag_ack_snapshot] path=%" PRIu64
+               " app_published=%" PRIu64 " app_committed=%" PRIu64
+               "\n", send_ctl->ctl_path->path_id,
+               atomic_load_explicit(
+                   &send_ctl->ctl_path->ack_snapshot_published[XQC_PNS_APP_DATA],
+                   memory_order_acquire),
+               atomic_load_explicit(
+                   &send_ctl->ctl_path->ack_snapshot_committed[XQC_PNS_APP_DATA],
+                   memory_order_acquire));
         printf("[diag_bbr_path] path=%" PRIu64
                " sample_valid=%" PRIu64 " sample_ack_nothing=%" PRIu64
                " sample_interval_too_small=%" PRIu64

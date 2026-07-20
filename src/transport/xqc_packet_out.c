@@ -5,6 +5,10 @@
 
 #include "src/common/utils/vint/xqc_variable_len_int.h"
 #include "src/transport/xqc_packet_out.h"
+
+#ifndef XQC_TARGET_ACK_SNAPSHOT
+#define XQC_TARGET_ACK_SNAPSHOT 1
+#endif
 #include "src/transport/xqc_conn.h"
 #include "src/common/xqc_memory_pool.h"
 #include "src/transport/xqc_send_ctl.h"
@@ -434,6 +438,7 @@ xqc_write_ack_to_one_packet(xqc_connection_t *conn, xqc_packet_out_t *packet_out
     conn->ack_flag &= ~(1 << (pns + path->path_id * XQC_PNS_N));
 
     path->path_send_ctl->ctl_ack_sent_cnt++;
+    xqc_send_ctl_diag_record_ack_build(path->path_send_ctl, pns, now);
 
     return XQC_OK;
 
@@ -608,6 +613,9 @@ xqc_write_ack_or_mp_ack_or_ext_ack_to_packets(xqc_connection_t *conn)
             }
             
 path_buffer:
+            if (conn->target_ack_immediate_flush) {
+                goto write_new;
+            }
             /* Try to attach ack or mp_ack to packet_out in path_buffer */
             xqc_list_for_each_safe(pos, next, &path->path_schedule_buf[XQC_SEND_TYPE_NORMAL]) {
                 packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
@@ -1564,6 +1572,57 @@ error:
 }
 
 
+static xqc_int_t
+xqc_path_ack_snapshot_prepare_serial(xqc_connection_t *conn,
+    xqc_path_ctx_t *path, xqc_pkt_num_space_t pns, xqc_usec_t now,
+    xqc_path_ack_snapshot_t *snapshot)
+{
+    xqc_pn_ctl_t *pn_ctl = xqc_get_pn_ctl(conn, path);
+    uint64_t generation = atomic_load_explicit(
+        &path->ack_snapshot_published[pns], memory_order_relaxed) + 1;
+    xqc_path_ack_snapshot_t *slot =
+        &path->ack_snapshot[pns][generation & 1];
+    xqc_int_t ret = xqc_recv_record_build_ack_snapshot(
+        &pn_ctl->ctl_recv_record[pns], conn->rx_generation, path->path_id,
+        path->rx_generation, conn->key_generation, generation, pns,
+        path->path_send_ctl->ctl_largest_recv_time[pns], now, slot);
+    if (ret != XQC_OK) {
+        return ret;
+    }
+    atomic_store_explicit(&path->ack_snapshot_published[pns], generation,
+                          memory_order_release);
+    *snapshot = *slot;
+    return XQC_OK;
+}
+
+static ssize_t
+xqc_gen_ack_mp_snapshot_frame(xqc_connection_t *conn,
+    xqc_packet_out_t *packet_out, xqc_usec_t now,
+    const xqc_path_ack_snapshot_t *snapshot,
+    int *has_gap, xqc_packet_number_t *largest_ack)
+{
+    if (snapshot == NULL || snapshot->range_count == 0
+        || snapshot->range_count > XQC_MAX_ACK_RANGE_CNT)
+    {
+        return -XQC_EPARAM;
+    }
+
+    xqc_recv_record_t record;
+    xqc_pktno_range_node_t nodes[XQC_MAX_ACK_RANGE_CNT];
+    xqc_memzero(&record, sizeof(record));
+    xqc_init_list_head(&record.list_head);
+    for (uint32_t i = 0; i < snapshot->range_count; i++) {
+        nodes[i].pktno_range = snapshot->ranges[i];
+        xqc_init_list_head(&nodes[i].list);
+        xqc_list_add_tail(&nodes[i].list, &record.list_head);
+        record.node_count++;
+    }
+
+    return xqc_gen_ack_mp_frame(conn, snapshot->path_id, packet_out, now,
+        conn->local_settings.ack_delay_exponent, &record,
+        snapshot->largest_recv_time, has_gap, largest_ack);
+}
+
 int
 xqc_write_ack_mp_to_one_packet(xqc_connection_t *conn, xqc_path_ctx_t *path,
     xqc_packet_out_t *packet_out, xqc_pkt_num_space_t pns)
@@ -1573,13 +1632,32 @@ xqc_write_ack_mp_to_one_packet(xqc_connection_t *conn, xqc_path_ctx_t *path,
     xqc_packet_number_t largest_ack;
     xqc_usec_t now = xqc_monotonic_timestamp();
 
-    xqc_pn_ctl_t *pn_ctl = xqc_get_pn_ctl(conn, path);
+#if XQC_TARGET_ACK_SNAPSHOT
+    xqc_path_ack_snapshot_t snapshot;
+    ret = xqc_path_ack_snapshot_prepare_serial(conn, path, pns, now,
+                                                &snapshot);
+    if (ret < 0) {
+        goto error;
+    }
+    if (snapshot.conn_generation != conn->rx_generation
+        || snapshot.path_id != path->path_id
+        || snapshot.path_generation != path->rx_generation
+        || snapshot.key_generation != conn->key_generation)
+    {
+        ret = -XQC_EIGNORE_PKT;
+        goto error;
+    }
 
+    ret = xqc_gen_ack_mp_snapshot_frame(conn, packet_out, now, &snapshot,
+                                        &has_gap, &largest_ack);
+#else
+    xqc_pn_ctl_t *pn_ctl = xqc_get_pn_ctl(conn, path);
     ret = xqc_gen_ack_mp_frame(conn, path->path_id, packet_out, now,
-	                           conn->local_settings.ack_delay_exponent,
-                               &pn_ctl->ctl_recv_record[packet_out->po_pkt.pkt_pns],
-							   path->path_send_ctl->ctl_largest_recv_time[pns],
-                               &has_gap, &largest_ack);
+        conn->local_settings.ack_delay_exponent,
+        &pn_ctl->ctl_recv_record[packet_out->po_pkt.pkt_pns],
+        path->path_send_ctl->ctl_largest_recv_time[pns], &has_gap,
+        &largest_ack);
+#endif
     if (ret < 0) {
         goto error;
     }
@@ -1607,6 +1685,11 @@ xqc_write_ack_mp_to_one_packet(xqc_connection_t *conn, xqc_path_ctx_t *path,
         path->path_send_ctl->ctl_largest_recv_time[pns] > 0
             ? now - path->path_send_ctl->ctl_largest_recv_time[pns] : 0,
         has_gap, largest_ack);
+    xqc_send_ctl_diag_record_ack_build(path->path_send_ctl, pns, now);
+#if XQC_TARGET_ACK_SNAPSHOT
+    atomic_store_explicit(&path->ack_snapshot_committed[pns],
+        snapshot.snapshot_generation, memory_order_release);
+#endif
 
     return XQC_OK;
 
@@ -1918,6 +2001,7 @@ xqc_write_ack_ext_to_one_packet(xqc_connection_t *conn, xqc_packet_out_t *packet
     conn->ack_flag &= ~(1 << (pns + path->path_id * XQC_PNS_N));
 
     path->path_send_ctl->ctl_ack_sent_cnt++;
+    xqc_send_ctl_diag_record_ack_build(path->path_send_ctl, pns, now);
 
     return XQC_OK;
 

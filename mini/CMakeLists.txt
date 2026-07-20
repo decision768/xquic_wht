@@ -12,6 +12,7 @@
         MINI_CLIENT_SOURCES
         ${HQ_SOURCES}
         "common.c"
+        "mini_rx_ring.c"
         "mini_client.c"
         "mini_client_cb.c"
         "mini_client_main.c"

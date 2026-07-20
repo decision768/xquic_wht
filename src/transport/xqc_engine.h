@@ -11,6 +11,7 @@
 #include <xquic/xquic.h>
 #include "src/tls/xqc_tls.h"
 #include "src/common/xqc_list.h"
+#include "src/transport/xqc_packet_in.h"
 
 #define XQC_RESET_CNT_ARRAY_LEN 16384
 
@@ -19,6 +20,24 @@ typedef enum {
     XQC_ENG_FLAG_RUNNING    = 1 << 0,
     XQC_ENG_FLAG_NO_DESTROY = 1 << 1,
 } xqc_engine_flag_t;
+
+/*
+ * Persistent receive-work contract.  The initial implementation is used by
+ * the compatibility wrapper on the engine thread; ownership can later move to
+ * a preallocated path ring without changing xqc_engine_packet_process().
+ */
+typedef struct xqc_rx_work_s {
+    xqc_engine_t           *engine;
+    unsigned char           packet_in_buf[XQC_MAX_PACKET_IN_LEN];
+    size_t                  packet_in_size;
+    struct sockaddr_storage local_addr;
+    socklen_t               local_addrlen;
+    struct sockaddr_storage peer_addr;
+    socklen_t               peer_addrlen;
+    xqc_usec_t              recv_time;
+    void                   *user_data;
+    xqc_bool_t              prepared;
+} xqc_rx_work_t;
 
 
 typedef struct xqc_alpn_registration_s {
@@ -107,6 +126,15 @@ void xqc_engine_wakeup_once(xqc_engine_t *engine);
 xqc_connection_t *xqc_engine_conns_hash_find(xqc_engine_t *engine, const xqc_cid_t *cid, char type);
 
 void xqc_engine_process_conn(xqc_connection_t *conn, xqc_usec_t now);
+
+xqc_int_t xqc_engine_packet_prepare_path(xqc_engine_t *engine,
+    const unsigned char *packet_in_buf, size_t packet_in_size,
+    const struct sockaddr *local_addr, socklen_t local_addrlen,
+    const struct sockaddr *peer_addr, socklen_t peer_addrlen,
+    xqc_usec_t recv_time, void *user_data, xqc_rx_work_t *work);
+xqc_int_t xqc_engine_commit_rx_work(xqc_engine_t *engine,
+    xqc_rx_work_t *work);
+void xqc_engine_release_rx_work(xqc_engine_t *engine, xqc_rx_work_t *work);
 
 void xqc_engine_main_logic_internal(xqc_engine_t *engine);
 

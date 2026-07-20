@@ -95,6 +95,30 @@ endif()
 
 include(CMakeOptions.txt)
 
+if(XQC_TARGET_ACK_FIRST)
+    add_definitions(-DXQC_TARGET_ACK_FIRST=1)
+else()
+    add_definitions(-DXQC_TARGET_ACK_FIRST=0)
+endif()
+
+if(XQC_TARGET_RX_WORK_COMPAT)
+    add_definitions(-DXQC_TARGET_RX_WORK_COMPAT=1)
+else()
+    add_definitions(-DXQC_TARGET_RX_WORK_COMPAT=0)
+endif()
+
+if(XQC_TARGET_ACK_SNAPSHOT)
+    add_definitions(-DXQC_TARGET_ACK_SNAPSHOT=1)
+else()
+    add_definitions(-DXQC_TARGET_ACK_SNAPSHOT=0)
+endif()
+
+if(XQC_TARGET_DEFERRED_FRAME_APPLY)
+    add_definitions(-DXQC_TARGET_DEFERRED_FRAME_APPLY=1)
+else()
+    add_definitions(-DXQC_TARGET_DEFERRED_FRAME_APPLY=0)
+endif()
+
 if (XQC_BUILD_OPENSSL)
     if(${SSL_TYPE} MATCHES "boringssl")
         if (XQC_OPENSSL_SMALL)

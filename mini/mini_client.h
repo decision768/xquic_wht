@@ -37,6 +37,7 @@
 #include "../tests/platform.h"
 #include "common.h"
 #include "mini_client_cb.h"
+#include "mini_rx_ring.h"
 
 
 #define DEFAULT_IP   "10.12.54.143"
@@ -63,6 +64,8 @@
 #define XQC_MINI_CLI_WRITE_QUEUE_MAX_TASKS 1024
 #define XQC_MINI_CLI_WRITE_QUEUE_MAX_BYTES (64 * 1024 * 1024)
 #define XQC_MINI_RX_HIST_BUCKETS 8
+#define XQC_MINI_RX_RING_CAPACITY 2048
+#define XQC_MINI_RX_ENGINE_QUANTUM 32
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
 #define TOKEN_FILE                  "token"
@@ -88,6 +91,7 @@ typedef struct xqc_mini_cli_net_config_s {
     size_t              user_send_buf_size;
     size_t              user_recv_buf_size;
     size_t              stream_range_size;
+    int                 parallel_rx;
 
 
 
@@ -234,6 +238,14 @@ typedef struct xqc_mini_cli_rx_path_diag_s {
     uint64_t                byte_count;
     uint64_t                batch_max;
     uint64_t                process_error_count;
+    uint64_t                recvmmsg_us;
+    uint64_t                packet_process_us;
+    uint64_t                ring_published;
+    uint64_t                ring_consumed;
+    uint64_t                ring_full_count;
+    uint64_t                ring_max_depth;
+    uint64_t                ring_full_since_us;
+    uint64_t                ring_full_max_us;
     xqc_usec_t              last_service_time;
     xqc_mini_cli_rx_hist_t  service_gap;
 } xqc_mini_cli_rx_path_diag_t;
@@ -258,6 +270,15 @@ typedef struct xqc_mini_cli_user_path_s {
     xqc_usec_t              last_recover_probe_time;
     xqc_mini_cli_rx_batch_t *rx_batch;
     int                     rx_release_pending;
+    pthread_t               rx_thread;
+    int                     rx_thread_running;
+    int                     rx_ready_fd;
+    int                     rx_space_fd;
+    int                     rx_worker_errno;
+    int                     parallel_rx;
+    uint64_t                rx_generation;
+    xqc_mini_spsc_ring_t    rx_ring;
+    struct event           *ev_rx_ready;
     xqc_mini_cli_rx_path_diag_t rx_diag;
 
 } xqc_mini_cli_user_path_t;
@@ -278,6 +299,8 @@ typedef struct xqc_mini_cli_diag_stats_s {
     uint64_t                rx_datagram_count;
     uint64_t                rx_byte_count;
     uint64_t                finish_recv_count;
+    uint64_t                finish_recv_run_us;
+    uint64_t                finish_recv_run_max_us;
     uint64_t                rx_reentry_skip_count;
     uint64_t                rx_deferred_release_count;
     xqc_usec_t              rx_last_finish_recv_us;
@@ -286,6 +309,7 @@ typedef struct xqc_mini_cli_diag_stats_s {
     xqc_mini_cli_rx_hist_t  rx_callback_us;
     xqc_mini_cli_rx_hist_t  finish_gap_us;
     xqc_mini_cli_rx_hist_t  dispatch_delay_us;
+    xqc_mini_cli_rx_hist_t  path_service_wait_us;
     uint64_t                pwrite_count;
     uint64_t                pwrite_total_bytes;
     uint64_t                pwrite_max_us;
