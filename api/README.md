@@ -3,6 +3,8 @@
 `netins_udp` exposes read-only UDP/QUIC connection status for the real XQUIC
 connections owned by `mini_client` and `mini_server`.
 
+Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md).
+
 ## Scope
 
 - All public names use the `netins_udp_` prefix.
