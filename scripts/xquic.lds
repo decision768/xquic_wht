@@ -130,6 +130,16 @@ XQUIC_VERS_1.0 {
         xqc_xor_code_cb;
         xqc_packet_mask_code_cb;
         netins_udp_get_api_version;
+        netins_udp_client_config_init;
+        netins_udp_client_create;
+        netins_udp_client_connect;
+        netins_udp_client_wait_connected;
+        netins_udp_client_get_state;
+        netins_udp_client_get_connection_id;
+        netins_udp_client_get_snapshot;
+        netins_udp_client_get_last_error_code;
+        netins_udp_client_get_last_error_msg;
+        netins_udp_client_close;
         netins_udp_new;
         netins_udp_close;
         netins_udp_open;

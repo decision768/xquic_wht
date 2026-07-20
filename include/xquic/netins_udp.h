@@ -3,23 +3,23 @@
 
 /**
  * @file netins_udp.h
- * @brief XQUIC UDP/QUIC 连接状态查询接口。
+ * @brief XQUIC UDP/QUIC 独立客户端连接与状态查询接口。
  *
- * 本接口用于读取 mini_client 和 mini_server 已经建立的真实 XQUIC 连接，
- * 主要输出连接生命周期、多路径状态、每条路径地址、收发字节、RTT、丢包率
- * 和区间速率等信息。
+ * 本接口既可读取 mini_client 和 mini_server 已经建立的真实 XQUIC 连接，也可
+ * 由第三方创建一个独立 QUIC/H3 客户端连接。状态部分主要输出连接生命周期、
+ * 多路径状态、每条路径地址、收发字节、RTT、丢包率和区间速率等信息。
  *
  * 与 TCP/MPTCP 版本的 netins 接口不同：
- * 1. 本接口不创建 socket，不负责 connect/listen/send/recv；
- * 2. XQUIC 连接仍由原来的客户端、服务端和 Libevent 线程管理；
- * 3. 第三方只能读取缓存快照，不能通过本接口关闭或修改传输连接；
+ * 1. netins_udp_client_* 可独立创建和关闭客户端连接，但当前尚不发送业务正文；
+ * 2. mini_client/mini_server 已有连接仍由原程序和 Libevent 线程管理；
+ * 3. 状态 getter 只读取缓存快照，不能修改调度、拥塞或已有 mini 连接；
  * 4. 注册表只在当前进程内有效，connection_id 不是 QUIC CID；
- * 5. 第三方代码必须与 mini_client/mini_server 使用同一份 netins_udp 实现。
+ * 5. 第三方代码必须与连接宿主使用同一份 netins_udp 实现。
  *
  * 线程说明：所有公开查询函数均可从第三方线程调用。查询函数只复制互斥锁
- * 保护的缓存快照，不会在第三方线程中调用 XQUIC 引擎。当前 mini 程序每
- * 500 ms 在 XQUIC/Libevent 线程中刷新一次快照，因此第三方通常每 500 ms
- * 或 1 s 查询一次即可。
+ * 保护的缓存快照，不会在第三方线程中调用 XQUIC 引擎。mini 程序在
+ * XQUIC/Libevent 线程中刷新快照，独立客户端在自己的 poll 引擎线程中刷新；
+ * 当前刷新周期均约为 500 ms，因此第三方通常每 500 ms 或 1 s 查询一次即可。
  *
  * 输出结构体说明：调用 getter 前必须使用对应的 INITIALIZER 初始化，例如：
  *
@@ -61,11 +61,19 @@ extern "C" {
 #define NETINS_UDP_ADDRESS_LEN            128U
 /** 错误信息字符串缓冲区长度。 */
 #define NETINS_UDP_ERROR_MSG_LEN          256U
+/** 独立客户端服务器地址缓冲区长度。 */
+#define NETINS_UDP_SERVER_ADDRESS_LEN     128U
+/** 独立客户端 TLS SNI/主机名缓冲区长度。 */
+#define NETINS_UDP_SERVER_NAME_LEN        256U
+/** 当前独立客户端连接接口的版本。 */
+#define NETINS_UDP_CLIENT_API_VERSION     1U
 /** 无效的进程内 connection_id。 */
 #define NETINS_UDP_INVALID_CONNECTION_ID  UINT64_MAX
 
 /** 不透明的连接状态句柄，第三方不能直接访问其内部成员。 */
 typedef struct netins_udp_s netins_udp_t;
+/** 不透明的独立 QUIC/H3 客户端对象。 */
+typedef struct netins_udp_client_s netins_udp_client_t;
 
 /** API 函数返回值。 */
 typedef enum netins_udp_result_e {
@@ -117,6 +125,54 @@ typedef enum netins_udp_log_level_e {
     NETINS_UDP_LOG_LEVEL_WARN = 2,  /**< 可恢复的异常。 */
     NETINS_UDP_LOG_LEVEL_ERROR = 3  /**< 错误信息。 */
 } netins_udp_log_level_t;
+
+/**
+ * 独立 QUIC/H3 客户端配置。
+ *
+ * 第三方应先调用 netins_udp_client_config_init()，再填写服务器地址、端口
+ * 和可选网卡。当前实现由客户端对象自己创建 XQUIC engine、UDP socket
+ * 和后台事件线程，不依赖 mini_client。
+ */
+typedef struct netins_udp_client_config_s {
+    /** 结构体字节大小。 */
+    uint32_t struct_size;
+    /** NETINS_UDP_CLIENT_API_VERSION。 */
+    uint32_t api_version;
+    /** 服务器 IP 地址或可由 getaddrinfo() 解析的主机名。 */
+    char server_address[NETINS_UDP_SERVER_ADDRESS_LEN];
+    /** 服务器 UDP 端口。 */
+    uint16_t server_port;
+    /** 对齐预留字段，必须保持为 0。 */
+    uint16_t reserved16;
+    /** TLS SNI/HTTP 主机名；为空时使用 server_address。 */
+    char server_name[NETINS_UDP_SERVER_NAME_LEN];
+    /**
+     * 按优先顺序配置的本地网卡名。interface_count=0 时使用系统默认路由。
+     * 当前实现支持在 XQUIC 允许创建路径后使用后续接口建立多路径。
+     */
+    char interface_names[NETINS_UDP_MAX_PATHS]
+        [NETINS_UDP_INTERFACE_NAME_LEN];
+    /** interface_names[] 中有效元素数量。 */
+    uint32_t interface_count;
+    /** 非 0 时协商并尝试建立多路径。 */
+    int enable_multipath;
+    /** connect() 等待握手的最长时间，0 使用默认 20000 ms。 */
+    uint32_t connect_timeout_ms;
+    /** SO_SNDBUF 字节数，0 使用默认 16 MiB。 */
+    int kernel_sndbuf;
+    /** SO_RCVBUF 字节数，0 使用默认 16 MiB。 */
+    int kernel_rcvbuf;
+    /** 初始拥塞窗口包数，0 使用当前项目默认值 100。 */
+    uint32_t initial_cwnd_packets;
+    /** 1 表示校验证书；0 保持当前测试环境的不强制校验行为。 */
+    int verify_certificate;
+    /** ABI 预留字段，第三方不得使用。 */
+    uint64_t reserved[8];
+} netins_udp_client_config_t;
+
+/** 独立客户端配置的零值初始化器；推荐再调用 config_init() 设置默认值。 */
+#define NETINS_UDP_CLIENT_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_client_config_t), NETINS_UDP_CLIENT_API_VERSION }
 
 /**
  * 日志回调。
@@ -351,6 +407,78 @@ typedef struct netins_udp_snapshot_s {
  * @return NETINS_UDP_API_VERSION；当前为 1。
  */
 NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
+
+/**
+ * 使用当前项目推荐值初始化独立客户端配置。
+ * @param config 调用方分配的配置结构，不能为空。
+ * @note 调用后必须填写 server_address 和 server_port。
+ */
+NETINS_UDP_PUBLIC void netins_udp_client_config_init(
+    netins_udp_client_config_t *config);
+
+/**
+ * 创建一个尚未连接的独立 QUIC/H3 客户端对象。
+ * @param config 已初始化的客户端配置。
+ * @param out_client 输出客户端对象，成功后由 netins_udp_client_close() 释放。
+ * @return netins_udp_result_t。
+ * @note 本函数只分配资源，不启动网络线程，也不依赖 mini_client。
+ */
+NETINS_UDP_PUBLIC int netins_udp_client_create(
+    const netins_udp_client_config_t *config,
+    netins_udp_client_t **out_client);
+
+/**
+ * 建立真实 QUIC/H3 连接并等待握手完成。
+ * @param client netins_udp_client_create() 返回的客户端对象。
+ * @return NETINS_UDP_OK；超时或建连失败返回 NETINS_UDP_ERROR。
+ * @note 最长等待时间来自 config.connect_timeout_ms。即使等待超时，后台握手
+ *       仍可能继续，调用方可再次使用 netins_udp_client_wait_connected() 等待，
+ *       或调用 netins_udp_client_close() 取消连接。
+ */
+NETINS_UDP_PUBLIC int netins_udp_client_connect(
+    netins_udp_client_t *client);
+
+/**
+ * 等待已启动客户端完成 QUIC/H3 握手。
+ * @param client 有效客户端对象。
+ * @param timeout_ms 等待时间；0 表示仅检查当前状态，不阻塞。
+ * @return NETINS_UDP_OK；超时、关闭或错误返回 NETINS_UDP_ERROR。
+ */
+NETINS_UDP_PUBLIC int netins_udp_client_wait_connected(
+    netins_udp_client_t *client, uint32_t timeout_ms);
+
+/** 获取独立客户端当前 netins_udp_conn_state_t 状态。 */
+NETINS_UDP_PUBLIC int netins_udp_client_get_state(
+    netins_udp_client_t *client);
+
+/**
+ * 获取独立客户端连接在进程内状态注册表中的 connection_id。
+ * 尚未成功创建 XQUIC 连接时返回 NETINS_UDP_INVALID_CONNECTION_ID。
+ */
+NETINS_UDP_PUBLIC uint64_t netins_udp_client_get_connection_id(
+    netins_udp_client_t *client);
+
+/**
+ * 获取独立客户端的完整状态快照。
+ * @param out 调用前必须使用 NETINS_UDP_SNAPSHOT_INITIALIZER。
+ */
+NETINS_UDP_PUBLIC int netins_udp_client_get_snapshot(
+    netins_udp_client_t *client, netins_udp_snapshot_t *out);
+
+/** 获取独立客户端最后一次连接/运行时错误码。 */
+NETINS_UDP_PUBLIC int netins_udp_client_get_last_error_code(
+    netins_udp_client_t *client);
+
+/** 将独立客户端最后一次错误说明复制到调用方缓冲区。 */
+NETINS_UDP_PUBLIC int netins_udp_client_get_last_error_msg(
+    netins_udp_client_t *client, char *buffer, size_t buffer_len);
+
+/**
+ * 关闭连接、停止后台线程并释放独立客户端。
+ * @note 可安全传入 NULL。调用后客户端指针失效。
+ */
+NETINS_UDP_PUBLIC void netins_udp_client_close(
+    netins_udp_client_t *client);
 
 /**
  * 创建一个尚未绑定 XQUIC 连接的适配器。

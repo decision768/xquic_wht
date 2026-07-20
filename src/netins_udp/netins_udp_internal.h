@@ -9,6 +9,7 @@
 /* Host-side lifecycle functions. Call these from the XQUIC engine thread. */
 int netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
     const xqc_cid_t *cid, netins_udp_role_t role);
+int netins_udp_update_cid(netins_udp_t *netins, const xqc_cid_t *cid);
 int netins_udp_refresh(netins_udp_t *netins);
 int netins_udp_mark_handshake_finished(netins_udp_t *netins);
 int netins_udp_mark_closing(netins_udp_t *netins);

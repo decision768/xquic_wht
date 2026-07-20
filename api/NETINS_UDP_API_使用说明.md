@@ -2,16 +2,18 @@
 
 ## 概述
 
-NetIns UDP 是面向 XQUIC UDP/QUIC 连接的只读状态查询接口。它用于读取
-`mini_client` 和 `mini_server` 已经建立的真实 QUIC 连接，向第三方提供连接状态、
-多路径状态、每条路径地址、网卡名称、收发字节、RTT、丢包率、在途数据量和区间
-速率等信息。
+NetIns UDP 是面向 XQUIC UDP/QUIC 的独立客户端连接与状态查询接口。它既可以读取
+`mini_client` 和 `mini_server` 已经建立的真实 QUIC 连接，也可以由第三方创建和
+关闭一条独立 QUIC/H3 客户端连接，并提供连接状态、多路径状态、每条路径地址、
+网卡名称、收发字节、RTT、丢包率、在途数据量和区间速率等信息。当前独立客户端
+版本尚未提供业务数据发送与接收。
 
 NetIns UDP 与 MPTCP 版本 NetIns 的定位不同：
 
-- NetIns UDP 不创建 UDP socket，也不提供 `connect`、`listen`、`send` 或 `recv`。
-- QUIC 连接仍由原有 XQUIC 客户端、服务端和 Libevent 线程管理。
-- 第三方只读取缓存快照，不能通过本接口修改、关闭或调度真实 QUIC 连接。
+- `netins_udp_client_*` 会为第三方创建 UDP socket、XQUIC engine 和连接线程。
+- 原有 mini QUIC 连接仍由原客户端、服务端和 Libevent 线程管理。
+- 状态 getter 只读取缓存快照；第三方只能关闭自己创建的客户端，不能关闭或调度
+  mini_client/mini_server 已有连接。
 - 状态注册表位于 `mini_client` 或 `mini_server` 进程内部，不提供跨进程查询。
 - 所有公开函数名使用 `netins_udp_` 前缀，以便与 TCP/MPTCP 接口区分。
 
@@ -36,9 +38,10 @@ NetIns UDP 与 MPTCP 版本 NetIns 的定位不同：
 
 ## 接口工作方式
 
-XQUIC 连接建立后，宿主程序为该连接注册一个 NetIns UDP 状态对象。宿主程序当前
-每 500 ms 在 XQUIC/Libevent 引擎线程中刷新一次缓存快照。第三方线程调用公开 API
-时只复制这份加锁保护的快照，不会直接进入 XQUIC 引擎。
+XQUIC 连接建立后，宿主程序为该连接注册一个 NetIns UDP 状态对象。mini 程序在
+XQUIC/Libevent 引擎线程中刷新快照，独立客户端在自己的 `poll` 引擎线程中刷新；
+当前刷新周期均约为 500 ms。第三方线程调用公开 API 时只复制这份加锁保护的快照，
+不会直接进入 XQUIC 引擎。
 
 典型查询流程如下：
 
@@ -59,9 +62,145 @@ XQUIC 真实连接
 推荐每 500 ms 或 1 s 查询一次。更高频率不会得到更细的传输采样，而且会增加无效
 调用。
 
+除读取已有连接外，本版本还提供独立客户端建连接口。它不启动或复用
+`mini_client`，而是为第三方对象单独创建 UDP socket、XQUIC engine 和后台
+`poll` 线程。当前阶段只负责建立、等待和关闭真实 QUIC/H3 连接，数据发送与接收
+接口将在建连生命周期通过 Linux/AArch64 实机验证后继续增加。
+
 ---
 
 ## API 函数说明
+
+### 0. 独立客户端连接
+
+#### `netins_udp_client_config_init()`
+
+初始化独立客户端配置的版本、超时、socket 缓冲区和初始拥塞窗口默认值。
+
+```c
+void netins_udp_client_config_init(netins_udp_client_config_t *config);
+```
+
+调用后必须填写 `server_address` 和 `server_port`。`server_name` 用于 TLS SNI，
+为空时使用 `server_address`。
+
+#### `netins_udp_client_create()`
+
+创建尚未连接的客户端对象。该函数不创建网络线程。
+
+```c
+int netins_udp_client_create(
+    const netins_udp_client_config_t *config,
+    netins_udp_client_t **out_client);
+```
+
+#### `netins_udp_client_connect()`
+
+创建 UDP socket 和 XQUIC/H3 engine，启动后台线程并等待握手完成。
+
+```c
+int netins_udp_client_connect(netins_udp_client_t *client);
+```
+
+成功返回 `NETINS_UDP_OK`。超时或连接失败返回 `NETINS_UDP_ERROR`，详细原因通过
+客户端错误接口取得。连接超时后后台握手仍可能继续，可再次调用
+`netins_udp_client_wait_connected()` 或直接关闭客户端。
+
+`connect()` 成功表示 QUIC/H3 握手完成，不保证所有附加路径都已经验证完成。双路径
+程序应继续查询快照，直到 `active_path_count` 达到期望值，或由自己的业务超时结束等待。
+指定网卡时底层使用 Linux `SO_BINDTODEVICE`，运行账户可能需要相应网络权限。
+`verify_certificate=1` 使用 TLS 库的默认信任链并拒绝不可信证书；当前版本不提供
+自定义 CA 文件加载接口。
+
+#### `netins_udp_client_wait_connected()`
+
+```c
+int netins_udp_client_wait_connected(
+    netins_udp_client_t *client, uint32_t timeout_ms);
+```
+
+等待已启动连接完成握手。`timeout_ms=0` 只检查当前状态，不阻塞。
+
+#### 独立客户端状态接口
+
+```c
+int netins_udp_client_get_state(netins_udp_client_t *client);
+
+uint64_t netins_udp_client_get_connection_id(
+    netins_udp_client_t *client);
+
+int netins_udp_client_get_snapshot(
+    netins_udp_client_t *client,
+    netins_udp_snapshot_t *snapshot);
+```
+
+客户端建立的连接会自动注册到现有进程内状态注册表，因此既可以直接从客户端对象
+取得快照，也可以使用 `netins_udp_list_connections()` 查询。
+
+#### 独立客户端错误和关闭接口
+
+```c
+int netins_udp_client_get_last_error_code(
+    netins_udp_client_t *client);
+
+int netins_udp_client_get_last_error_msg(
+    netins_udp_client_t *client,
+    char *buffer, size_t buffer_len);
+
+void netins_udp_client_close(netins_udp_client_t *client);
+```
+
+`netins_udp_client_close()` 会请求关闭 H3 连接、停止后台线程、销毁 XQUIC engine、
+关闭所有路径 socket，并释放客户端对象。
+
+**独立建连示例：**
+
+```c
+netins_udp_client_config_t config;
+netins_udp_client_config_init(&config);
+
+snprintf(config.server_address, sizeof(config.server_address),
+    "%s", "10.12.54.143");
+config.server_port = 8443;
+snprintf(config.server_name, sizeof(config.server_name),
+    "%s", "test.xquic.com");
+
+snprintf(config.interface_names[0],
+    sizeof(config.interface_names[0]), "%s", "rmnet_data0");
+snprintf(config.interface_names[1],
+    sizeof(config.interface_names[1]), "%s", "usb0");
+config.interface_count = 2;
+config.enable_multipath = 1;
+
+netins_udp_client_t *client = NULL;
+int ret = netins_udp_client_create(&config, &client);
+if (ret == NETINS_UDP_OK) {
+    ret = netins_udp_client_connect(client);
+}
+
+if (ret == NETINS_UDP_OK) {
+    netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    ret = netins_udp_client_get_snapshot(client, &snapshot);
+}
+
+netins_udp_client_close(client);
+```
+
+当前独立连接 API 没有提供 `send/recv`。连接成功只证明 QUIC/H3 握手和状态查询
+正常，不能用于传输业务正文。
+
+可在构建目录中生成独立建连测试程序：
+
+```sh
+cmake -DNETINS_UDP_BUILD_CONNECT_EXAMPLE=ON ..
+make -j netins_udp_connect_cli
+
+./netins_udp_connect_cli \
+    10.12.54.143 8443 test.xquic.com rmnet_data0 usb0
+```
+
+成功时程序输出 `connected`、进程内 `connection_id`、连接状态和当前路径数量，
+随后正常关闭连接。只测试默认路由时省略最后两个网卡参数。
 
 ### 1. API 版本和返回值
 
@@ -731,7 +870,9 @@ void third_party_poll_udp_server(void)
 
 - 公共头文件：`include/xquic/netins_udp.h`
 - API 实现：`src/netins_udp/netins_udp.c`
+- 独立客户端建连实现：`src/netins_udp/netins_udp_client.c`
 - 查询示例：`api/examples/netins_udp_snapshot_example.c`
+- 独立建连示例：`api/examples/netins_udp_connect_example.c`
 - 内部接口：`src/netins_udp/netins_udp_internal.h`
 - 单元测试：`tests/netins_udp/test_netins_udp.c`
 - 真实连接日志检查：`tests/netins_udp/verify_real_connection.py`
@@ -849,35 +990,39 @@ python3 tests/netins_udp/verify_real_connection.py \
 
 ### 1. 同进程限制
 
-NetIns UDP 注册表只存在于 `mini_client` 或 `mini_server` 当前进程中。另起一个
-独立可执行程序，即使链接同名动态库，也不能自动读取其他进程中的连接。跨进程
-读取需要额外实现 Unix domain socket、共享内存或其他 IPC 服务，本 API 当前不包含
-该能力。
+NetIns UDP 注册表只存在于创建连接的当前进程中。独立 API 客户端可以查询自己
+创建的连接，但不能自动读取另一个 `mini_client` 或 `mini_server` 进程中的连接。
+跨进程读取需要额外实现 Unix domain socket、共享内存或其他 IPC 服务，本 API
+当前不包含该能力。
 
-### 2. 只读能力
+### 2. 连接控制与只读状态的边界
 
-本 API 只查询状态，不提供以下能力：
+`netins_udp_client_*` 可以创建和关闭它自己拥有的客户端连接。状态 getter 仍然
+只读，当前不提供以下能力：
 
-- 创建或关闭真实 QUIC 连接
 - 主动发送或接收业务数据
 - 修改拥塞控制、调度器或 ACK 参数
-- 启用、冻结或切换路径
+- 控制 mini_client/mini_server 已有连接
+- 手工冻结或切换某一条路径
 
 `netins_udp_close()` 只释放查询句柄，不关闭传输连接。
+`netins_udp_client_close()` 则会关闭由该客户端对象创建的真实连接。
 
 ### 3. 线程安全
 
 公开查询函数可以从第三方线程调用。接口通过互斥锁复制缓存快照，不会从第三方
-线程直接调用 XQUIC 引擎。日志回调可能运行在引擎线程，必须保持轻量。
+线程直接调用 XQUIC 引擎。独立客户端的 XQUIC engine 只由其私有后台线程驱动。
+日志回调可能运行在引擎线程，必须保持轻量。
 
 ### 4. 查询频率
 
-宿主当前约每 500 ms 刷新一次状态。建议查询周期为 500 ms 或 1 s。频率远高于
-500 ms 时，连续多次结果可能完全相同。
+mini 宿主和独立客户端当前都约每 500 ms 刷新一次状态。建议查询周期为 500 ms
+或 1 s。频率远高于 500 ms 时，连续多次结果可能完全相同。
 
 ### 5. 资源管理
 
 - `netins_udp_open()` 成功后必须调用 `netins_udp_close()`。
+- `netins_udp_client_create()` 成功后必须调用 `netins_udp_client_close()`。
 - 不要重复关闭同一个句柄。
 - 关闭后不要继续使用原指针。
 - `netins_udp_get_snapshot_by_id()` 不要求调用方持有句柄，更适合简单轮询。
@@ -905,7 +1050,7 @@ NetIns UDP 注册表只存在于 `mini_client` 或 `mini_server` 当前进程中
 
 ### 9. 故障隔离
 
-NetIns UDP 的适配器分配、绑定或刷新定时器失败时，只会禁用该连接的状态查询，
-不会主动终止 QUIC 数据传输。第三方应把“查询不到状态”和“传输连接失败”作为两类
-不同故障处理。
+mini 程序中的状态适配器分配、绑定或刷新定时器失败时，只会禁用状态查询，不会
+主动终止 mini 的 QUIC 数据传输。独立客户端的 socket、engine 或状态绑定失败时，
+`netins_udp_client_connect()` 会返回错误，因为这些资源属于该客户端自己的连接。
 

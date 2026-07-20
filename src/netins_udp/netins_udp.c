@@ -455,6 +455,25 @@ netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
 }
 
 int
+netins_udp_update_cid(netins_udp_t *netins, const xqc_cid_t *cid)
+{
+    if (netins == NULL || cid == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->lock);
+    if (!netins->bound || netins->engine == NULL) {
+        netins_udp_set_error_locked(netins, ENOTCONN,
+            "adapter is not bound to a live connection");
+        pthread_mutex_unlock(&netins->lock);
+        return NETINS_UDP_ERROR;
+    }
+    memcpy(&netins->cid, cid, sizeof(netins->cid));
+    pthread_mutex_unlock(&netins->lock);
+    return NETINS_UDP_OK;
+}
+
+int
 netins_udp_refresh(netins_udp_t *netins)
 {
     xqc_engine_t *engine = NULL;

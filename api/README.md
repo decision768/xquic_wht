@@ -1,9 +1,52 @@
-# netins_udp connection status API
+# netins_udp connection and status API
 
 `netins_udp` exposes read-only UDP/QUIC connection status for the real XQUIC
-connections owned by `mini_client` and `mini_server`.
+connections owned by `mini_client` and `mini_server`. It also provides an
+independent client connection-lifecycle API; application data transfer is not
+part of this connection-only revision yet.
 
 Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md).
+
+## Independent client connection
+
+The library also provides a first connection-lifecycle API that creates a real
+QUIC/H3 client without starting `mini_client`:
+
+1. Initialize `netins_udp_client_config_t` with
+   `netins_udp_client_config_init()`.
+2. Set `server_address`, `server_port`, the optional TLS `server_name`, and up
+   to `NETINS_UDP_MAX_PATHS` interface names.
+3. Call `netins_udp_client_create()` and `netins_udp_client_connect()`.
+4. Query the connection through `netins_udp_client_get_snapshot()` or the
+   existing process-local registry.
+5. Release the connection and its private engine thread with
+   `netins_udp_client_close()`.
+
+`netins_udp_client_connect()` blocks until the H3 handshake completes or the
+configured timeout expires. The client owns its UDP sockets, XQUIC engine, poll
+thread, multipath creation attempts, and status adapter. It does not alter or
+reuse the engines owned by `mini_client` or `mini_server`.
+
+A successful connect means that the QUIC/H3 handshake is complete. Additional
+multipath paths can still be validating, so applications should poll the
+snapshot until the expected `active_path_count` appears. Binding sockets to
+named interfaces uses Linux `SO_BINDTODEVICE` and can require elevated network
+capabilities. Certificate verification uses the TLS library's default trust
+chain; custom CA loading is not part of this revision.
+
+This version intentionally covers connection lifecycle only. Application data
+send/receive and HTTP/3 request APIs will be added separately after the
+connection path is validated on Linux/AArch64. See
+`examples/netins_udp_connect_example.c`.
+
+Build and run the standalone connection check with:
+
+```sh
+cmake -DNETINS_UDP_BUILD_CONNECT_EXAMPLE=ON ..
+make -j netins_udp_connect_cli
+./netins_udp_connect_cli 10.12.54.143 8443 test.xquic.com \
+    rmnet_data0 usb0
+```
 
 ## Scope
 
@@ -11,14 +54,15 @@ Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使
 - The API reports connection lifecycle, multipath state, path state, addresses,
   interface names when known, packet counts, byte counters, RTT, loss, inflight
   bytes, and interval rates.
-- The registry is process-local. A third-party module must run in the same
-  process and use the same linked `netins_udp` implementation instance as
-  `mini_client` or `mini_server`. Code compiled directly into the host
-  executable meets this rule. Do not load a second private copy of `libxquic`
-  in a plugin. Cross-process access requires a separate IPC service and is not
+- The registry is process-local. An independent client can query the connection
+  it created in its own process. A monitor of `mini_client` or `mini_server`
+  must still run in that mini process and use the same linked `netins_udp`
+  implementation instance. Do not load a second private copy of `libxquic` in
+  a plugin. Cross-process access requires a separate IPC service and is not
   part of this API.
-- Third-party code only reads mutex-protected snapshots. It never calls the
-  XQUIC engine and cannot close or mutate the transport connection.
+- Snapshot getters only copy mutex-protected state and never call the XQUIC
+  engine. A caller can close a client it created with `netins_udp_client_*`,
+  but cannot close or mutate connections owned by the mini applications.
 
 ## Third-party lifecycle
 

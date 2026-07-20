@@ -110,6 +110,9 @@ main(void)
     memset(&cid, 0, sizeof(cid));
     assert(netins_udp_bind(host, (xqc_engine_t *)(uintptr_t)1, &cid,
         NETINS_UDP_ROLE_CLIENT) == NETINS_UDP_OK);
+    xqc_cid_t updated_cid;
+    memset(&updated_cid, 0, sizeof(updated_cid));
+    assert(netins_udp_update_cid(host, &updated_cid) == NETINS_UDP_OK);
 
     struct sockaddr_in local_addr;
     struct sockaddr_in peer_addr;

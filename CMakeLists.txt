@@ -417,6 +417,7 @@ set (
     XQC_SOURCE
     ${XQC_SOURCE}
     "src/netins_udp/netins_udp.c"
+    "src/netins_udp/netins_udp_client.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
@@ -455,9 +456,29 @@ if(NETINS_UDP_BUILD_TESTS)
 
     add_library(netins_udp_example OBJECT
         api/examples/netins_udp_snapshot_example.c
+        api/examples/netins_udp_connect_example.c
     )
     target_include_directories(netins_udp_example PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+endif()
+
+option(NETINS_UDP_BUILD_CONNECT_EXAMPLE
+    "build the standalone netins UDP connection example" OFF)
+if(NETINS_UDP_BUILD_CONNECT_EXAMPLE)
+    add_executable(netins_udp_connect_cli
+        api/examples/netins_udp_connect_example.c
+        api/examples/netins_udp_connect_main.c
+    )
+    target_include_directories(netins_udp_connect_cli PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(netins_udp_connect_cli PRIVATE
+        xquic-static
+        ${SSL_LIB_PATH}
+        pthread
+        dl
+        m
     )
 endif()
 
@@ -501,5 +522,7 @@ install(FILES
     api/README.md
     api/NETINS_UDP_API_使用说明.md
     api/examples/netins_udp_snapshot_example.c
+    api/examples/netins_udp_connect_example.c
+    api/examples/netins_udp_connect_main.c
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
 )
