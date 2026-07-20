@@ -54,8 +54,14 @@
     endif()
 
 
-    target_include_directories(mini_server PRIVATE ${ZLOG_INCLUDE_DIR})
-    target_include_directories(mini_client PRIVATE ${ZLOG_INCLUDE_DIR})
+    target_include_directories(mini_server PRIVATE
+        ${ZLOG_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/netins_udp
+    )
+    target_include_directories(mini_client PRIVATE
+        ${ZLOG_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/src/netins_udp
+    )
 
     target_link_libraries(mini_server ${APP_DEPEND_LIBS} xquic-static ${LIBEVENT_LIBRARY} ${LIBEVENT_PTHREADS_LIBRARY} ${ZLOG_STATIC_LIB})
     target_link_libraries(mini_client ${APP_DEPEND_LIBS} xquic-static ${LIBEVENT_LIBRARY} ${LIBEVENT_PTHREADS_LIBRARY} ${ZLOG_STATIC_LIB})

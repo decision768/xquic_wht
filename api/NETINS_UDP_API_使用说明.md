@@ -730,10 +730,11 @@ void third_party_poll_udp_server(void)
 ### 1. 所需文件
 
 - 公共头文件：`include/xquic/netins_udp.h`
-- API 实现：`api/netins_udp.c`
+- API 实现：`src/netins_udp/netins_udp.c`
 - 查询示例：`api/examples/netins_udp_snapshot_example.c`
-- 单元测试：`api/tests/test_netins_udp.c`
-- 真实连接日志检查：`api/tests/verify_real_connection.py`
+- 内部接口：`src/netins_udp/netins_udp_internal.h`
+- 单元测试：`tests/netins_udp/test_netins_udp.c`
+- 真实连接日志检查：`tests/netins_udp/verify_real_connection.py`
 
 ### 2. CMake 集成
 
@@ -823,13 +824,13 @@ ctest --output-on-failure -R netins_udp_unit_test
 使用项目提供的检查脚本：
 
 ```sh
-python3 api/tests/verify_real_connection.py client.log server.log
+python3 tests/netins_udp/verify_real_connection.py client.log server.log
 ```
 
 只有在明确执行单路径测试时才使用：
 
 ```sh
-python3 api/tests/verify_real_connection.py \
+python3 tests/netins_udp/verify_real_connection.py \
     --allow-single-path client.log server.log
 ```
 

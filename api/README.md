@@ -80,7 +80,7 @@ dual-path run, and no registry entry after connection close.
 Validate logs from one real client/server run with:
 
 ```sh
-python3 api/tests/verify_real_connection.py client.log server.log
+python3 tests/netins_udp/verify_real_connection.py client.log server.log
 ```
 
 Use `--allow-single-path` only for an intentional single-interface test.

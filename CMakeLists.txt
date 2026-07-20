@@ -416,7 +416,7 @@ endif()
 set (
     XQC_SOURCE
     ${XQC_SOURCE}
-    "api/netins_udp.c"
+    "src/netins_udp/netins_udp.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
@@ -443,11 +443,12 @@ option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
 if(NETINS_UDP_BUILD_TESTS)
     enable_testing()
     add_executable(netins_udp_unit_test
-        api/netins_udp.c
-        api/tests/test_netins_udp.c
+        src/netins_udp/netins_udp.c
+        tests/netins_udp/test_netins_udp.c
     )
     target_include_directories(netins_udp_unit_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
     )
     target_link_libraries(netins_udp_unit_test pthread)
     add_test(NAME netins_udp_unit_test COMMAND netins_udp_unit_test)
@@ -498,6 +499,7 @@ install(FILES include/xquic/netins_udp.h
 )
 install(FILES
     api/README.md
+    api/NETINS_UDP_API_使用说明.md
     api/examples/netins_udp_snapshot_example.c
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
 )

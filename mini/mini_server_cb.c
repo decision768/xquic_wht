@@ -6,7 +6,7 @@
  */
 
 #include "mini_server_cb.h"
-#include "../api/netins_udp_internal.h"
+#include "netins_udp_internal.h"
 #include <errno.h>
 #include <string.h>
 #include <strings.h>

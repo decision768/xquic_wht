@@ -10,7 +10,7 @@
 
 #include <arpa/inet.h>
 
-#include "../netins_udp_internal.h"
+#include "netins_udp_internal.h"
 
 static xqc_conn_stats_t g_mock_stats;
 

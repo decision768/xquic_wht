@@ -1,5 +1,5 @@
 #include "mini_client.h"
-#include "../api/netins_udp_internal.h"
+#include "netins_udp_internal.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <netdb.h>
