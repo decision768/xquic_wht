@@ -1,0 +1,379 @@
+/oemdata/gx/xquic_file #./mini_client
+[resolved-rx] mode=parallel_ingress_recvmmsg per_path=512 ring_capacity=2048 engine_quantum_per_path=128 engine_round_max=256 rounds=1
+[diag_target_xquic] baseline=c3f7834475f02ebb8faaf1f8f629e534167391c1 mode=parallel_ingress_recvmmsg rx_syscall_batch=512 ring_capacity=2048 engine_quantum_per_path=128 engine_round_max=256 ack_first=1 rx_work_compat=0 ack_snapshot=1 deferred_frame_apply=1 parallel_auth=0 commit_owner=engine_thread rx_memory_per_path=3897344 rx_memory_total=7794688
+[diag_initial_path] selected=rmnet_data0 original_index=0
+[stats] init socket succesfully 
+[stats] path[0] prepared interface rmnet_data0 on fd 9 (inactive)
+[diag_rx_path_state] action=activate idx=0 id=0 interface=rmnet_data0 fd=9
+[stats] path[0] interface rmnet_data0 bound fd 9
+[diag_path_map] slot=0 path_id=0 fd=9 interface=rmnet_data0 local=10.250.56.108:55515
+[stats] init socket succesfully 
+[stats] path[1] prepared interface usb0 on fd 12 (inactive)
+[diag_mp_config] enabled=1 interval_ms=250 scheduler=balanced
+[diag_rx_work_pool] enabled=1 capacity=128 slot_bytes=2832 total_bytes=362496
+[stats] init xquic connection success 
+[stats] requests are deferred until handshake/path readiness
+[stats] start save_tp_cb
+[warn] xqc_conn_create_path delayed: no available path id yet, will retry
+[stats] active paths after handshake: 1
+[diag_path_gate] wait after handshake ready=1 target=2 round=0/5
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=1 empty_calls=0 fair_rounds=1 packets=10 bytes=1767 callback_us_p50=20000 p95=20000 p99=20000 max=6982 finish_recv=1 finish_gap_us_p50=0 p95=0 p99=0 max=0 finish_recv_run_us=147 finish_recv_run_max_us=147 dispatch_delay_us_p50=5000 p95=20000 p99=20000 max=6856 path_service_wait_us_p50=0 p95=0 p99=0 max=0 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=1 batch_calls=2 eagain=0 packets=10 bytes=1767 batch_max=10 service_gap_us_p50=0 p95=0 p99=0 max=0 process_errors=0 recvmmsg_us=144 packet_process_us=6771 ring_published=10 ring_consumed=10 ring_full=0 ring_full_max_us=0 ring_max_depth=9
+[diag_rx_path][periodic] idx=1 id=18446744073709551615 interface=usb0 events=0 batch_calls=0 eagain=0 packets=0 bytes=0 batch_max=0 service_gap_us_p50=0 p95=0 p99=0 max=0 process_errors=0 recvmmsg_us=0 packet_process_us=0 ring_published=0 ring_consumed=0 ring_full=0 ring_full_max_us=0 ring_max_depth=0
+[diag_quic][periodic] send=12 recv=10 lost=0 loss_rate=0.000% spurious_loss=1 srtt_us=243239 min_rtt_us=242775 inflight=89 mp_state=0 enable_mp=1 total_app_bytes=406 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=243239 send_bytes=252 recv_bytes=154 send_pkts=12 recv_pkts=10 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=0 pwrite_bytes=0 pwrite_max_us=0 fsync_us=0 async_enq=0 async_enq_bytes=0 async_q_depth=0 async_q_bytes=0 async_q_max=0 async_q_bytes_max=0 async_wait_max_us=0
+[diag_bbr_tick] path=0 mode=STARTUP full_bw=0 est_bw_Bps=5486 sample_rate_Bps=880 sample_interval_us=248681 ack_elapse_us=43677 send_elapse_us=248681 sample_app_limited=1 cwnd=145003 inflight=21 scheduled=0 pacing_Bps=1702727 srtt_us=217600 min_rtt_us=38303
+[stats] start save_session_cb. 
+[diag_rx_path_state] action=activate idx=1 id=1 interface=usb0 fd=12
+[stats] path[1] interface usb0 bound fd 12
+[diag_path_map] slot=0 path_id=0 fd=9 interface=rmnet_data0 local=10.250.56.108:55515
+[diag_path_map] slot=1 path_id=1 fd=12 interface=usb0 local=192.168.225.24:58209
+[stats] detected 2 distinct fds bound to interfaces above
+[stats] new path created, path_id=1
+[diag_path_gate] launch ready=2 target=2 waited_rounds=0 fallback=0
+[stats] launch requests, max concurrency=8
+>>>send_body_total_size:0
+[stats] xqc_mini_cli_h3_request_send success 
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] GET total length=104857600, total rounds stream count=25, concurrency=8
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+[stats] response status: 200, download_path: ./download/kkk.txt
+[stats] response body will be stored in ./download/kkk.txt
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1623 sample_interval_us=41893 ack_elapse_us=41893 send_elapse_us=0 sample_app_limited=1 cwnd=146166 inflight=397 scheduled=0 pacing_Bps=5915834 srtt_us=61274 min_rtt_us=32394
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] recv finished: 4194304 bytes, time=357.197 ms, speed=93.938 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] recv finished: 4194304 bytes, time=227.049 ms, speed=147.785 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1344 sample_interval_us=45382 ack_elapse_us=45382 send_elapse_us=0 sample_app_limited=1 cwnd=146624 inflight=61 scheduled=0 pacing_Bps=5915834 srtt_us=59146 min_rtt_us=32394
+[download] 10%
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=117 empty_calls=3 fair_rounds=113 packets=11320 bytes=13719260 callback_us_p50=5000 p95=20000 p99=20000 max=98045 finish_recv=113 finish_gap_us_p50=20000 p95=106570 p99=106570 max=106570 finish_recv_run_us=256880 finish_recv_run_max_us=97413 dispatch_delay_us_p50=121640 p95=121640 p99=121640 max=121640 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=9249 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=63 batch_calls=409 eagain=0 packets=4117 bytes=4975144 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=22026 packet_process_us=184145 ring_published=4126 ring_consumed=4117 ring_full=0 ring_full_max_us=0 ring_max_depth=137
+[diag_rx_path][periodic] idx=1 id=1 interface=usb0 events=54 batch_calls=1922 eagain=0 packets=7203 bytes=8744116 batch_max=512 service_gap_us_p50=20000 p95=106562 p99=106562 max=106562 process_errors=0 recvmmsg_us=98004 packet_process_us=267134 ring_published=8361 ring_consumed=7202 ring_full=0 ring_full_max_us=0 ring_max_depth=1664
+[diag_quic][periodic] send=42 recv=11320 lost=0 loss_rate=0.000% spurious_loss=1 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=13715121 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=4972378 send_pkts=19 recv_pkts=4117 recv_eff_bytes=0
+[diag_path][periodic] idx=1 id=1 state=2 app_status=2 srtt_us=56820 send_bytes=1053 recv_bytes=8741438 send_pkts=23 recv_pkts=7203 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=117 pwrite_bytes=12301743 pwrite_max_us=2377 fsync_us=0 async_enq=117 async_enq_bytes=12301743 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1023372 async_wait_max_us=3
+[stats] recv finished: 4194304 bytes, time=221.978 ms, speed=151.161 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] recv finished: 4194304 bytes, time=208.525 ms, speed=160.913 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1193 sample_interval_us=51933 ack_elapse_us=51933 send_elapse_us=0 sample_app_limited=1 cwnd=146747 inflight=62 scheduled=0 pacing_Bps=5915834 srtt_us=56186 min_rtt_us=32394
+[download] 20%
+[stats] recv finished: 4194304 bytes, time=198.626 ms, speed=168.933 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=0 sample_interval_us=0 ack_elapse_us=0 send_elapse_us=0 sample_app_limited=0 cwnd=146809 inflight=62 scheduled=0 pacing_Bps=5915834 srtt_us=54990 min_rtt_us=32394
+[stats] recv finished: 4194304 bytes, time=192.482 ms, speed=174.325 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[download] 30%
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] recv finished: 4194304 bytes, time=408.967 ms, speed=82.047 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=208 empty_calls=3 fair_rounds=205 packets=29786 bytes=36162110 callback_us_p50=20000 p95=20000 p99=98045 max=98045 finish_recv=205 finish_gap_us_p50=20000 p95=106570 p99=106570 max=106570 finish_recv_run_us=411298 finish_recv_run_max_us=97413 dispatch_delay_us_p50=173081 p95=173081 p99=173081 max=173081 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=13449 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=108 batch_calls=1218 eagain=0 packets=10900 bytes=13220315 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=54732 packet_process_us=449732 ring_published=11009 ring_consumed=10900 ring_full=0 ring_full_max_us=0 ring_max_depth=228
+[diag_rx_path][periodic] idx=1 id=1 interface=usb0 events=100 batch_calls=4336 eagain=0 packets=18886 bytes=22941795 batch_max=512 service_gap_us_p50=20000 p95=106562 p99=106562 max=106562 process_errors=0 recvmmsg_us=235625 packet_process_us=832221 ring_published=20258 ring_consumed=18886 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][periodic] send=54 recv=29786 lost=0 loss_rate=0.000% spurious_loss=3 srtt_us=125085 min_rtt_us=22122 inflight=62 mp_state=1 enable_mp=1 total_app_bytes=36158338 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=13217549 send_pkts=19 recv_pkts=10900 recv_eff_bytes=0
+[diag_path][periodic] idx=1 id=1 state=2 app_status=2 srtt_us=51152 send_bytes=1617 recv_bytes=22938920 send_pkts=35 recv_pkts=18886 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=312 pwrite_bytes=34591419 pwrite_max_us=3062 fsync_us=0 async_enq=312 async_enq_bytes=34591419 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1094112 async_wait_max_us=4
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=2064 sample_interval_us=30026 ack_elapse_us=30026 send_elapse_us=0 sample_app_limited=1 cwnd=146995 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=48478 min_rtt_us=29845
+[stats] recv finished: 4194304 bytes, time=546.855 ms, speed=61.359 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] recv finished: 4194304 bytes, time=572.441 ms, speed=58.616 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[download] 40%
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1019 sample_interval_us=122592 ack_elapse_us=122592 send_elapse_us=82862 sample_app_limited=1 cwnd=147120 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=47082 min_rtt_us=29845
+[stats] recv finished: 4194304 bytes, time=755.362 ms, speed=44.422 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] recv finished: 4194304 bytes, time=540.787 ms, speed=62.047 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=893 sample_interval_us=141005 ack_elapse_us=141005 send_elapse_us=97368 sample_app_limited=1 cwnd=147246 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=46223 min_rtt_us=29845
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] stream 0 close notify, completed 1/25, active=8, cwnd_blocked:0
+[stats] recv finished: 4194304 bytes, time=665.709 ms, speed=50.404 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[download] 50%
+[stats] stream 1 close notify, completed 2/25, active=8, cwnd_blocked:0
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1259 sample_interval_us=50009 ack_elapse_us=50009 send_elapse_us=0 sample_app_limited=1 cwnd=147309 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=46667 min_rtt_us=29845
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=303 empty_calls=3 fair_rounds=300 packets=48927 bytes=59419858 callback_us_p50=20000 p95=20000 p99=98045 max=98045 finish_recv=300 finish_gap_us_p50=20000 p95=20000 p99=106570 max=106570 finish_recv_run_us=572136 finish_recv_run_max_us=97413 dispatch_delay_us_p50=178512 p95=178512 p99=178512 max=178512 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=13449 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=152 batch_calls=1960 eagain=0 packets=17881 bytes=21702107 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=95457 packet_process_us=709822 ring_published=17908 ring_consumed=17881 ring_full=0 ring_full_max_us=0 ring_max_depth=281
+[diag_rx_path][periodic] idx=1 id=1 interface=usb0 events=151 batch_calls=7571 eagain=0 packets=31046 bytes=37717751 batch_max=512 service_gap_us_p50=20000 p95=106562 p99=106562 max=106562 process_errors=0 recvmmsg_us=341516 packet_process_us=1391107 ring_published=33094 ring_consumed=31046 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][periodic] send=68 recv=48927 lost=0 loss_rate=0.000% spurious_loss=9 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=59416471 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=21699341 send_pkts=19 recv_pkts=17881 recv_eff_bytes=0
+[diag_path][periodic] idx=1 id=1 state=2 app_status=2 srtt_us=46667 send_bytes=2281 recv_bytes=37714597 send_pkts=49 recv_pkts=31046 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=515 pwrite_bytes=56594564 pwrite_max_us=3508 fsync_us=0 async_enq=516 async_enq_bytes=56890493 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1447812 async_wait_max_us=25
+[stats] recv finished: 4194304 bytes, time=697.087 ms, speed=48.135 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] stream 2 close notify, completed 3/25, active=8, cwnd_blocked:0
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=487 sample_interval_us=129109 ack_elapse_us=129109 send_elapse_us=0 sample_app_limited=1 cwnd=147372 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=56943 min_rtt_us=29845
+[stats] stream 3 close notify, completed 4/25, active=8, cwnd_blocked:0
+[download] 60%
+[stats] recv finished: 4194304 bytes, time=796.018 ms, speed=42.153 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] stream 4 close notify, completed 5/25, active=8, cwnd_blocked:0
+[stats] recv finished: 4194304 bytes, time=773.372 ms, speed=43.387 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] recv finished: 4194304 bytes, time=662.614 ms, speed=50.639 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[stats] stream 5 close notify, completed 6/25, active=8, cwnd_blocked:0
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=1386 sample_interval_us=45426 ack_elapse_us=45426 send_elapse_us=0 sample_app_limited=1 cwnd=147498 inflight=63 scheduled=0 pacing_Bps=5915834 srtt_us=55025 min_rtt_us=29845
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[download] 70%
+[stats] recv finished: 4194304 bytes, time=637.016 ms, speed=52.674 Mbps
+[stats] read h3 request finish. 
+>>>send_body_total_size:4194304
+[stats] xqc_mini_cli_h3_request_send success 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=411 empty_calls=3 fair_rounds=407 packets=68450 bytes=83143328 callback_us_p50=20000 p95=20000 p99=98045 max=98045 finish_recv=407 finish_gap_us_p50=20000 p95=20000 p99=106570 max=106570 finish_recv_run_us=750323 finish_recv_run_max_us=97413 dispatch_delay_us_p50=178512 p95=178512 p99=178512 max=178512 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=13449 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=204 batch_calls=2643 eagain=0 packets=23616 bytes=28669953 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=124937 packet_process_us=891848 ring_published=23636 ring_consumed=23616 ring_full=0 ring_full_max_us=0 ring_max_depth=281
+[diag_rx_path][periodic] idx=1 id=1 interface=usb0 events=207 batch_calls=11678 eagain=0 packets=44834 bytes=54473375 batch_max=512 service_gap_us_p50=20000 p95=20000 p99=106562 max=106562 process_errors=0 recvmmsg_us=479402 packet_process_us=2014419 ring_published=46310 ring_consumed=44833 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][periodic] send=82 recv=68450 lost=0 loss_rate=0.000% spurious_loss=13 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=83140333 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=28667187 send_pkts=19 recv_pkts=23616 recv_eff_bytes=0
+[diag_path][periodic] idx=1 id=1 state=2 app_status=2 srtt_us=53895 send_bytes=2948 recv_bytes=54469946 send_pkts=63 recv_pkts=44834 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=756 pwrite_bytes=79937976 pwrite_max_us=3508 fsync_us=0 async_enq=757 async_enq_bytes=80112320 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1447812 async_wait_max_us=25
+[stats] recv finished: 4194304 bytes, time=613.851 ms, speed=54.662 Mbps
+[stats] read h3 request finish. 
+
+[stats] stream 6 close notify, completed 7/25, active=7, cwnd_blocked:0
+[diag_bbr_tick] path=1 mode=STARTUP full_bw=0 est_bw_Bps=22309 sample_rate_Bps=0 sample_interval_us=0 ack_elapse_us=0 send_elapse_us=0 sample_app_limited=0 cwnd=147625 inflight=0 scheduled=0 pacing_Bps=5915834 srtt_us=53895 min_rtt_us=29845
+[stats] recv finished: 4194304 bytes, time=706.599 ms, speed=47.487 Mbps
+[stats] read h3 request finish. 
+
+[download] 80%
+[stats] stream 8 close notify, completed 8/25, active=6, cwnd_blocked:0
+[stats] recv finished: 4194304 bytes, time=586.879 ms, speed=57.174 Mbps
+[stats] read h3 request finish. 
+
+[stats] stream 7 close notify, completed 9/25, active=5, cwnd_blocked:0
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] recv finished: 4194304 bytes, time=502.093 ms, speed=66.829 Mbps
+[stats] read h3 request finish. 
+
+[stats] stream 9 close notify, completed 10/25, active=4, cwnd_blocked:0
+[stats] stream 10 close notify, completed 11/25, active=4, cwnd_blocked:0
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[stats] recv finished: 4194304 bytes, time=370.723 ms, speed=90.511 Mbps
+[stats] read h3 request finish. 
+
+[receive report] :status = 200
+[receive report] content-type = application/octet-stream
+[receive report] content-length = 4194304
+[receive report] x-total-length = 104857600
+[download] 90%
+[stats] stream 11 close notify, completed 12/25, active=3, cwnd_blocked:0
+[stats] recv finished: 4194304 bytes, time=391.278 ms, speed=85.756 Mbps
+[stats] read h3 request finish. 
+
+[diag_rx_stage][periodic] mode=parallel_ingress_recvmmsg arbiter_calls=492 empty_calls=3 fair_rounds=488 packets=86070 bytes=104559351 callback_us_p50=20000 p95=20000 p99=98045 max=98045 finish_recv=488 finish_gap_us_p50=20000 p95=20000 p99=106570 max=106570 finish_recv_run_us=894341 finish_recv_run_max_us=97413 dispatch_delay_us_p50=258078 p95=258078 p99=258078 max=258078 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=15300 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][periodic] idx=0 id=0 interface=rmnet_data0 events=245 batch_calls=3499 eagain=0 packets=30832 bytes=37438782 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=157650 packet_process_us=1144358 ring_published=30948 ring_consumed=30831 ring_full=0 ring_full_max_us=0 ring_max_depth=363
+[diag_rx_path][periodic] idx=1 id=1 interface=usb0 events=247 batch_calls=12175 eagain=0 packets=55238 bytes=67120569 batch_max=512 service_gap_us_p50=20000 p95=20000 p99=106562 max=106562 process_errors=0 recvmmsg_us=550778 packet_process_us=2604718 ring_published=57286 ring_consumed=55238 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][periodic] send=82 recv=86070 lost=0 loss_rate=0.000% spurious_loss=13 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=104556316 standby_app_bytes=0
+[diag_path][periodic] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=37436016 send_pkts=19 recv_pkts=30832 recv_eff_bytes=0
+[diag_path][periodic] idx=1 id=1 state=2 app_status=2 srtt_us=53895 send_bytes=2948 recv_bytes=67117100 send_pkts=63 recv_pkts=55238 recv_eff_bytes=0
+[diag_io][periodic] pwrite_cnt=940 pwrite_bytes=98265476 pwrite_max_us=3508 fsync_us=0 async_enq=940 async_enq_bytes=98265476 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1447812 async_wait_max_us=70
+[stats] stream 12 close notify, completed 13/25, active=2, cwnd_blocked:0
+[stats] recv finished: 4194304 bytes, time=389.874 ms, speed=86.065 Mbps
+[stats] read h3 request finish. 
+
+[download] 100%
+[stats] recv finished: 4194304 bytes, time=681.920 ms, speed=49.206 Mbps
+[stats] read h3 request finish. 
+
+[stats] multi-stream download complete, 104857600 bytes saved to ./download/kkk.txt
+[stats] all download streams finished: 104857600 bytes, time=4917.233 ms, speed=170.596 Mbps
+[stats] GET timing=first_body_to_last_body excludes_async_flush_fsync=1
+[diag_rx_stage][download_done] mode=parallel_ingress_recvmmsg arbiter_calls=515 empty_calls=3 fair_rounds=512 packets=89057 bytes=108190972 callback_us_p50=20000 p95=20000 p99=98045 max=98045 finish_recv=512 finish_gap_us_p50=20000 p95=20000 p99=106570 max=106570 finish_recv_run_us=947900 finish_recv_run_max_us=97413 dispatch_delay_us_p50=258078 p95=258078 p99=258078 max=258078 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=15300 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][download_done] idx=0 id=0 interface=rmnet_data0 events=246 batch_calls=3499 eagain=0 packets=30948 bytes=37579267 batch_max=128 service_gap_us_p50=20000 p95=111102 p99=111102 max=111102 process_errors=0 recvmmsg_us=157650 packet_process_us=1150290 ring_published=30948 ring_consumed=30948 ring_full=0 ring_full_max_us=0 ring_max_depth=363
+[diag_rx_path][download_done] idx=1 id=1 interface=usb0 events=269 batch_calls=12182 eagain=0 packets=58109 bytes=70611705 batch_max=512 service_gap_us_p50=20000 p95=20000 p99=106562 max=106562 process_errors=0 recvmmsg_us=554091 packet_process_us=2779500 ring_published=58109 ring_consumed=58109 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][download_done] send=82 recv=89057 lost=0 loss_rate=0.000% spurious_loss=13 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=108187937 standby_app_bytes=0
+[diag_path][download_done] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=37576501 send_pkts=19 recv_pkts=30948 recv_eff_bytes=0
+[diag_path][download_done] idx=1 id=1 state=2 app_status=2 srtt_us=53895 send_bytes=2948 recv_bytes=70608236 send_pkts=63 recv_pkts=58109 recv_eff_bytes=0
+[diag_io][download_done] pwrite_cnt=986 pwrite_bytes=104857600 pwrite_max_us=3508 fsync_us=139663 async_enq=986 async_enq_bytes=104857600 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1447812 async_wait_max_us=70
+[stats] stream 13 close notify, completed 14/25, active=0, cwnd_blocked:0
+[stats] stream 14 close notify, completed 15/25, active=0, cwnd_blocked:0
+[stats] stream 15 close notify, completed 16/25, active=0, cwnd_blocked:0
+[stats] stream 16 close notify, completed 17/25, active=0, cwnd_blocked:0
+[stats] stream 17 close notify, completed 18/25, active=0, cwnd_blocked:0
+[stats] stream 18 close notify, completed 19/25, active=0, cwnd_blocked:0
+[stats] stream 19 close notify, completed 20/25, active=0, cwnd_blocked:0
+[stats] stream 20 close notify, completed 21/25, active=0, cwnd_blocked:0
+[stats] stream 21 close notify, completed 22/25, active=0, cwnd_blocked:0
+[stats] stream 22 close notify, completed 23/25, active=0, cwnd_blocked:0
+[stats] stream 23 close notify, completed 24/25, active=0, cwnd_blocked:0
+[stats] stream 24 close notify, completed 25/25, active=0, cwnd_blocked:0
+[diag_packet_core] packet_process_count=89061 packet_process_us=1610574 conn_process_count=89061 conn_process_us=1519698 parse_us=53845 decrypt_us=545245 frame_us=1529619 pkt_processed_us=64271
+[diag_engine_run] conn_runs=1215 conn_run_us=3254099 internal_runs=697 internal_run_us=2202412 crypto_read_us=1702 crypto_write_us=976 app_read_us=1438515 app_write_us=479 ack_build_count=1170 ack_build_us=25453 ack_early_flush_count=1170 ack_early_flush_us=214654 schedule_send_us=26290 socket_send_count=1609 socket_send_us=165995
+[diag_engine_busy] lifetime_us=7705475 engine_run_us=3254099 busy_ratio=0.422310
+[diag_rx_work] scan_count=89048 scan_us=53855 queued=89037 applied=89037 fallback=11 pool_exhausted=0 apply_error=0 pending=0
+[diag_rx_stage][h3_conn_close] mode=parallel_ingress_recvmmsg arbiter_calls=516 empty_calls=3 fair_rounds=513 packets=89061 bytes=108193467 callback_us_p50=20000 p95=20000 p99=144275 max=144275 finish_recv=513 finish_gap_us_p50=20000 p95=20000 p99=199587 max=199587 finish_recv_run_us=1091144 finish_recv_run_max_us=143241 dispatch_delay_us_p50=258078 p95=258078 p99=258078 max=258078 path_service_wait_us_p50=5000 p95=20000 p99=20000 max=15300 reentry_skips=0 deferred_releases=0 socket_ev_read=0 socket_ev_write=0 dispatch_metric=post_socket_read_dispatch_not_kernel_queue
+[diag_rx_path][h3_conn_close] idx=0 id=0 interface=rmnet_data0 events=247 batch_calls=3500 eagain=0 packets=30952 bytes=37581762 batch_max=128 service_gap_us_p50=20000 p95=430309 p99=430309 max=430309 process_errors=0 recvmmsg_us=157682 packet_process_us=1150956 ring_published=30952 ring_consumed=30952 ring_full=0 ring_full_max_us=0 ring_max_depth=363
+[diag_rx_path][h3_conn_close] idx=1 id=1 interface=usb0 events=269 batch_calls=12182 eagain=0 packets=58109 bytes=70611705 batch_max=512 service_gap_us_p50=20000 p95=20000 p99=106562 max=106562 process_errors=0 recvmmsg_us=554091 packet_process_us=2779500 ring_published=58109 ring_consumed=58109 ring_full=0 ring_full_max_us=0 ring_max_depth=2048
+[diag_quic][h3_conn_close] send=82 recv=89061 lost=0 loss_rate=0.000% spurious_loss=13 srtt_us=125085 min_rtt_us=22122 inflight=0 mp_state=1 enable_mp=1 total_app_bytes=108187937 standby_app_bytes=0
+[diag_path][h3_conn_close] idx=0 id=0 state=2 app_status=2 srtt_us=125085 send_bytes=252 recv_bytes=37576501 send_pkts=19 recv_pkts=30952 recv_eff_bytes=0
+[diag_path][h3_conn_close] idx=1 id=1 state=2 app_status=2 srtt_us=53895 send_bytes=2948 recv_bytes=70608236 send_pkts=63 recv_pkts=58109 recv_eff_bytes=0
+[diag_io][h3_conn_close] pwrite_cnt=986 pwrite_bytes=104857600 pwrite_max_us=3508 fsync_us=139663 async_enq=986 async_enq_bytes=104857600 async_q_depth=0 async_q_bytes=0 async_q_max=1 async_q_bytes_max=1447812 async_wait_max_us=70
+[stats] xqc_mini_cli_h3_conn_close_notify success 
+[diag_ack_path] path=0 ack_frames=8 acked_packets=14 acked_bytes=1739 same_path_ack=8 cross_path_ack=0 inter_ack_gap_hist=1,0,0,0,0,1,1,0,4,0,0 ack_delay_hist=4,1,0,0,1,0,0,0,2,0,0
+[diag_ack_path_timeline] path=0 auth_count=30948 ack_due_count=573 ack_build_count=573 ack_socket_send_count=573 recv_to_auth_us_avg=10119 recv_to_auth_us_max=97461 auth_to_due_us_avg=59 auth_to_due_us_max=19338 due_to_build_us_avg=11783 due_to_build_us_max=99118 build_to_socket_us_avg=163 build_to_socket_us_max=3058
+[diag_ack_snapshot] path=0 app_published=570 app_committed=570
+[diag_bbr_path] path=0 sample_valid=8 sample_ack_nothing=0 sample_interval_too_small=0 sample_app_limited=6 sample_non_app_limited=2 sample_rate_min=356 sample_rate_avg=3275 sample_rate_max=5486
+[diag_send_path] path=0 send_cwnd_block_count=0 send_cwnd_block_duration_us=0 pacing_block_count=0 pacing_block_duration_us=0 first_block_cwnd=0 first_block_pacing=0 both_blocked_cwnd_first=0 both_blocked_pacing_first=0 send_burst_events=574 send_burst_packets=591 send_burst_bytes=38062 send_burst_max_packets=5 send_burst_max_bytes=2400 ack_mp_generated=570 ack_gap_us_min=455 ack_gap_us_avg=8815 ack_gap_us_max=100692 ack_generation_delay_us_min=173 ack_generation_delay_us_avg=6824 ack_generation_delay_us_max=87764 largest_ack_delta_max=102 ack_has_gap=563
+[diag_ack_path] path=1 ack_frames=27 acked_packets=53 acked_bytes=4025 same_path_ack=27 cross_path_ack=0 inter_ack_gap_hist=0,0,0,0,0,0,0,1,3,3,19 ack_delay_hist=24,1,0,0,0,0,0,0,2,0,0
+[diag_ack_path_timeline] path=1 auth_count=58109 ack_due_count=952 ack_build_count=952 ack_socket_send_count=952 recv_to_auth_us_avg=114828 recv_to_auth_us_max=258085 auth_to_due_us_avg=4 auth_to_due_us_max=1999 due_to_build_us_avg=113462 due_to_build_us_max=258134 build_to_socket_us_avg=178 build_to_socket_us_max=414
+[diag_ack_snapshot] path=1 app_published=952 app_committed=952
+[diag_bbr_path] path=1 sample_valid=22 sample_ack_nothing=5 sample_interval_too_small=0 sample_app_limited=20 sample_non_app_limited=2 sample_rate_min=487 sample_rate_avg=3257 sample_rate_max=22309
+[diag_send_path] path=1 send_cwnd_block_count=0 send_cwnd_block_duration_us=0 pacing_block_count=0 pacing_block_duration_us=0 first_block_cwnd=0 first_block_pacing=0 both_blocked_cwnd_first=0 both_blocked_pacing_first=0 send_burst_events=970 send_burst_packets=1018 send_burst_bytes=47892 send_burst_max_packets=15 send_burst_max_bytes=1239 ack_mp_generated=952 ack_gap_us_min=275 ack_gap_us_avg=5395 ack_gap_us_max=119781 ack_generation_delay_us_min=45 ack_generation_delay_us_avg=112135 ack_generation_delay_us_max=258134 largest_ack_delta_max=107 ack_has_gap=496
+[diag_rx_path_state] action=release idx=0 id=0 interface=rmnet_data0 fd=9 reason=connection_finish
+[diag_rx_path_state] action=release idx=1 id=1 interface=usb0 fd=12 reason=connection_finish
+/oemdata/gx/xquic_file # 

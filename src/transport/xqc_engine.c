@@ -33,6 +33,10 @@
 #ifndef XQC_TARGET_RX_WORK_COMPAT
 #define XQC_TARGET_RX_WORK_COMPAT 0
 #endif
+#ifndef XQC_MAX_PACKET_PROCESS_BATCH
+/* Connection-wide packet quota before an internal engine run; edit for GX A/B tests. */
+#define XQC_MAX_PACKET_PROCESS_BATCH 256
+#endif
 
 
 extern const xqc_qpack_ins_cb_t xqc_h3_qpack_ins_cb;
