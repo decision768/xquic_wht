@@ -8,15 +8,7 @@ NetIns UDP 是面向 XQUIC UDP/QUIC 的独立客户端连接与状态查询接�
 网卡名称、收发字节、RTT、丢包率、在途数据量和区间速率等信息。独立客户端还可
 通过 HTTP/3 stream API 发起 GET/POST 请求、发送请求正文并读取响应正文。
 
-NetIns UDP 与 MPTCP 版本 NetIns 的定位不同：
 
-- `netins_udp_client_*` 会为第三方创建 UDP socket、XQUIC engine 和连接线程。
-- `netins_udp_stream_*` 在该独立连接上提供真实的 HTTP/3 业务收发。
-- 原有 mini QUIC 连接仍由原客户端、服务端和 Libevent 线程管理。
-- 状态 getter 只读取缓存快照；第三方只能关闭自己创建的客户端，不能关闭或调度
-  mini_client/mini_server 已有连接。
-- 状态注册表位于 `mini_client` 或 `mini_server` 进程内部，不提供跨进程查询。
-- 所有公开函数名使用 `netins_udp_` 前缀，以便与 TCP/MPTCP 接口区分。
 
 公共头文件：
 
