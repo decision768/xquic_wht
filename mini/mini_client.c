@@ -19,6 +19,9 @@
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
 #define CLIENT_RX_PER_PATH_PACKETS 512
 
+/* Per-path engine drain quota for parallel RX; edit here for GX A/B tests. */
+static int g_xqc_mini_rx_engine_quantum = 128;
+
 #ifndef XQC_TARGET_ACK_FIRST
 #define XQC_TARGET_ACK_FIRST 1
 #endif
@@ -2436,7 +2439,7 @@ xqc_mini_cli_drain_path_rings(xqc_mini_cli_user_conn_t *user_conn,
         int path_packets = 0;
         int consumed_slots = 0;
 
-        while (path_packets < XQC_MINI_RX_ENGINE_QUANTUM) {
+        while (path_packets < g_xqc_mini_rx_engine_quantum) {
             const xqc_mini_rx_slot_t *slot =
                 xqc_mini_spsc_ring_peek(&path->rx_ring);
             if (slot == NULL) {
@@ -3591,17 +3594,20 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         + (ctx->args->net_cfg.parallel_rx
             ? sizeof(xqc_mini_rx_slot_t) * XQC_MINI_RX_RING_CAPACITY : 0);
     printf("[resolved-rx] mode=%s per_path=%d ring_capacity=%d"
-           " engine_quantum=%d rounds=1\n",
+           " engine_quantum_per_path=%d engine_round_max=%d rounds=1\n",
         xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
-        XQC_MINI_RX_RING_CAPACITY, XQC_MINI_RX_ENGINE_QUANTUM);
+        XQC_MINI_RX_RING_CAPACITY, g_xqc_mini_rx_engine_quantum,
+        g_xqc_mini_rx_engine_quantum * MAX_PATH_CNT);
     printf("[diag_target_xquic] baseline=c3f7834475f02ebb8faaf1f8f629e534167391c1"
            " mode=%s rx_syscall_batch=%d"
-           " ring_capacity=%d engine_quantum=%d ack_first=%d"
+           " ring_capacity=%d engine_quantum_per_path=%d"
+           " engine_round_max=%d ack_first=%d"
            " rx_work_compat=%d ack_snapshot=%d deferred_frame_apply=%d"
            " parallel_auth=0 commit_owner=engine_thread"
            " rx_memory_per_path=%zu rx_memory_total=%zu\n",
         xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
-        XQC_MINI_RX_RING_CAPACITY, XQC_MINI_RX_ENGINE_QUANTUM,
+        XQC_MINI_RX_RING_CAPACITY, g_xqc_mini_rx_engine_quantum,
+        g_xqc_mini_rx_engine_quantum * MAX_PATH_CNT,
         XQC_TARGET_ACK_FIRST,
         XQC_TARGET_RX_WORK_COMPAT, XQC_TARGET_ACK_SNAPSHOT,
         XQC_TARGET_DEFERRED_FRAME_APPLY,

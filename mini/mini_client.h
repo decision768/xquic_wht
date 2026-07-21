@@ -65,7 +65,6 @@
 #define XQC_MINI_CLI_WRITE_QUEUE_MAX_BYTES (64 * 1024 * 1024)
 #define XQC_MINI_RX_HIST_BUCKETS 8
 #define XQC_MINI_RX_RING_CAPACITY 2048
-#define XQC_MINI_RX_ENGINE_QUANTUM 32
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
 #define TOKEN_FILE                  "token"
