@@ -34,7 +34,7 @@
 #define XQC_TOKEN_UPDATE_DELTA (XQC_TOKEN_EXPIRE_DELTA / 2) /* early update */
 
 /* maximum accumulated number of xqc_engine_packet_process */
-#define XQC_DEFERRED_RX_WORK_CAPACITY 128
+#define XQC_DEFERRED_RX_WORK_CAPACITY 512
 #define XQC_RX_FRAME_DESC_CAPACITY 64
 
 typedef struct xqc_deferred_rx_work_s {

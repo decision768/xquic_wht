@@ -35,7 +35,7 @@
 #endif
 #ifndef XQC_MAX_PACKET_PROCESS_BATCH
 /* Connection-wide packet quota before an internal engine run; edit for GX A/B tests. */
-#define XQC_MAX_PACKET_PROCESS_BATCH 256
+#define XQC_MAX_PACKET_PROCESS_BATCH 600
 #endif
 
 

@@ -17,10 +17,12 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_PER_PATH_PACKETS 512
+#define CLIENT_RX_PER_PATH_PACKETS 128
 
-/* Per-path engine drain quota for parallel RX; edit here for GX A/B tests. */
-static int g_xqc_mini_rx_engine_quantum = 128;
+/* Parallel RX pressure scheduler knobs; edit here for GX A/B tests. */
+static int g_xqc_mini_rx_round_budget = 512;
+static int g_xqc_mini_rx_min_path_quota = 64;
+static int g_xqc_mini_rx_drain_slice = 64;
 
 #ifndef XQC_TARGET_ACK_FIRST
 #define XQC_TARGET_ACK_FIRST 1
@@ -557,6 +559,49 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
                xqc_mini_cli_diag_load_u64(&path_diag->ring_full_count),
                xqc_mini_cli_diag_load_u64(&path_diag->ring_full_max_us),
                xqc_mini_cli_diag_load_u64(&path_diag->ring_max_depth));
+    }
+
+    uint64_t adaptive_rounds = stats->rx_adaptive_rounds;
+    uint64_t select_us_avg = stats->rx_adaptive_select_count > 0
+        ? stats->rx_adaptive_select_us / stats->rx_adaptive_select_count : 0;
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        uint64_t start_depth_avg = adaptive_rounds > 0
+            ? stats->rx_adaptive_start_depth_sum[i] / adaptive_rounds : 0;
+        uint64_t end_depth_avg = adaptive_rounds > 0
+            ? stats->rx_adaptive_end_depth_sum[i] / adaptive_rounds : 0;
+        printf("[diag_rx_adaptive][%s] rounds=%" PRIu64
+               " single_path_rounds=%" PRIu64
+               " pressure_ties=%" PRIu64
+               " full_budget_rounds=%" PRIu64
+               " select_count=%" PRIu64 " select_us=%" PRIu64
+               " select_us_avg=%" PRIu64
+               " path_switches=%" PRIu64
+               " same_path_reselects=%" PRIu64 " idx=%d"
+               " quota_total=%" PRIu64 " served_total=%" PRIu64
+               " borrowed_total=%" PRIu64
+               " slice_count=%" PRIu64
+               " round_start_depth_avg=%" PRIu64
+               " round_start_depth_max=%" PRIu64
+               " round_end_depth_avg=%" PRIu64
+               " round_end_depth_max=%" PRIu64
+               " depth_reduced_rounds=%" PRIu64
+               " depth_ge_75pct_rounds=%" PRIu64 "\n",
+               scene, adaptive_rounds,
+               stats->rx_adaptive_single_path_rounds,
+               stats->rx_adaptive_pressure_tie_rounds,
+               stats->rx_adaptive_full_budget_rounds,
+               stats->rx_adaptive_select_count,
+               stats->rx_adaptive_select_us, select_us_avg,
+               stats->rx_adaptive_path_switches,
+               stats->rx_adaptive_same_path_reselects, i,
+               stats->rx_adaptive_quota_total[i],
+               stats->rx_adaptive_served_total[i],
+               stats->rx_adaptive_borrowed_total[i],
+               stats->rx_adaptive_slice_count[i], start_depth_avg,
+               stats->rx_adaptive_start_depth_max[i],
+               end_depth_avg, stats->rx_adaptive_end_depth_max[i],
+               stats->rx_adaptive_depth_reduced_rounds[i],
+               stats->rx_adaptive_depth_ge_75pct_rounds[i]);
     }
 
     if (user_conn->ctx != NULL && user_conn->ctx->engine != NULL && user_conn->h3_conn != NULL) {
@@ -2428,18 +2473,112 @@ xqc_mini_cli_drain_path_rings(xqc_mini_cli_user_conn_t *user_conn,
     user_conn->rx_arbiter_running = 1;
     xqc_mini_cli_diag_inc_u64(&stats->rx_arbiter_calls);
     xqc_usec_t callback_start = xqc_now();
+    uint32_t round_budget = (uint32_t)g_xqc_mini_rx_round_budget;
+    uint32_t min_path_quota = (uint32_t)g_xqc_mini_rx_min_path_quota;
+    uint32_t drain_slice = (uint32_t)g_xqc_mini_rx_drain_slice;
+    uint32_t start_depth[MAX_PATH_CNT] = {0};
+    uint32_t quota[MAX_PATH_CNT] = {0};
+    uint32_t served[MAX_PATH_CNT] = {0};
+    uint32_t borrowed[MAX_PATH_CNT] = {0};
+    int consumed_slots[MAX_PATH_CNT] = {0};
     int round_packets = 0;
     xqc_usec_t path_service_start[MAX_PATH_CNT] = {0};
     (void)triggering_path_index;
-    int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
+    int tie_start = user_conn->rx_next_path_index % MAX_PATH_CNT;
+    int last_served_path = -1;
+    int diag_enabled = user_conn->ctx->args->quic_cfg.mp_diag;
+    int nonempty_paths = 0;
+    uint64_t depth_total = 0;
 
-    for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
-        int path_index = (start_index + offset) % MAX_PATH_CNT;
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        start_depth[i] = xqc_mini_spsc_ring_size(
+            &user_conn->paths[i].rx_ring);
+        depth_total += start_depth[i];
+        if (start_depth[i] > 0) {
+            nonempty_paths++;
+        }
+    }
+
+    if (nonempty_paths == 1) {
+        for (int i = 0; i < MAX_PATH_CNT; i++) {
+            if (start_depth[i] > 0) {
+                quota[i] = round_budget;
+                break;
+            }
+        }
+
+    } else if (nonempty_paths == MAX_PATH_CNT) {
+        uint32_t remaining = round_budget - min_path_quota * MAX_PATH_CNT;
+        uint32_t extra0 = (uint32_t)(((uint64_t)remaining * start_depth[0])
+                                     / depth_total);
+        quota[0] = min_path_quota + extra0;
+        quota[1] = round_budget - quota[0];
+    }
+
+    if (nonempty_paths > 0) {
+        stats->rx_adaptive_rounds++;
+        if (nonempty_paths == 1) {
+            stats->rx_adaptive_single_path_rounds++;
+        } else if (start_depth[0] == start_depth[1]) {
+            stats->rx_adaptive_pressure_tie_rounds++;
+        }
+        for (int i = 0; i < MAX_PATH_CNT; i++) {
+            stats->rx_adaptive_quota_total[i] += quota[i];
+            stats->rx_adaptive_start_depth_sum[i] += start_depth[i];
+            stats->rx_adaptive_start_depth_max[i] = xqc_max(
+                stats->rx_adaptive_start_depth_max[i], start_depth[i]);
+            if (start_depth[i] * 4 >= XQC_MINI_RX_RING_CAPACITY * 3) {
+                stats->rx_adaptive_depth_ge_75pct_rounds[i]++;
+            }
+        }
+    }
+
+    int borrowing = 0;
+    while ((uint32_t)round_packets < round_budget) {
+        int path_index = -1;
+        uint32_t selected_depth = 0;
+        xqc_usec_t select_start = diag_enabled ? xqc_now() : 0;
+
+        for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
+            int candidate = (tie_start + offset) % MAX_PATH_CNT;
+            uint32_t current_depth = xqc_mini_spsc_ring_size(
+                &user_conn->paths[candidate].rx_ring);
+            if (current_depth == 0
+                || (!borrowing && served[candidate] >= quota[candidate]))
+            {
+                continue;
+            }
+            if (path_index < 0 || current_depth > selected_depth) {
+                path_index = candidate;
+                selected_depth = current_depth;
+            }
+        }
+        stats->rx_adaptive_select_count++;
+        if (select_start != 0) {
+            xqc_usec_t select_end = xqc_now();
+            if (select_end >= select_start) {
+                stats->rx_adaptive_select_us += select_end - select_start;
+            }
+        }
+
+        if (path_index < 0) {
+            if (!borrowing) {
+                borrowing = 1;
+                continue;
+            }
+            break;
+        }
+
         xqc_mini_cli_user_path_t *path = &user_conn->paths[path_index];
-        int path_packets = 0;
-        int consumed_slots = 0;
+        uint32_t slice_limit = xqc_min(drain_slice,
+            round_budget - (uint32_t)round_packets);
+        if (!borrowing) {
+            slice_limit = xqc_min(slice_limit,
+                quota[path_index] - served[path_index]);
+        }
 
-        while (path_packets < g_xqc_mini_rx_engine_quantum) {
+        uint32_t slice_packets = 0;
+        while (slice_packets < slice_limit) {
             const xqc_mini_rx_slot_t *slot =
                 xqc_mini_spsc_ring_peek(&path->rx_ring);
             if (slot == NULL) {
@@ -2449,37 +2588,73 @@ xqc_mini_cli_drain_path_rings(xqc_mini_cli_user_conn_t *user_conn,
             if (path->is_active && slot->path_id == path->path_id
                 && slot->path_generation == path->rx_generation)
             {
-                if (path_packets == 0) {
+                if (served[path_index] == 0) {
                     path_service_start[path_index] = xqc_now();
                 }
                 xqc_mini_cli_process_rx_packet(path, slot->data, slot->len,
                                                 slot->recv_time);
-                path_packets++;
+                served[path_index]++;
+                slice_packets++;
                 round_packets++;
+                if (borrowing) {
+                    borrowed[path_index]++;
+                }
             }
 
             xqc_mini_spsc_ring_consume(&path->rx_ring);
-            consumed_slots++;
+            consumed_slots[path_index]++;
             xqc_mini_cli_diag_inc_u64(&path->rx_diag.ring_consumed);
             if (user_conn->rx_shutdown) {
                 break;
             }
         }
 
-        if (path_packets > 0) {
-            xqc_mini_cli_record_path_service(path, xqc_now(), path_packets);
+        if (slice_packets > 0) {
+            stats->rx_adaptive_slice_count[path_index]++;
+            if (last_served_path == path_index) {
+                stats->rx_adaptive_same_path_reselects++;
+            } else if (last_served_path >= 0) {
+                stats->rx_adaptive_path_switches++;
+            }
+            last_served_path = path_index;
         }
-#if defined(__linux__)
-        if (consumed_slots > 0) {
-            xqc_mini_cli_eventfd_signal(path->rx_space_fd);
-        }
-#endif
+
         if (user_conn->rx_shutdown) {
             break;
         }
     }
 
-    user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
+    user_conn->rx_next_path_index = (tie_start + 1) % MAX_PATH_CNT;
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        stats->rx_adaptive_served_total[i] += served[i];
+        stats->rx_adaptive_borrowed_total[i] += borrowed[i];
+        if (served[i] > 0) {
+            xqc_mini_cli_record_path_service(path, xqc_now(), served[i]);
+        }
+#if defined(__linux__)
+        if (consumed_slots[i] > 0) {
+            xqc_mini_cli_eventfd_signal(path->rx_space_fd);
+        }
+#endif
+    }
+
+    if (nonempty_paths > 0) {
+        if ((uint32_t)round_packets == round_budget) {
+            stats->rx_adaptive_full_budget_rounds++;
+        }
+        for (int i = 0; i < MAX_PATH_CNT; i++) {
+            uint32_t end_depth = xqc_mini_spsc_ring_size(
+                &user_conn->paths[i].rx_ring);
+            stats->rx_adaptive_end_depth_sum[i] += end_depth;
+            stats->rx_adaptive_end_depth_max[i] = xqc_max(
+                stats->rx_adaptive_end_depth_max[i], end_depth);
+            if (end_depth < start_depth[i]) {
+                stats->rx_adaptive_depth_reduced_rounds[i]++;
+            }
+        }
+    }
+
     if (path_service_start[0] != 0 && path_service_start[1] != 0) {
         uint64_t wait_us = path_service_start[0] >= path_service_start[1]
             ? path_service_start[0] - path_service_start[1]
@@ -3593,21 +3768,28 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         rx_batch_slot_capacity * CLIENT_RX_PER_PATH_PACKETS
         + (ctx->args->net_cfg.parallel_rx
             ? sizeof(xqc_mini_rx_slot_t) * XQC_MINI_RX_RING_CAPACITY : 0);
+    const char *rx_policy = ctx->args->net_cfg.parallel_rx
+        ? "ring_weighted" : "fixed_fair";
     printf("[resolved-rx] mode=%s per_path=%d ring_capacity=%d"
-           " engine_quantum_per_path=%d engine_round_max=%d rounds=1\n",
+           " rx_policy=%s engine_round_budget=%d"
+           " engine_round_max=%d engine_min_path_quota=%d"
+           " engine_drain_slice=%d rounds=1\n",
         xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
-        XQC_MINI_RX_RING_CAPACITY, g_xqc_mini_rx_engine_quantum,
-        g_xqc_mini_rx_engine_quantum * MAX_PATH_CNT);
+        XQC_MINI_RX_RING_CAPACITY, rx_policy, g_xqc_mini_rx_round_budget,
+        g_xqc_mini_rx_round_budget, g_xqc_mini_rx_min_path_quota,
+        g_xqc_mini_rx_drain_slice);
     printf("[diag_target_xquic] baseline=c3f7834475f02ebb8faaf1f8f629e534167391c1"
            " mode=%s rx_syscall_batch=%d"
-           " ring_capacity=%d engine_quantum_per_path=%d"
-           " engine_round_max=%d ack_first=%d"
+           " ring_capacity=%d rx_policy=%s"
+           " engine_round_budget=%d engine_round_max=%d"
+           " engine_min_path_quota=%d engine_drain_slice=%d ack_first=%d"
            " rx_work_compat=%d ack_snapshot=%d deferred_frame_apply=%d"
            " parallel_auth=0 commit_owner=engine_thread"
            " rx_memory_per_path=%zu rx_memory_total=%zu\n",
         xqc_mini_cli_rx_mode(user_conn), CLIENT_RX_PER_PATH_PACKETS,
-        XQC_MINI_RX_RING_CAPACITY, g_xqc_mini_rx_engine_quantum,
-        g_xqc_mini_rx_engine_quantum * MAX_PATH_CNT,
+        XQC_MINI_RX_RING_CAPACITY, rx_policy, g_xqc_mini_rx_round_budget,
+        g_xqc_mini_rx_round_budget, g_xqc_mini_rx_min_path_quota,
+        g_xqc_mini_rx_drain_slice,
         XQC_TARGET_ACK_FIRST,
         XQC_TARGET_RX_WORK_COMPAT, XQC_TARGET_ACK_SNAPSHOT,
         XQC_TARGET_DEFERRED_FRAME_APPLY,
