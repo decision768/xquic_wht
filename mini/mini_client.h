@@ -360,6 +360,8 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     rx_arbiter_running;
     int                     rx_shutdown;
     int                     rx_free_pending;
+    int                     rx_last_budget_active_paths;
+    int                     rx_last_budget_packets_per_path;
 
     xqc_mini_cli_diag_stats_t diag_stats;
 
