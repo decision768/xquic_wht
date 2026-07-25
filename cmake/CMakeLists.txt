@@ -364,9 +364,16 @@ if (XQC_NO_SHARED)
     set(XQC_BINARY_TYPE STATIC)
 endif()
 
+set(
+    NETINS_UDP_SOURCES
+    "src/netins_udp/netins_udp.c"
+    "src/netins_udp/netins_udp_client.c"
+)
+
 add_library(
     xquic
     ${XQC_BINARY_TYPE}
+    ${NETINS_UDP_SOURCES}
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
