@@ -15,14 +15,17 @@
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
 #define XQC_MINI_NETINS_UDP_REFRESH_US 500000
-#define CLIENT_RX_PER_PATH_PACKETS 64
+#define CLIENT_RX_BATCH_CAPACITY       256
+#define CLIENT_RX_SINGLE_PATH_PACKETS  40
+#define CLIENT_RX_DUAL_PATH_PACKETS    256
+#define CLIENT_PATH_FAILOVER_PTO        2
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
     unsigned char          *storage;
 #if defined(__linux__)
-    struct mmsghdr          messages[CLIENT_RX_PER_PATH_PACKETS];
-    struct iovec            iovecs[CLIENT_RX_PER_PATH_PACKETS];
+    struct mmsghdr          messages[CLIENT_RX_BATCH_CAPACITY];
+    struct iovec            iovecs[CLIENT_RX_BATCH_CAPACITY];
 #endif
 };
 
@@ -1186,6 +1189,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
+    settings->scheduler_params.pto_cnt_thr = CLIENT_PATH_FAILOVER_PTO;
     settings->scheduler_params.mp_diag_enabled = args->quic_cfg.mp_diag;
     settings->scheduler_params.mp_diag_interval_ms =
         args->quic_cfg.mp_diag_interval_ms;
@@ -1206,6 +1210,8 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     printf("[diag_mp_config] enabled=%d interval_ms=%u scheduler=%s\n",
         args->quic_cfg.mp_diag, args->quic_cfg.mp_diag_interval_ms,
         args->quic_cfg.mp_sched);
+    printf("[diag_path_failover_config] role=client enabled=1 pto_threshold=%u\n",
+        settings->scheduler_params.pto_cnt_thr);
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -1766,7 +1772,7 @@ xqc_mini_cli_alloc_rx_batch(xqc_mini_cli_user_path_t *path)
     if (batch == NULL) {
         return XQC_ERROR;
     }
-    batch->storage = malloc(capacity * CLIENT_RX_PER_PATH_PACKETS);
+    batch->storage = malloc(capacity * CLIENT_RX_BATCH_CAPACITY);
     if (batch->storage == NULL) {
         free(batch);
         return XQC_ERROR;
@@ -1774,7 +1780,7 @@ xqc_mini_cli_alloc_rx_batch(xqc_mini_cli_user_path_t *path)
     batch->slot_capacity = capacity;
 
 #if defined(__linux__)
-    for (int i = 0; i < CLIENT_RX_PER_PATH_PACKETS; i++) {
+    for (int i = 0; i < CLIENT_RX_BATCH_CAPACITY; i++) {
         batch->iovecs[i].iov_base = batch->storage + (size_t)i * capacity;
         batch->iovecs[i].iov_len = capacity;
         batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
@@ -2180,7 +2186,7 @@ xqc_mini_cli_handle_rx_error(xqc_mini_cli_user_path_t *path, int err)
 
 
 static int
-xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
+xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path, int packet_limit)
 {
     if (path == NULL || path->user_conn == NULL || !path->is_active
         || path->fd < 0 || path->rx_batch == NULL
@@ -2189,13 +2195,20 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
         return 0;
     }
 
+    if (packet_limit <= 0) {
+        return 0;
+    }
+    if (packet_limit > CLIENT_RX_BATCH_CAPACITY) {
+        packet_limit = CLIENT_RX_BATCH_CAPACITY;
+    }
+
     xqc_mini_cli_user_conn_t *user_conn = path->user_conn;
     xqc_mini_cli_rx_batch_t *batch = path->rx_batch;
     int processed = 0;
     path->rx_diag.batch_call_count++;
 
 #if defined(__linux__)
-    for (int i = 0; i < CLIENT_RX_PER_PATH_PACKETS; i++) {
+    for (int i = 0; i < packet_limit; i++) {
         batch->iovecs[i].iov_base = batch->storage
             + (size_t)i * batch->slot_capacity;
         batch->iovecs[i].iov_len = batch->slot_capacity;
@@ -2207,7 +2220,7 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
     }
 
     int received = recvmmsg(path->fd, batch->messages,
-        CLIENT_RX_PER_PATH_PACKETS, MSG_DONTWAIT, NULL);
+        (unsigned int)packet_limit, MSG_DONTWAIT, NULL);
     if (received < 0) {
         int err = get_sys_errno();
         if (err == EAGAIN || err == EWOULDBLOCK) {
@@ -2228,7 +2241,7 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
             batch->messages[i].msg_len, recv_time);
     }
 #else
-    for (int i = 0; i < CLIENT_RX_PER_PATH_PACKETS; i++) {
+    for (int i = 0; i < packet_limit; i++) {
         unsigned char *slot = batch->storage + (size_t)i * batch->slot_capacity;
         ssize_t recv_size = recvfrom(path->fd, slot, batch->slot_capacity,
             0, NULL, NULL);
@@ -2260,6 +2273,23 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path)
     return processed;
 }
 
+static int
+xqc_mini_cli_count_rx_ready_paths(xqc_mini_cli_user_conn_t *user_conn)
+{
+    int ready_paths = 0;
+
+    for (int i = 0; i < MAX_PATH_CNT; i++) {
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (path->is_active && path->fd >= 0 && path->rx_batch != NULL
+            && path->local_addr != NULL && path->peer_addr != NULL)
+        {
+            ready_paths++;
+        }
+    }
+
+    return ready_paths;
+}
+
 static void
 xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -2278,12 +2308,29 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     user_conn->rx_arbiter_running = 1;
     stats->rx_arbiter_calls++;
     xqc_usec_t callback_start = xqc_now();
+    int ready_paths = xqc_mini_cli_count_rx_ready_paths(user_conn);
+    int packets_per_path = ready_paths >= 2
+        ? CLIENT_RX_DUAL_PATH_PACKETS
+        : CLIENT_RX_SINGLE_PATH_PACKETS;
+
+    if (user_conn->rx_last_budget_active_paths != ready_paths
+        || user_conn->rx_last_budget_packets_per_path != packets_per_path)
+    {
+        printf("[diag_rx_budget] active_paths=%d per_path_limit=%d"
+               " round_limit=%d mode=%s\n",
+               ready_paths, packets_per_path,
+               ready_paths * packets_per_path,
+               ready_paths >= 2 ? "dual" : "single");
+        user_conn->rx_last_budget_active_paths = ready_paths;
+        user_conn->rx_last_budget_packets_per_path = packets_per_path;
+    }
+
     int round_packets = 0;
     int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
     for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
         int path_index = (start_index + offset) % MAX_PATH_CNT;
         round_packets += xqc_mini_cli_recv_path_batch(
-            &user_conn->paths[path_index]);
+            &user_conn->paths[path_index], packets_per_path);
         if (user_conn->rx_shutdown) {
             break;
         }
@@ -3088,6 +3135,8 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->rx_next_path_index = 0;
     user_conn->rx_arbiter_running = 0;
     user_conn->rx_shutdown = 0;
+    user_conn->rx_last_budget_active_paths = -1;
+    user_conn->rx_last_budget_packets_per_path = -1;
     pthread_mutex_init(&user_conn->download_write_lock, NULL);
     pthread_cond_init(&user_conn->download_write_cond, NULL);
     pthread_cond_init(&user_conn->download_write_space_cond, NULL);
@@ -3105,8 +3154,11 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->paths[i].last_recover_probe_time = 0;
     }
 
-    printf("[resolved-rx] mode=%s per_path=%d rounds=1\n",
-        xqc_mini_cli_rx_mode(), CLIENT_RX_PER_PATH_PACKETS);
+    printf("[resolved-rx] mode=%s single_per_path=%d dual_per_path=%d"
+           " dual_round_max=%d rounds=1\n",
+        xqc_mini_cli_rx_mode(), CLIENT_RX_SINGLE_PATH_PACKETS,
+        CLIENT_RX_DUAL_PATH_PACKETS,
+        MAX_PATH_CNT * CLIENT_RX_DUAL_PATH_PACKETS);
 
     ret = xqc_mini_cli_promote_available_initial_interface(user_conn);
     if (ret != XQC_OK) {

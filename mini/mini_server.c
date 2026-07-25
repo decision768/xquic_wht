@@ -1,6 +1,8 @@
 #include "mini_server.h"
 #include <stdint.h>
 #include <strings.h>
+
+#define SERVER_PATH_FAILOVER_PTO 2
 // 去除字符串首尾空白字符
 static char *
 xqc_mini_svr_trim_space(char *text)
@@ -88,6 +90,21 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
                 sizeof(args->env_cfg.default_send_file));
             strncpy(args->env_cfg.default_send_file, value,
                 sizeof(args->env_cfg.default_send_file) - 1);
+        } else if (strcmp(key, "cc") == 0
+            || strcmp(key, "congestion_control") == 0)
+        {
+            if (strcasecmp(value, "bbr") == 0) {
+                args->quic_cfg.cc = CC_TYPE_BBR;
+
+            } else if (strcasecmp(value, "cubic") == 0) {
+                args->quic_cfg.cc = CC_TYPE_CUBIC;
+
+            } else {
+                fprintf(stderr,
+                    "[diag_server_cc] warning=invalid_cc value=%s fallback=bbr\n",
+                    value);
+                args->quic_cfg.cc = CC_TYPE_BBR;
+            }
         } else if (strcmp(key, "mp_sched") == 0) {
             if (strcmp(value, "minrtt") == 0
                 || strcmp(value, "backup") == 0
@@ -123,8 +140,8 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
                 }
                 args->quic_cfg.mp_diag_interval_ms = 250;
             }
- 
-        }else if (strcmp(key, "kernel_sndbuf") == 0) {
+
+        } else if (strcmp(key, "kernel_sndbuf") == 0) {
             char *endptr = NULL;
             long size = strtol(value, &endptr, 10);
             if (endptr != value && *endptr == '\0' && size > 0) {
@@ -477,6 +494,13 @@ xqc_mini_svr_get_cc_cb(xqc_mini_svr_args_t *args)
     }
     return ccc;
 }
+
+static const char *
+xqc_mini_svr_get_cc_name(CC_TYPE cc)
+{
+    return cc == CC_TYPE_CUBIC ? "cubic" : "bbr";
+}
+
 /* Select the multipath scheduler callback. */
 /* Resolve the configured multipath scheduler name. */
 static const char *
@@ -552,6 +576,10 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
 {
     /* parse congestion control callback */
     xqc_cong_ctrl_callback_t ccc = xqc_mini_svr_get_cc_cb(args);
+    printf("[diag_server_cc] selected=%s\n",
+        xqc_mini_svr_get_cc_name(args->quic_cfg.cc));
+    printf("[diag_path_failover_config] role=server enabled=1 pto_threshold=%u\n",
+        SERVER_PATH_FAILOVER_PTO);
     /* parse mp scheduler callback */
     xqc_scheduler_callback_t sched = xqc_mini_svr_get_sched_cb(args);
     const char *resolved_sched = xqc_mini_svr_resolve_sched_name(args);
@@ -579,6 +607,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .enable_multipath = args->quic_cfg.multipath,
         .scheduler_callback = sched,
         .scheduler_params = {
+            .pto_cnt_thr = SERVER_PATH_FAILOVER_PTO,
             .mp_diag_enabled = args->quic_cfg.mp_diag,
             .mp_diag_interval_ms = args->quic_cfg.mp_diag_interval_ms,
         },

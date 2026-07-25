@@ -5,6 +5,111 @@
 #include "src/transport/xqc_stream.h"
 #include "src/transport/xqc_utils.h"
 #include "src/transport/xqc_reinjection.h"
+#include <inttypes.h>
+#include <stdio.h>
+
+
+#define XQC_MP_PATH_FAILOVER_MIN_PTO           2
+#define XQC_MP_PATH_HEALTH_MIN_WINDOW_US       1000000
+#define XQC_MP_PATH_HEALTH_MAX_WINDOW_US       3000000
+#define XQC_MP_PATH_HEALTH_SRTT_MULTIPLIER     8
+
+
+static unsigned
+xqc_timer_mp_path_failover_threshold(xqc_connection_t *conn)
+{
+    unsigned threshold = conn->conn_settings.scheduler_params.pto_cnt_thr;
+    return xqc_max(threshold, XQC_MP_PATH_FAILOVER_MIN_PTO);
+}
+
+
+static xqc_path_ctx_t *
+xqc_timer_find_healthy_alternate_path(xqc_connection_t *conn,
+    xqc_path_ctx_t *failed_path, xqc_usec_t now, unsigned failover_threshold)
+{
+    xqc_list_head_t *pos, *next;
+    xqc_path_ctx_t *best = NULL;
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        xqc_path_ctx_t *candidate = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        xqc_send_ctl_t *ctl = candidate->path_send_ctl;
+
+        if (candidate == failed_path
+            || candidate->path_state != XQC_PATH_STATE_ACTIVE
+            || candidate->app_path_status == XQC_APP_PATH_STATUS_FROZEN
+            || ctl == NULL
+            || ctl->ctl_pto_count >= failover_threshold)
+        {
+            continue;
+        }
+
+        if (ctl->ctl_bytes_in_flight > 0
+            && ctl->ctl_delivered_time > 0
+            && now > ctl->ctl_delivered_time)
+        {
+            xqc_usec_t health_window = xqc_max(
+                XQC_MP_PATH_HEALTH_SRTT_MULTIPLIER * ctl->ctl_srtt,
+                (xqc_usec_t)XQC_MP_PATH_HEALTH_MIN_WINDOW_US);
+            health_window = xqc_min(health_window,
+                (xqc_usec_t)XQC_MP_PATH_HEALTH_MAX_WINDOW_US);
+            if (now - ctl->ctl_delivered_time > health_window) {
+                continue;
+            }
+        }
+
+        if (best == NULL
+            || ctl->ctl_pto_count < best->path_send_ctl->ctl_pto_count
+            || (ctl->ctl_pto_count == best->path_send_ctl->ctl_pto_count
+                && ctl->ctl_delivered_time
+                    > best->path_send_ctl->ctl_delivered_time))
+        {
+            best = candidate;
+        }
+    }
+
+    return best;
+}
+
+
+static xqc_bool_t
+xqc_timer_try_mp_path_failover(xqc_connection_t *conn,
+    xqc_path_ctx_t *path, xqc_send_ctl_t *send_ctl, xqc_usec_t now)
+{
+    if (!conn->enable_multipath
+        || conn->active_path_count < 2
+        || path->path_state != XQC_PATH_STATE_ACTIVE
+        || path->app_path_status == XQC_APP_PATH_STATUS_FROZEN)
+    {
+        return XQC_FALSE;
+    }
+
+    unsigned threshold = xqc_timer_mp_path_failover_threshold(conn);
+    xqc_path_ctx_t *alternate = xqc_timer_find_healthy_alternate_path(
+        conn, path, now, threshold);
+    if (alternate == NULL) {
+        return XQC_FALSE;
+    }
+
+    if (send_ctl->ctl_pto_count < threshold) {
+        if (send_ctl->ctl_pto_count == 1) {
+            printf("[diag_path_failover] action=suspect path=%" PRIu64
+                   " pto=%u threshold=%u inflight=%u alternate=%" PRIu64 "\n",
+                path->path_id, send_ctl->ctl_pto_count, threshold,
+                send_ctl->ctl_bytes_in_flight, alternate->path_id);
+        }
+        return XQC_FALSE;
+    }
+
+    unsigned inflight = send_ctl->ctl_bytes_in_flight;
+    xqc_int_t ret = xqc_path_immediate_close(path);
+    printf("[diag_path_failover] action=%s path=%" PRIu64
+           " pto=%u threshold=%u inflight=%u alternate=%" PRIu64
+           " ret=%d\n",
+        ret == XQC_OK ? "close" : "close_failed", path->path_id,
+        send_ctl->ctl_pto_count, threshold, inflight, alternate->path_id, ret);
+
+    return ret == XQC_OK ? XQC_TRUE : XQC_FALSE;
+}
 
 
 static const char * const timer_type_2_str[XQC_TIMER_N] = {
@@ -107,6 +212,11 @@ xqc_timer_loss_detection_timeout(xqc_timer_type_t type, xqc_usec_t now, void *us
     conn->max_pto_cnt = xqc_max(send_ctl->ctl_pto_count, conn->max_pto_cnt);
     xqc_log(conn->log, XQC_LOG_DEBUG, "|xqc_send_ctl_set_loss_detection_timer|PTO|conn:%p|pto_count:%ud", 
             conn, send_ctl->ctl_pto_count);
+
+    if (xqc_timer_try_mp_path_failover(conn, path, send_ctl, now)) {
+        return;
+    }
+
     xqc_send_ctl_set_loss_detection_timer(send_ctl);
 
 }
