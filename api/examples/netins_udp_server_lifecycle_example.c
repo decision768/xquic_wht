@@ -2,10 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 
 int
-netins_udp_v2_server_lifecycle_example(const char *bind_host, int port,
+netins_udp_server_lifecycle_example(const char *bind_host, int port,
     const char *certificate_file, const char *private_key_file)
 {
     int result = NETINS_UDP_ERROR;

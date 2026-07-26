@@ -1,10 +1,10 @@
 #include <errno.h>
 #include <stdio.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 
 int
-netins_udp_v2_client_lifecycle_example(const char *host, int port,
+netins_udp_client_lifecycle_example(const char *host, int port,
     const char *first_interface, const char *second_interface)
 {
     if (netins_udp_init() != NETINS_UDP_OK) {
@@ -55,7 +55,7 @@ netins_udp_v2_client_lifecycle_example(const char *host, int port,
         goto error;
     }
 
-    printf("V2 client state after connect: %d\n",
+    printf("client state after connect: %d\n",
         netins_udp_get_state(client));
     netins_udp_close(client);
     return netins_udp_cleanup();
@@ -67,7 +67,7 @@ error:
         (void)netins_udp_get_last_error_msg(client, message,
             sizeof(message));
         fprintf(stderr,
-            "V2 client lifecycle failed: errno=%d, handle_error=%d, %s\n",
+            "client lifecycle failed: errno=%d, handle_error=%d, %s\n",
             call_errno, netins_udp_get_last_error_code(client),
             message[0] != '\0' ? message : "no error message");
     }

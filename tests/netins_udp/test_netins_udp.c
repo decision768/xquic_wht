@@ -119,7 +119,7 @@ int
 main(void)
 {
     prepare_mock_stats();
-    assert(netins_udp_get_api_version() == NETINS_UDP_API_VERSION);
+    assert(netins_udp_get_api_version() == 2U);
 
     netins_udp_observer_t *host = netins_udp_observer_new();
     assert(host != NULL);

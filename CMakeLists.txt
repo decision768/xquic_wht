@@ -416,6 +416,7 @@ endif()
 set (
     XQC_SOURCE
     ${XQC_SOURCE}
+    "src/netins_udp/netins_udp_api_version.c"
     "src/netins_udp/netins_udp_backend.c"
     "src/netins_udp/netins_udp_observer.c"
     "src/netins_udp/netins_udp_transport_metrics.c"
@@ -451,6 +452,7 @@ option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
 if(NETINS_UDP_BUILD_TESTS)
     enable_testing()
     add_executable(netins_udp_unit_test
+        src/netins_udp/netins_udp_api_version.c
         src/netins_udp/netins_udp_observer.c
         tests/netins_udp/test_netins_udp.c
     )
@@ -500,9 +502,9 @@ if(NETINS_UDP_BUILD_TESTS)
 
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
-        add_test(NAME netins_udp_v2_abi_guard
+        add_test(NAME netins_udp_api_guard
             COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_v2_abi.py)
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_netins_udp_api.py)
     endif()
 
     # Manual real-transport acceptance test. It requires a certificate/key:
@@ -524,9 +526,9 @@ if(NETINS_UDP_BUILD_TESTS)
     add_library(netins_udp_example OBJECT
         api/examples/netins_udp_snapshot_example.c
         api/examples/netins_udp_connect_example.c
-        api/examples/netins_udp_v2_client_lifecycle_example.c
-        api/examples/netins_udp_v2_server_lifecycle_example.c
-        api/examples/netins_udp_v2_h3_request_example.c
+        api/examples/netins_udp_client_lifecycle_example.c
+        api/examples/netins_udp_server_lifecycle_example.c
+        api/examples/netins_udp_h3_request_example.c
     )
     target_include_directories(netins_udp_example PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -592,8 +594,12 @@ install(FILES include/xquic/netins_udp.h
 install(FILES
     api/README.md
     api/NETINS_UDP_API_使用说明.md
+    api/NETINS_UDP_API_设计说明.md
     api/examples/netins_udp_snapshot_example.c
     api/examples/netins_udp_connect_example.c
     api/examples/netins_udp_connect_main.c
+    api/examples/netins_udp_client_lifecycle_example.c
+    api/examples/netins_udp_server_lifecycle_example.c
+    api/examples/netins_udp_h3_request_example.c
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
 )

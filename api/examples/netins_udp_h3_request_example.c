@@ -2,14 +2,14 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 
 /*
- * Issues one HTTP/3 GET on an already connected V2 HTTP3 client and copies the
+ * Issues one HTTP/3 GET on an already connected client and copies the
  * response body to output. File I/O remains on the caller thread.
  */
 int
-netins_udp_v2_h3_get_example(netins_udp_t *client,
+netins_udp_h3_get_example(netins_udp_t *client,
     const char *path, FILE *output)
 {
     if (client == NULL || path == NULL || output == NULL) {

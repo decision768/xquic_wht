@@ -10,7 +10,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <event2/event.h>
-#include <xquic/netins_udp.h>
+#include "netins_udp_legacy.h"
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>

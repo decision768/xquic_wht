@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 #include "netins_udp_v2_transport.h"
 
 typedef struct netins_udp_v2_h3_parent_snapshot_s {

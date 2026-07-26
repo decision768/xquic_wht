@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 #include "netins_udp_v2_internal.h"
 #include "netins_udp_v2_transport.h"
 

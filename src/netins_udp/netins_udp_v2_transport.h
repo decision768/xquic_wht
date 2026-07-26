@@ -108,9 +108,9 @@ typedef struct netins_udp_v2_transport_snapshot_s {
 } netins_udp_v2_transport_snapshot_t;
 
 /*
- * Private, version-independent configuration passed from the V2 object to the
- * existing standalone client.  This avoids including the V1 and V2 public
- * headers in the same translation unit.
+ * Private, version-independent configuration passed from the unified object
+ * to the compatibility client backend. This keeps the installed header and
+ * compatibility structure contract in separate translation units.
  */
 typedef struct netins_udp_v2_transport_config_s {
     char host[NETINS_UDP_V2_TRANSPORT_HOST_LEN];

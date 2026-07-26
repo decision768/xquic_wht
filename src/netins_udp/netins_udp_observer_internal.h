@@ -3,13 +3,13 @@
 
 #include <sys/socket.h>
 
-#include <xquic/netins_udp.h>
+#include "netins_udp_legacy.h"
 #include <xquic/xquic.h>
 
 /*
- * NetIns-private extended counters.  They deliberately stay outside the
- * installed V1 structures and xqc_conn_stats_t so neither public ABI changes.
- * Array indexes are aligned with the stable V1 observer path slots.
+ * NetIns-private extended counters. They deliberately stay outside both the
+ * compatibility observer structures and xqc_conn_stats_t. Array indexes are
+ * aligned with the observer's stable path slots.
  */
 typedef struct netins_udp_observer_extended_path_s {
     uint64_t path_id;

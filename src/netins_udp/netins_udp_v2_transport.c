@@ -4,41 +4,41 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <xquic/netins_udp.h>
+#include "netins_udp_legacy.h"
 #include <xquic/xquic.h>
 
 #include "netins_udp_client_internal.h"
 
 _Static_assert(NETINS_UDP_MAX_PATHS
         == NETINS_UDP_V2_TRANSPORT_MAX_PATHS,
-    "V1 client and V2 transport path limits must match");
+    "compatibility client and transport path limits must match");
 _Static_assert(NETINS_UDP_SERVER_ADDRESS_LEN
         == NETINS_UDP_V2_TRANSPORT_HOST_LEN,
-    "V1 client and V2 transport host limits must match");
+    "compatibility client and transport host limits must match");
 _Static_assert(NETINS_UDP_SERVER_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_SERVER_NAME_LEN,
-    "V1 client and V2 transport server-name limits must match");
+    "compatibility client and transport server-name limits must match");
 _Static_assert(NETINS_UDP_INTERFACE_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_INTERFACE_NAME_LEN,
-    "V1 client and V2 transport interface-name limits must match");
+    "compatibility client and transport interface-name limits must match");
 _Static_assert(NETINS_UDP_METHOD_LEN
         == NETINS_UDP_V2_TRANSPORT_METHOD_LEN,
-    "V1 client and V2 transport method limits must match");
+    "compatibility client and transport method limits must match");
 _Static_assert(NETINS_UDP_REQUEST_PATH_LEN
         == NETINS_UDP_V2_TRANSPORT_REQUEST_PATH_LEN,
-    "V1 client and V2 transport request-path limits must match");
+    "compatibility client and transport request-path limits must match");
 _Static_assert(NETINS_UDP_CONTENT_TYPE_LEN
         == NETINS_UDP_V2_TRANSPORT_CONTENT_TYPE_LEN,
-    "V1 client and V2 transport content-type limits must match");
+    "compatibility client and transport content-type limits must match");
 _Static_assert(NETINS_UDP_CLIENT_H3_MAX_HEADERS
         == NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS,
-    "V1 client and V2 transport H3 header counts must match");
+    "compatibility client and transport H3 header counts must match");
 _Static_assert(NETINS_UDP_CLIENT_H3_HEADER_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_H3_HEADER_NAME_LEN,
-    "V1 client and V2 transport H3 header-name limits must match");
+    "compatibility client and transport H3 header-name limits must match");
 _Static_assert(NETINS_UDP_CLIENT_H3_HEADER_VALUE_LEN
         == NETINS_UDP_V2_TRANSPORT_H3_HEADER_VALUE_LEN,
-    "V1 client and V2 transport H3 header-value limits must match");
+    "compatibility client and transport H3 header-value limits must match");
 
 static int
 netins_udp_v2_transport_legacy_state(int state)

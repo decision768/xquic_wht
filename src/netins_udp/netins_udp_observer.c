@@ -313,12 +313,6 @@ netins_udp_observer_unregister(netins_udp_observer_t *netins)
     }
 }
 
-uint32_t
-netins_udp_get_api_version(void)
-{
-    return NETINS_UDP_API_VERSION;
-}
-
 netins_udp_observer_t *
 netins_udp_observer_new(void)
 {

@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include <xquic/netins_udp.h>
+#include "netins_udp_legacy.h"
 #include <xquic/xquic.h>
 
 /*

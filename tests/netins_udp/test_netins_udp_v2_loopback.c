@@ -9,7 +9,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 
 #define LOOPBACK_REQUEST_COUNT 5
 #define LOOPBACK_CHUNK_SIZE (64U * 1024U)

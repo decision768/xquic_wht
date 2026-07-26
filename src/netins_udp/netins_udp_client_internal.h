@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include <xquic/netins_udp.h>
+#include "netins_udp_legacy.h"
 #include <xquic/xquic.h>
 
 #include "netins_udp_observer_internal.h"
@@ -50,8 +50,8 @@ typedef struct netins_udp_client_h3_info_s {
 } netins_udp_client_h3_info_t;
 
 /*
- * Private controls used by the V2 lifecycle adapter.  The public V1 client
- * continues to use the same defaults and blocking connect behavior.
+ * Private controls used by the unified lifecycle adapter. The compatibility
+ * client backend continues to use the same defaults and blocking behavior.
  */
 int netins_udp_client_configure_transport(netins_udp_client_t *client,
     const xqc_cong_ctrl_callback_t *congestion_control,

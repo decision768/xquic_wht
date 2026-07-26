@@ -1,226 +1,52 @@
-# netins_udp connection and status API
+# NetIns UDP API
 
-`netins_udp` exposes read-only UDP/QUIC connection status for the real XQUIC
-connections owned by `mini_client` and `mini_server`. It also provides an
-independent QUIC/H3 client with bounded, thread-safe HTTP/3 GET/POST send and
-receive queues.
-
-Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md).
-
-## V2 contract work
-
-The installed API is still V1. The unified client/listener/accepted-
-connection contract for V2 is documented in
-[`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
-non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
-The V2 client lifecycle, client and server HTTP/3 request symbols, and server
-listener/accepted-connection lifecycle are now included in the internal source
-and test targets against that draft header, but the header and API version are
-not installed/switched until the remaining V2 acceptance work is complete.
-
-The current V2 lifecycle slice supports HTTP/3 connections by adapting the
-existing standalone client. The server lifecycle uses an independent
-single-socket XQUIC server backend; accepted handles share that socket and
-engine through reference-counted ownership while retaining independent QUIC
-close lifecycles. Closing the listener wakes blocked accepts and does not close
-already returned connections. Existing `mini_server` Libevent and UDP receive
-logic is unchanged.
-
-Accepted HTTP/3 requests are delivered through a bounded per-connection
-accept queue. Request bodies use a bounded receive queue and responses use a
-bounded send queue; application threads never call XQUIC directly. A request
-keeps its own backend reference and therefore remains safe to inspect and
-close after its accepted connection handle starts closing.
-
-Before `netins_udp_connect()` or `netins_udp_listen()`, set
-`NETINS_UDP_OPT_APP_PROTOCOL` to `NETINS_UDP_APP_HTTP3`; listeners also require
-a certificate and private key. Client GET/POST request objects support partial
-send/receive, FIN, DONTWAIT, PEEK, extension headers, request info and
-independent close. Server request objects additionally support accept,
-request-body receive, single-shot response configuration, response-body send,
-request info and independent close. Stage 8 additionally provides independent
-notification descriptors for listeners, accepted connections, client
-connections and HTTP/3 requests, plus private-observer-backed V2 connection
-and path snapshots. The first formal V2 surface is HTTP/3-only; connection-
-level raw send/receive is not published. Custom CA/client-certificate
-verification, generic SOCKOPT handling, and mini program migration remain
-later V2 stages.
-
-See `examples/netins_udp_v2_server_lifecycle_example.c` for the
-listener/accept/request/response/shutdown/close sequence.
-
-## Independent client connection
-
-The library also provides a first connection-lifecycle API that creates a real
-QUIC/H3 client without starting `mini_client`:
-
-1. Initialize `netins_udp_client_config_t` with
-   `netins_udp_client_config_init()`.
-2. Set `server_address`, `server_port`, the optional TLS `server_name`, and up
-   to `NETINS_UDP_MAX_PATHS` interface names.
-3. Call `netins_udp_client_create()` and `netins_udp_client_connect()`.
-4. Query the connection through `netins_udp_client_get_snapshot()` or the
-   existing process-local registry.
-5. Open HTTP/3 requests with `netins_udp_stream_open()`, submit POST body data
-   with `netins_udp_stream_send()`, and read responses with
-   `netins_udp_stream_recv()`.
-6. Close every stream with `netins_udp_stream_close()` and release the
-   connection and its private engine thread with
-   `netins_udp_client_close()`.
-
-`netins_udp_client_connect()` blocks until the H3 handshake completes or the
-configured timeout expires. The client owns its UDP sockets, XQUIC engine, poll
-thread, multipath creation attempts, and status observer. It does not alter or
-reuse the engines owned by `mini_client` or `mini_server`.
-
-A successful connect means that the QUIC/H3 handshake is complete. Additional
-multipath paths can still be validating, so applications should poll the
-snapshot until the expected `active_path_count` appears. Binding sockets to
-named interfaces uses Linux `SO_BINDTODEVICE` and can require elevated network
-capabilities. Certificate verification uses the TLS library's default trust
-chain; custom CA loading is not part of this revision.
-
-## HTTP/3 data transfer
-
-Each `netins_udp_stream_t` represents one HTTP/3 request. `GET` sends its FIN
-with the request headers. `POST` requires an exact `request_body_length`; the
-implementation also adds the single-segment metadata expected by this
-project's `mini_server`.
+NetIns UDP is the installed QUIC/Multipath QUIC API supplied by this
+repository. Third-party programs use one header and one object model:
 
 ```c
-netins_udp_stream_config_t request;
-netins_udp_stream_config_init(&request);
-snprintf(request.method, sizeof(request.method), "GET");
-snprintf(request.path, sizeof(request.path), "/upload/ccc.bin");
-
-netins_udp_stream_t *stream = NULL;
-int ret = netins_udp_stream_open(client, &request, &stream);
-if (ret == NETINS_UDP_OK) {
-    ret = netins_udp_stream_wait_open(stream, 5000);
-}
-
-unsigned char data[64 * 1024];
-int fin = 0;
-while (ret == NETINS_UDP_OK && !fin) {
-    int64_t received = netins_udp_stream_recv(
-        stream, data, sizeof(data), &fin, 5000);
-    if (received < 0) {
-        ret = (int)received;
-    }
-}
-if (stream != NULL) {
-    (void)netins_udp_stream_close(stream, 5000);
-}
+#include <xquic/netins_udp.h>
 ```
 
-Send and receive calls operate on bounded queues. They never call XQUIC from
-the application thread. A timeout or a full/empty queue returns
-`NETINS_UDP_WOULD_BLOCK`; a positive send return may be smaller than the input,
-so the caller must retry the remainder. Close streams before closing their
-client.
+The public surface provides:
 
-See `examples/netins_udp_connect_example.c` for connection setup.
+- blocking or nonblocking client connect;
+- listener and independently owned accepted connections;
+- HTTP/3 GET/POST request objects and response objects;
+- connection, multipath, path, RTT, CWND, inflight and traffic snapshots;
+- independent readiness descriptors for listener, connection and request
+  handles;
+- explicit error and close-reason queries.
 
-Build and run the standalone connection check with:
+Only `include/xquic/netins_udp.h` is installed. Compatibility adapters used by
+the mini programs and the implementation are private and are not part of the
+third-party ABI.
+
+Documentation:
+
+- [Chinese API guide](NETINS_UDP_API_使用说明.md)
+- [Architecture and ABI contract](NETINS_UDP_API_设计说明.md)
+- [Examples](examples)
+
+Typical build:
 
 ```sh
-cmake -DNETINS_UDP_BUILD_CONNECT_EXAMPLE=ON ..
-make -j netins_udp_connect_cli
-./netins_udp_connect_cli 10.12.54.143 8443 test.xquic.com \
-    rmnet_data0 usb0
+cmake -S . -B build \
+  -DSSL_TYPE=openssl \
+  -DSSL_PATH=/path/to/openssl \
+  -DNETINS_UDP_BUILD_TESTS=ON
+cmake --build build -j
+cmake --install build --prefix /opt/netins-udp
 ```
 
-## Scope
-
-- All public names use the `netins_udp_` prefix.
-- The API reports connection lifecycle, multipath state, path state, addresses,
-  interface names when known, packet counts, byte counters, RTT, loss, inflight
-  bytes, and interval rates.
-- The registry is process-local. An independent client can query the connection
-  it created in its own process. A monitor of `mini_client` or `mini_server`
-  must still run in that mini process and use the same linked `netins_udp`
-  implementation instance. Do not load a second private copy of `libxquic` in
-  a plugin. Cross-process access requires a separate IPC service and is not
-  part of this API.
-- Snapshot getters only copy mutex-protected state and never call the XQUIC
-  engine. A caller can close a client it created with `netins_udp_client_*`,
-  but cannot close or mutate connections owned by the mini applications.
-
-## Third-party lifecycle
-
-1. Call `netins_udp_observer_list_connections(NULL, 0, &count)` to query the number of
-   live registered connections.
-2. Allocate an ID array and call `netins_udp_observer_list_connections()` again.
-3. Use `netins_udp_observer_get_snapshot_by_id()` for one-shot polling, or call
-   `netins_udp_observer_open()` to retain a connection handle.
-4. Initialize every output structure with its matching
-   `NETINS_UDP_*_INITIALIZER` macro before a getter call.
-5. Release a retained handle with `netins_udp_observer_close()`.
-
-When XQUIC closes a connection, the connection disappears from the registry.
-A handle retained before closure remains valid and returns the final CLOSED or
-ERROR snapshot until the third party releases it. `netins_udp_observer_close()` only
-releases the API handle; it never closes XQUIC.
-
-See `examples/netins_udp_snapshot_example.c` for polling code.
-
-## Host integration
-
-The mini applications create and bind one observer in their H3 connection-create
-callback. A persistent Libevent timer refreshes the cached snapshot every 500
-ms from the same thread that drives XQUIC. Handshake and close callbacks update
-the lifecycle state. Client path metadata includes the configured interface
-name, while both sides report path local and peer address tuples.
-
-Observer allocation, binding, or timer failure disables status observation for
-that connection but does not fail the QUIC connection or data transfer.
-
-## Build and delivery
-
-The implementation is part of `libxquic.so` and `libxquic-static.a`. Public
-consumers include `<xquic/netins_udp.h>` and link the same XQUIC library that is
-loaded by the host process. `cmake --install` installs the public header and
-both library targets.
-
-Optional unit test:
+A consumer links `libxquic` plus the platform libraries required by the XQUIC
+build:
 
 ```sh
-cmake -DNETINS_UDP_BUILD_TESTS=ON ..
-make -j
-ctest --output-on-failure -R netins_udp_unit_test
+cc app.c -I/opt/netins-udp/include -L/opt/netins-udp/lib \
+  -lxquic -lssl -lcrypto -lpthread -ldl -lm
 ```
 
-Runtime integration checks:
-
-```sh
-./mini_client | grep netins_udp
-./mini_server | grep netins_udp
-```
-
-Each real H3 connection prints one registration line containing a non-invalid
-`connection_id` and `registry_query=ok`. The one-time `multipath` marker proves
-that the live snapshot exposed at least two paths. The third-party poller should
-then see that ID, CONNECTED after the handshake, both path records during a
-dual-path run, and no registry entry after connection close.
-
-Validate logs from one real client/server run with:
-
-```sh
-python3 tests/netins_udp/verify_real_connection.py client.log server.log
-```
-
-Use `--allow-single-path` only for an intentional single-interface test.
-
-## Counter meaning
-
-- `bytes_wire_sent`: all encoded QUIC bytes sent on a path.
-- `bytes_sent`: encoded bytes of packets carrying application data.
-- `bytes_delivered`: transport bytes acknowledged on the sending side.
-- `bytes_recv`: encoded bytes of received packets carrying stream/datagram data.
-- `bytes_recv_effective`: STREAM payload moved upward by `xqc_stream_recv()`,
-  de-duplicated by stream offset and attributed to the path that supplied it.
-- `*_reinject` and `bytes_sent_retransmitted`: reinjection/retransmission
-  subsets; they must not be added again to totals.
-
-Rates are deltas between host refreshes and are expressed in Mbit/s. A first
-snapshot has a zero interval rate by design.
+The public data plane is HTTP/3. Connection-level raw byte-stream send/receive
+is deliberately not published because QUIC multiplexes independent streams
+and cannot provide TCP-like connection byte-stream semantics without an
+additional framing contract.

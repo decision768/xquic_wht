@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "api/draft/netins_udp_v2.h"
+#include <xquic/netins_udp.h>
 
 #include <errno.h>
 #include <limits.h>
@@ -20,19 +20,19 @@
 
 _Static_assert(NETINS_UDP_MAX_PATHS
         == NETINS_UDP_V2_TRANSPORT_MAX_PATHS,
-    "V2 public and transport path limits must match");
+    "public and transport path limits must match");
 _Static_assert(NETINS_UDP_ADDRESS_LEN
         == NETINS_UDP_V2_TRANSPORT_HOST_LEN,
-    "V2 public and transport host limits must match");
+    "public and transport host limits must match");
 _Static_assert(NETINS_UDP_SERVER_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_SERVER_NAME_LEN,
-    "V2 public and transport server-name limits must match");
+    "public and transport server-name limits must match");
 _Static_assert(NETINS_UDP_INTERFACE_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_INTERFACE_NAME_LEN,
-    "V2 public and transport interface-name limits must match");
+    "public and transport interface-name limits must match");
 _Static_assert(NETINS_UDP_FILE_PATH_LEN
         == NETINS_UDP_V2_TRANSPORT_FILE_PATH_LEN,
-    "V2 public and transport file-path limits must match");
+    "public and transport file-path limits must match");
 _Static_assert(NETINS_UDP_EVENT_CONNECTED
         == NETINS_UDP_V2_EVENT_CONNECTED
         && NETINS_UDP_EVENT_ACCEPTABLE
@@ -45,7 +45,7 @@ _Static_assert(NETINS_UDP_EVENT_CONNECTED
         && NETINS_UDP_EVENT_ERROR == NETINS_UDP_V2_EVENT_ERROR
         && NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE
             == NETINS_UDP_V2_EVENT_H3_REQUEST_ACCEPTABLE,
-    "V2 public and private notification bits must match");
+    "public and private notification bits must match");
 
 struct netins_udp_s {
     pthread_mutex_t lock;
@@ -588,7 +588,7 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
         {
             result = netins_udp_v2_set_option_error_locked(netins,
                 EOPNOTSUPP,
-                "the first formal V2 contract supports HTTP/3 only");
+                "the NetIns UDP API supports HTTP/3 only");
             break;
         }
         netins->app_protocol = protocol;
@@ -660,10 +660,6 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
         netins->congestion_control = *(const int *)value;
         break;
     }
-    case NETINS_UDP_OPT_SOCKOPT:
-        result = netins_udp_v2_set_option_error_locked(netins,
-            EOPNOTSUPP, "SOCKOPT is not implemented in the client lifecycle stage");
-        break;
     default:
         result = netins_udp_v2_set_option_error_locked(netins,
             EOPNOTSUPP, "unknown option");
@@ -794,13 +790,6 @@ netins_udp_get_opt(netins_udp_t *netins, int option,
         source = &int_value;
         required = sizeof(int_value);
         break;
-    case NETINS_UDP_OPT_SOCKOPT: {
-        pthread_mutex_unlock(&netins->lock);
-        int sockopt_result = netins_udp_v2_fail(netins, EOPNOTSUPP,
-            "SOCKOPT is set-only");
-        netins_udp_v2_end_call(netins);
-        return sockopt_result;
-    }
     default: {
         pthread_mutex_unlock(&netins->lock);
         int unknown_result = netins_udp_v2_fail(netins, EOPNOTSUPP,
@@ -845,7 +834,7 @@ netins_udp_v2_prepare_transport_config(netins_udp_t *netins,
     if (netins->app_protocol != NETINS_UDP_APP_HTTP3) {
         pthread_mutex_unlock(&netins->lock);
         return netins_udp_v2_fail(netins, EOPNOTSUPP,
-            "the V2 draft supports only APP_PROTOCOL=HTTP3");
+            "the NetIns UDP API supports only APP_PROTOCOL=HTTP3");
     }
     if (netins->tls.require_client_certificate
         || netins->tls.certificate_file[0] != '\0'
@@ -1032,7 +1021,7 @@ netins_udp_v2_prepare_server_config(netins_udp_t *netins,
     if (netins->app_protocol != NETINS_UDP_APP_HTTP3) {
         pthread_mutex_unlock(&netins->lock);
         return netins_udp_v2_fail(netins, EOPNOTSUPP,
-            "the V2 draft supports only APP_PROTOCOL=HTTP3");
+            "the NetIns UDP API supports only APP_PROTOCOL=HTTP3");
     }
     if (netins->interfaces.interface_count != 0) {
         pthread_mutex_unlock(&netins->lock);
