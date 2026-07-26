@@ -524,12 +524,15 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
 也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-客户端生命周期和阶段五 HTTP/3 数据对象已实现并编译以下增量 V2 符号：
+客户端生命周期、阶段五 HTTP/3 数据对象和阶段六服务端连接生命周期已实现并
+编译以下增量 V2 符号：
 
 - `netins_udp_init()` / `netins_udp_cleanup()`；
 - `netins_udp_new()` / `netins_udp_close()`；
 - `netins_udp_set_opt()` / `netins_udp_get_opt()`；
 - `netins_udp_connect()` / `netins_udp_get_state()`；
+- `netins_udp_listen()` / `netins_udp_accept()`；
+- `netins_udp_shutdown()`；
 - 连接句柄错误查询和 TLS 配置初始化。
 - H3 request/response 配置初始化和扩展头添加；
 - 客户端 `netins_udp_h3_request_open/send/recv/get_info/close`；
@@ -544,9 +547,21 @@ GET/POST、已知或未知正文长度、部分收发、显式 FIN、DONTWAIT、
 头和扩展响应头快照。request 打开时复制连接的阻塞模式及收发/关闭超时；连接
 关闭会中止底层 stream，但 request 句柄仍可查询并必须单独 close。
 
-调用 connect 前仍必须设置 `APP_PROTOCOL=HTTP3`。连接级 `netins_udp_send/recv`
+阶段六的 server backend 独立拥有一个 UDP socket、一个 XQUIC server engine、
+一个 poll/engine 工作线程和握手完成队列。listener 持有一个共享后端引用，每个
+已返回的 accepted connection 再持有一个引用；listener close 会唤醒阻塞
+accept、拒绝新连接并关闭尚未交付的连接，但不会关闭或释放已经交付的 accepted
+connection。accepted close 只请求关闭对应的 QUIC connection，最后一个引用释放
+后才停止工作线程并销毁共享 socket/engine。所有 XQUIC close 操作均由 engine
+线程执行，应用线程只设置关闭请求。现有 mini_server 的 Libevent、UDP 收包和
+engine 调度路径没有修改。
+
+调用 connect/listen 前仍必须设置 `APP_PROTOCOL=HTTP3`，listener 还必须配置服务端
+证书和私钥。当前 XQUIC TLS server backend 尚不支持强制客户端证书校验，因此
+`require_client_certificate` 或 listener `ca_file` 返回 `EOPNOTSUPP`。
+连接级 `netins_udp_send/recv`
 属于 RAW_STREAM，在当前实现中明确返回 `EOPNOTSUPP`。默认 RAW_STREAM、普通
-stream、server engine、accept 队列、request/connection 通知 fd、SOCKOPT 和
+stream、服务端 H3 request 数据对象、request/connection 通知 fd、SOCKOPT 和
 自定义客户端证书/CA 文件仍待后续阶段实现。
 
 为避免中途版本破坏，正式 `include/xquic/netins_udp.h` 和现有

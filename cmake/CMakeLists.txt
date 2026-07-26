@@ -370,6 +370,7 @@ set(
     "src/netins_udp/netins_udp_observer.c"
     "src/netins_udp/netins_udp_transport_metrics.c"
     "src/netins_udp/netins_udp_client.c"
+    "src/netins_udp/netins_udp_server.c"
     "src/netins_udp/netins_udp_v2_client.c"
     "src/netins_udp/netins_udp_v2_h3.c"
     "src/netins_udp/netins_udp_v2_transport.c"

@@ -5,9 +5,9 @@
  * netins_udp V2 public API contract draft.
  *
  * This file freezes the intended V2 source and ABI surface. The client
- * lifecycle and HTTP/3 request implementations compile against it internally,
- * but it remains non-installed until the remaining V2 objects and ABI checks
- * are complete.
+ * lifecycle, client HTTP/3 requests, and server connection lifecycle compile
+ * against it internally, but it remains non-installed until the remaining V2
+ * objects and ABI checks are complete.
  */
 
 #include <stddef.h>
@@ -476,12 +476,13 @@ NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int type);
 
 /*
- * Gracefully closes the represented connection/listener, stops owned workers,
- * releases all resources and invalidates the pointer. Calling close twice is
- * invalid. Once close begins, callers must not start new calls on the handle;
- * calls already inside the API are canceled/waited before memory is released.
- * Closing a listener also wakes blocked accept calls. Outstanding child
- * stream/request handles are aborted and detached but remain valid for
+ * Gracefully closes the represented connection/listener, releases its
+ * ownership and invalidates the pointer. Shared listener workers stop when
+ * their last accepted-connection reference is released. Calling close twice
+ * is invalid. Once close begins, callers must not start new calls on the
+ * handle; calls already inside the API are canceled/waited before memory is
+ * released. Closing a listener also wakes blocked accept calls. Outstanding
+ * child stream/request handles are aborted and detached but remain valid for
  * get_info/close; the caller must still close every child handle.
  */
 NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);

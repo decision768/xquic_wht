@@ -58,6 +58,8 @@ void netins_udp_client_set_close_timeout(netins_udp_client_t *client,
     uint32_t close_timeout_ms);
 int netins_udp_client_start_async(netins_udp_client_t *client);
 void netins_udp_client_request_close(netins_udp_client_t *client);
+void netins_udp_client_request_shutdown(netins_udp_client_t *client,
+    uint64_t application_error);
 int netins_udp_client_h3_request_open(netins_udp_client_t *client,
     const netins_udp_client_h3_config_t *config,
     netins_udp_stream_t **out_stream);

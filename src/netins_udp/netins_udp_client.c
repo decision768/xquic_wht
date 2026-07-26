@@ -21,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <xquic/xqc_errno.h>
 #include <xquic/xqc_http3.h>
 
 #define NETINS_UDP_CLIENT_DEFAULT_TIMEOUT_MS 20000U
@@ -116,6 +117,7 @@ struct netins_udp_client_s {
     int stop_requested;
     int close_requested;
     int close_sent;
+    uint64_t close_application_error;
     int state;
     int last_error_code;
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
@@ -806,6 +808,9 @@ netins_udp_client_h3_conn_close(xqc_h3_conn_t *h3_conn,
     (void)cid;
     netins_udp_client_t *client = h3c_user_data;
     int conn_error = h3_conn != NULL ? xqc_h3_conn_get_errno(h3_conn) : 0;
+    if (conn_error == H3_NO_ERROR) {
+        conn_error = 0;
+    }
 
     pthread_mutex_lock(&client->lock);
     client->h3_conn = NULL;
@@ -1668,6 +1673,8 @@ netins_udp_client_drive_close(netins_udp_client_t *client)
 {
     pthread_mutex_lock(&client->lock);
     int should_close = client->close_requested && !client->close_sent;
+    uint64_t application_error = client->close_application_error;
+    xqc_h3_conn_t *h3_conn = client->h3_conn;
     if (should_close) {
         client->close_sent = 1;
         if (client->state == NETINS_UDP_STATE_CONNECTED
@@ -1683,7 +1690,12 @@ netins_udp_client_drive_close(netins_udp_client_t *client)
         if (client->observer != NULL) {
             (void)netins_udp_backend_connection_closing(client->observer);
         }
-        (void)xqc_h3_conn_close(client->engine, &client->cid);
+        if (application_error != 0 && h3_conn != NULL) {
+            (void)xqc_conn_close_with_error(
+                xqc_h3_conn_get_xqc_conn(h3_conn), application_error);
+        } else {
+            (void)xqc_h3_conn_close(client->engine, &client->cid);
+        }
         xqc_engine_main_logic(client->engine);
     }
 }
@@ -2885,12 +2897,22 @@ netins_udp_client_get_last_error_msg(netins_udp_client_t *client,
 void
 netins_udp_client_request_close(netins_udp_client_t *client)
 {
+    netins_udp_client_request_shutdown(client, 0);
+}
+
+void
+netins_udp_client_request_shutdown(netins_udp_client_t *client,
+    uint64_t application_error)
+{
     if (client == NULL) {
         return;
     }
 
     pthread_mutex_lock(&client->lock);
     if (client->state != NETINS_UDP_STATE_CLOSED) {
+        if (!client->close_requested || application_error != 0) {
+            client->close_application_error = application_error;
+        }
         client->close_requested = 1;
     }
     pthread_cond_broadcast(&client->state_cond);

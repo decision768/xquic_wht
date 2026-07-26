@@ -243,6 +243,13 @@ netins_udp_v2_transport_client_request_close(
 }
 
 void
+netins_udp_v2_transport_client_request_shutdown(
+    netins_udp_v2_transport_client_t *client, uint64_t application_error)
+{
+    netins_udp_client_request_shutdown(client, application_error);
+}
+
+void
 netins_udp_v2_transport_client_close(
     netins_udp_v2_transport_client_t *client)
 {
