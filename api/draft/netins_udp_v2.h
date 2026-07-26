@@ -5,8 +5,9 @@
  * netins_udp V2 public API contract draft.
  *
  * This file freezes the intended V2 source and ABI surface. The client
- * lifecycle implementation compiles against it internally, but it remains
- * non-installed until the remaining V2 objects and ABI checks are complete.
+ * lifecycle and HTTP/3 request implementations compile against it internally,
+ * but it remains non-installed until the remaining V2 objects and ABI checks
+ * are complete.
  */
 
 #include <stddef.h>
@@ -445,6 +446,7 @@ typedef struct netins_udp_h3_request_info_s {
     char request_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     char response_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     uint64_t request_content_length;
+    /* UNKNOWN when the peer omitted Content-Length. */
     uint64_t response_content_length;
     /* HTTP body bytes only; H3/QPACK framing and headers are excluded. */
     uint64_t bytes_sent;
@@ -578,7 +580,8 @@ NETINS_UDP_PUBLIC void netins_udp_stream_close(
  * NETINS_UDP_CONTENT_LENGTH_UNKNOWN, Content-Length is omitted and FIN defines
  * the body end. Custom header names must be lowercase, must not start with ':',
  * and cannot replace headers managed by the library (content-length,
- * content-type, host or pseudo-headers).
+ * content-type, host or pseudo-headers). A finite blocking timeout expires
+ * with ETIMEDOUT; nonblocking lack of progress returns EAGAIN.
  */
 NETINS_UDP_PUBLIC void netins_udp_h3_request_config_init(
     netins_udp_h3_request_config_t *config);

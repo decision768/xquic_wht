@@ -21,6 +21,24 @@ _Static_assert(NETINS_UDP_SERVER_NAME_LEN
 _Static_assert(NETINS_UDP_INTERFACE_NAME_LEN
         == NETINS_UDP_V2_TRANSPORT_INTERFACE_NAME_LEN,
     "V1 client and V2 transport interface-name limits must match");
+_Static_assert(NETINS_UDP_METHOD_LEN
+        == NETINS_UDP_V2_TRANSPORT_METHOD_LEN,
+    "V1 client and V2 transport method limits must match");
+_Static_assert(NETINS_UDP_REQUEST_PATH_LEN
+        == NETINS_UDP_V2_TRANSPORT_REQUEST_PATH_LEN,
+    "V1 client and V2 transport request-path limits must match");
+_Static_assert(NETINS_UDP_CONTENT_TYPE_LEN
+        == NETINS_UDP_V2_TRANSPORT_CONTENT_TYPE_LEN,
+    "V1 client and V2 transport content-type limits must match");
+_Static_assert(NETINS_UDP_CLIENT_H3_MAX_HEADERS
+        == NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS,
+    "V1 client and V2 transport H3 header counts must match");
+_Static_assert(NETINS_UDP_CLIENT_H3_HEADER_NAME_LEN
+        == NETINS_UDP_V2_TRANSPORT_H3_HEADER_NAME_LEN,
+    "V1 client and V2 transport H3 header-name limits must match");
+_Static_assert(NETINS_UDP_CLIENT_H3_HEADER_VALUE_LEN
+        == NETINS_UDP_V2_TRANSPORT_H3_HEADER_VALUE_LEN,
+    "V1 client and V2 transport H3 header-value limits must match");
 
 static const xqc_scheduler_callback_t *
 netins_udp_v2_transport_scheduler(int scheduler)
@@ -229,4 +247,174 @@ netins_udp_v2_transport_client_close(
     netins_udp_v2_transport_client_t *client)
 {
     netins_udp_client_close(client);
+}
+
+int
+netins_udp_v2_transport_h3_request_open(
+    netins_udp_v2_transport_client_t *client,
+    const netins_udp_v2_transport_h3_config_t *config,
+    netins_udp_v2_transport_request_t **out_request)
+{
+    if (client == NULL || config == NULL || out_request == NULL
+        || config->header_count > NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    netins_udp_client_h3_config_t internal;
+    memset(&internal, 0, sizeof(internal));
+    snprintf(internal.method, sizeof(internal.method), "%s",
+        config->method);
+    snprintf(internal.path, sizeof(internal.path), "%s", config->path);
+    snprintf(internal.authority, sizeof(internal.authority), "%s",
+        config->authority);
+    snprintf(internal.content_type, sizeof(internal.content_type), "%s",
+        config->content_type);
+    internal.content_length = config->content_length;
+    internal.content_length_unknown = config->content_length_unknown;
+    internal.header_count = config->header_count;
+    for (uint32_t i = 0; i < config->header_count; ++i) {
+        snprintf(internal.headers[i].name,
+            sizeof(internal.headers[i].name), "%s",
+            config->headers[i].name);
+        snprintf(internal.headers[i].value,
+            sizeof(internal.headers[i].value), "%s",
+            config->headers[i].value);
+    }
+
+    if (netins_udp_client_h3_request_open(client, &internal,
+            out_request) != NETINS_UDP_OK)
+    {
+        errno = EIO;
+        return -1;
+    }
+    return 0;
+}
+
+int64_t
+netins_udp_v2_transport_h3_request_send(
+    netins_udp_v2_transport_request_t *request,
+    const void *data, size_t length, int fin, uint32_t timeout_ms,
+    int wait_forever)
+{
+    uint32_t legacy_timeout_ms = wait_forever
+        ? UINT32_MAX : timeout_ms;
+    int64_t result;
+    do {
+        result = netins_udp_stream_send(request, data, length, fin,
+            legacy_timeout_ms);
+    } while (wait_forever && result == NETINS_UDP_WOULD_BLOCK);
+    if (result >= 0) {
+        return result;
+    }
+    if (result == NETINS_UDP_WOULD_BLOCK) {
+        errno = !wait_forever && timeout_ms > 0
+            ? ETIMEDOUT : EAGAIN;
+    } else if (result == NETINS_UDP_CLOSED) {
+        errno = ECANCELED;
+    } else if (result == NETINS_UDP_BUFFER_TOO_SMALL) {
+        errno = ENOBUFS;
+    } else {
+        errno = EIO;
+    }
+    return -1;
+}
+
+int64_t
+netins_udp_v2_transport_h3_request_recv(
+    netins_udp_v2_transport_request_t *request,
+    void *data, size_t length, int *fin, int peek,
+    uint32_t timeout_ms, int wait_forever)
+{
+    uint32_t legacy_timeout_ms = wait_forever
+        ? UINT32_MAX : timeout_ms;
+    int64_t result;
+    do {
+        result = netins_udp_client_h3_request_recv(request, data,
+            length, fin, peek, legacy_timeout_ms);
+    } while (wait_forever && result == NETINS_UDP_WOULD_BLOCK);
+    if (result >= 0) {
+        return result;
+    }
+    if (result == NETINS_UDP_WOULD_BLOCK) {
+        errno = !wait_forever && timeout_ms > 0
+            ? ETIMEDOUT : EAGAIN;
+    } else if (result == NETINS_UDP_CLOSED) {
+        errno = ECANCELED;
+    } else if (result == NETINS_UDP_BUFFER_TOO_SMALL) {
+        errno = ENOBUFS;
+    } else {
+        errno = EIO;
+    }
+    return -1;
+}
+
+int
+netins_udp_v2_transport_h3_request_get_info(
+    netins_udp_v2_transport_request_t *request,
+    netins_udp_v2_transport_h3_info_t *out)
+{
+    if (request == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    netins_udp_client_h3_info_t internal;
+    if (netins_udp_client_h3_request_get_info(request, &internal)
+        != NETINS_UDP_OK)
+    {
+        errno = EIO;
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+    out->stream_id = internal.stream_id;
+    out->response_status = internal.response_status;
+    out->request_headers_ready = internal.request_headers_ready;
+    out->response_headers_ready = internal.response_headers_ready;
+    out->send_finished = internal.send_finished;
+    out->receive_finished = internal.receive_finished;
+    out->stream_error = internal.stream_error;
+    out->bytes_accepted = internal.bytes_accepted;
+    out->bytes_delivered = internal.bytes_delivered;
+    snprintf(out->request_authority, sizeof(out->request_authority),
+        "%s", internal.request_authority);
+    out->response_content_length_known =
+        internal.response_content_length_known;
+    out->response_content_length = internal.response_content_length;
+    snprintf(out->response_content_type,
+        sizeof(out->response_content_type), "%s",
+        internal.response_content_type);
+    out->peer_header_count = internal.peer_header_count;
+    for (uint32_t i = 0; i < internal.peer_header_count; ++i) {
+        snprintf(out->peer_headers[i].name,
+            sizeof(out->peer_headers[i].name), "%s",
+            internal.peer_headers[i].name);
+        snprintf(out->peer_headers[i].value,
+            sizeof(out->peer_headers[i].value), "%s",
+            internal.peer_headers[i].value);
+    }
+    return 0;
+}
+
+void
+netins_udp_v2_transport_h3_request_close_async(
+    netins_udp_v2_transport_request_t *request)
+{
+    netins_udp_client_h3_request_close_async(request);
+}
+
+void
+netins_udp_v2_transport_h3_request_close(
+    netins_udp_v2_transport_request_t *request,
+    uint32_t timeout_ms)
+{
+    if (request == NULL) {
+        return;
+    }
+    if (netins_udp_stream_close(request, timeout_ms)
+        != NETINS_UDP_OK)
+    {
+        netins_udp_client_h3_request_abandon(request);
+    }
 }

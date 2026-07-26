@@ -41,6 +41,17 @@ typedef struct netins_udp_buffer_s {
     unsigned char data[];
 } netins_udp_buffer_t;
 
+typedef struct netins_udp_client_h3_extension_s {
+    int request_body_length_unknown;
+    int response_content_length_known;
+    uint32_t request_header_count;
+    netins_udp_client_h3_header_t
+        request_headers[NETINS_UDP_CLIENT_H3_MAX_HEADERS];
+    uint32_t peer_header_count;
+    netins_udp_client_h3_header_t
+        peer_headers[NETINS_UDP_CLIENT_H3_MAX_HEADERS];
+} netins_udp_client_h3_extension_t;
+
 struct netins_udp_stream_s {
     pthread_mutex_t lock;
     pthread_cond_t cond;
@@ -52,6 +63,7 @@ struct netins_udp_stream_s {
     struct netins_udp_stream_s *next;
     xqc_h3_request_t *request;
     netins_udp_stream_config_t config;
+    netins_udp_client_h3_extension_t *h3_extension;
     int state;
     int stream_error;
     uint64_t stream_id;
@@ -151,6 +163,7 @@ netins_udp_stream_destroy(netins_udp_stream_t *stream)
 {
     netins_udp_stream_free_queue(stream->send_head);
     netins_udp_stream_free_queue(stream->recv_head);
+    free(stream->h3_extension);
     pthread_cond_destroy(&stream->cond);
     pthread_mutex_destroy(&stream->lock);
     free(stream);
@@ -283,6 +296,9 @@ netins_udp_stream_parse_response_headers(netins_udp_stream_t *stream,
             char value[32];
             netins_udp_stream_copy_header_value(value, sizeof(value), header);
             stream->response_content_length = strtoull(value, NULL, 10);
+            if (stream->h3_extension != NULL) {
+                stream->h3_extension->response_content_length_known = 1;
+            }
 
         } else if (netins_udp_stream_header_name_equals(header,
                        "content-type"))
@@ -290,6 +306,25 @@ netins_udp_stream_parse_response_headers(netins_udp_stream_t *stream,
             netins_udp_stream_copy_header_value(
                 stream->response_content_type,
                 sizeof(stream->response_content_type), header);
+
+        } else if (header->name.iov_len > 0
+            && ((const char *)header->name.iov_base)[0] != ':'
+            && !netins_udp_stream_header_name_equals(header, "host")
+            && stream->h3_extension != NULL
+            && stream->h3_extension->peer_header_count
+                < NETINS_UDP_CLIENT_H3_MAX_HEADERS)
+        {
+            netins_udp_client_h3_header_t *destination =
+                &stream->h3_extension->peer_headers[
+                    stream->h3_extension->peer_header_count++];
+            size_t name_length = header->name.iov_len;
+            if (name_length >= sizeof(destination->name)) {
+                name_length = sizeof(destination->name) - 1;
+            }
+            memcpy(destination->name, header->name.iov_base, name_length);
+            destination->name[name_length] = '\0';
+            netins_udp_stream_copy_header_value(destination->value,
+                sizeof(destination->value), header);
         }
     }
     stream->response_headers_received = 1;
@@ -1258,10 +1293,32 @@ netins_udp_stream_set_header(xqc_http_header_t *header, const char *name,
 }
 
 static int
+netins_udp_stream_has_request_header(const netins_udp_stream_t *stream,
+    const char *name)
+{
+    if (stream->h3_extension == NULL) {
+        return 0;
+    }
+    for (uint32_t i = 0;
+         i < stream->h3_extension->request_header_count; ++i)
+    {
+        if (strcasecmp(
+                stream->h3_extension->request_headers[i].name,
+                name) == 0)
+        {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
 netins_udp_stream_send_headers(netins_udp_stream_t *stream,
     xqc_h3_request_t *request)
 {
-    xqc_http_header_t fields[10];
+    size_t extension_header_count = stream->h3_extension != NULL
+        ? stream->h3_extension->request_header_count : 0;
+    xqc_http_header_t fields[10 + extension_header_count];
     size_t count = 0;
     char content_length[32];
     char stream_index[8];
@@ -1269,8 +1326,6 @@ netins_udp_stream_send_headers(netins_udp_stream_t *stream,
     char stream_offset[32];
     char total_length[32];
 
-    snprintf(content_length, sizeof(content_length), "%llu",
-        (unsigned long long)stream->config.request_body_length);
     netins_udp_stream_set_header(&fields[count++], ":method",
         stream->config.method);
     netins_udp_stream_set_header(&fields[count++], ":scheme",
@@ -1281,8 +1336,15 @@ netins_udp_stream_send_headers(netins_udp_stream_t *stream,
         stream->config.path);
     netins_udp_stream_set_header(&fields[count++], "content-type",
         stream->config.content_type);
-    netins_udp_stream_set_header(&fields[count++], "content-length",
-        content_length);
+    int request_body_length_unknown =
+        stream->h3_extension != NULL
+        && stream->h3_extension->request_body_length_unknown;
+    if (!request_body_length_unknown) {
+        snprintf(content_length, sizeof(content_length), "%llu",
+            (unsigned long long)stream->config.request_body_length);
+        netins_udp_stream_set_header(&fields[count++], "content-length",
+            content_length);
+    }
 
     int is_post = strcasecmp(stream->config.method, "POST") == 0;
     if (is_post) {
@@ -1291,14 +1353,40 @@ netins_udp_stream_send_headers(netins_udp_stream_t *stream,
         snprintf(stream_offset, sizeof(stream_offset), "0");
         snprintf(total_length, sizeof(total_length), "%llu",
             (unsigned long long)stream->config.request_body_length);
-        netins_udp_stream_set_header(&fields[count++], "x-stream-index",
-            stream_index);
-        netins_udp_stream_set_header(&fields[count++], "x-stream-count",
-            stream_count);
-        netins_udp_stream_set_header(&fields[count++], "x-stream-offset",
-            stream_offset);
-        netins_udp_stream_set_header(&fields[count++], "x-total-length",
-            total_length);
+        if (!netins_udp_stream_has_request_header(stream,
+                "x-stream-index"))
+        {
+            netins_udp_stream_set_header(&fields[count++],
+                "x-stream-index", stream_index);
+        }
+        if (!netins_udp_stream_has_request_header(stream,
+                "x-stream-count"))
+        {
+            netins_udp_stream_set_header(&fields[count++],
+                "x-stream-count", stream_count);
+        }
+        if (!netins_udp_stream_has_request_header(stream,
+                "x-stream-offset"))
+        {
+            netins_udp_stream_set_header(&fields[count++],
+                "x-stream-offset", stream_offset);
+        }
+        if (!request_body_length_unknown
+            && !netins_udp_stream_has_request_header(stream,
+                "x-total-length"))
+        {
+            netins_udp_stream_set_header(&fields[count++],
+                "x-total-length", total_length);
+        }
+    }
+    if (stream->h3_extension != NULL) {
+        for (uint32_t i = 0;
+             i < stream->h3_extension->request_header_count; ++i)
+        {
+            netins_udp_stream_set_header(&fields[count++],
+                stream->h3_extension->request_headers[i].name,
+                stream->h3_extension->request_headers[i].value);
+        }
     }
 
     xqc_http_headers_t headers;
@@ -1307,7 +1395,9 @@ netins_udp_stream_send_headers(netins_udp_stream_t *stream,
     headers.count = count;
     headers.capacity = count;
 
-    uint8_t fin = !is_post || stream->config.request_body_length == 0;
+    uint8_t fin = !is_post
+        || (!request_body_length_unknown
+            && stream->config.request_body_length == 0);
     ssize_t sent = xqc_h3_request_send_headers(request, &headers, fin);
     if (sent == -XQC_EAGAIN) {
         return 0;
@@ -1837,9 +1927,10 @@ netins_udp_stream_config_init(netins_udp_stream_config_t *config)
     config->recv_queue_limit_bytes = NETINS_UDP_STREAM_DEFAULT_RECV_QUEUE;
 }
 
-int
-netins_udp_stream_open(netins_udp_client_t *client,
+static int
+netins_udp_stream_open_internal(netins_udp_client_t *client,
     const netins_udp_stream_config_t *config,
+    const netins_udp_client_h3_config_t *extended_config,
     netins_udp_stream_t **out_stream)
 {
     if (client == NULL || config == NULL || out_stream == NULL) {
@@ -1915,6 +2006,23 @@ netins_udp_stream_open(netins_udp_client_t *client,
         stream->config.recv_queue_limit_bytes =
             NETINS_UDP_STREAM_DEFAULT_RECV_QUEUE;
     }
+    if (extended_config != NULL) {
+        stream->h3_extension =
+            calloc(1, sizeof(*stream->h3_extension));
+        if (stream->h3_extension == NULL) {
+            pthread_cond_destroy(&stream->cond);
+            pthread_mutex_destroy(&stream->lock);
+            free(stream);
+            return NETINS_UDP_ERROR;
+        }
+        stream->h3_extension->request_body_length_unknown =
+            extended_config->content_length_unknown;
+        stream->h3_extension->request_header_count =
+            extended_config->header_count;
+        memcpy(stream->h3_extension->request_headers,
+            extended_config->headers,
+            sizeof(stream->h3_extension->request_headers));
+    }
 
     stream->ref_count = 2;
     stream->public_ref = 1;
@@ -1940,6 +2048,59 @@ netins_udp_stream_open(netins_udp_client_t *client,
     *out_stream = stream;
     netins_udp_client_wake(client);
     return NETINS_UDP_OK;
+}
+
+int
+netins_udp_stream_open(netins_udp_client_t *client,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream)
+{
+    return netins_udp_stream_open_internal(client, config, NULL,
+        out_stream);
+}
+
+int
+netins_udp_client_h3_request_open(netins_udp_client_t *client,
+    const netins_udp_client_h3_config_t *config,
+    netins_udp_stream_t **out_stream)
+{
+    if (client == NULL || config == NULL || out_stream == NULL
+        || config->header_count > NETINS_UDP_CLIENT_H3_MAX_HEADERS
+        || (config->content_length_unknown != 0
+            && config->content_length_unknown != 1)
+        || memchr(config->method, '\0', sizeof(config->method)) == NULL
+        || memchr(config->path, '\0', sizeof(config->path)) == NULL
+        || memchr(config->authority, '\0',
+               sizeof(config->authority)) == NULL
+        || memchr(config->content_type, '\0',
+               sizeof(config->content_type)) == NULL)
+    {
+        return NETINS_UDP_ERROR;
+    }
+    for (uint32_t i = 0; i < config->header_count; ++i) {
+        if (config->headers[i].name[0] == '\0'
+            || memchr(config->headers[i].name, '\0',
+                   sizeof(config->headers[i].name)) == NULL
+            || memchr(config->headers[i].value, '\0',
+                   sizeof(config->headers[i].value)) == NULL)
+        {
+            return NETINS_UDP_ERROR;
+        }
+    }
+
+    netins_udp_stream_config_t legacy;
+    netins_udp_stream_config_init(&legacy);
+    snprintf(legacy.method, sizeof(legacy.method), "%s",
+        config->method);
+    snprintf(legacy.path, sizeof(legacy.path), "%s", config->path);
+    snprintf(legacy.authority, sizeof(legacy.authority), "%s",
+        config->authority);
+    snprintf(legacy.content_type, sizeof(legacy.content_type), "%s",
+        config->content_type);
+    legacy.request_body_length = config->content_length_unknown
+        ? 0 : config->content_length;
+    return netins_udp_stream_open_internal(client, &legacy, config,
+        out_stream);
 }
 
 int
@@ -2014,17 +2175,26 @@ netins_udp_stream_send(netins_udp_stream_t *stream, const void *data,
         pthread_mutex_unlock(&stream->lock);
         return NETINS_UDP_CLOSED;
     }
-    uint64_t body_remaining = stream->config.request_body_length
-        - stream->bytes_accepted;
-    if ((uint64_t)size > body_remaining)
-    {
-        pthread_mutex_unlock(&stream->lock);
-        return NETINS_UDP_ERROR;
-    }
-    if (fin && (uint64_t)size != body_remaining)
-    {
-        pthread_mutex_unlock(&stream->lock);
-        return NETINS_UDP_ERROR;
+    int request_body_length_unknown =
+        stream->h3_extension != NULL
+        && stream->h3_extension->request_body_length_unknown;
+    if (request_body_length_unknown) {
+        if ((uint64_t)size > UINT64_MAX - stream->bytes_accepted) {
+            pthread_mutex_unlock(&stream->lock);
+            return NETINS_UDP_ERROR;
+        }
+
+    } else {
+        uint64_t body_remaining = stream->config.request_body_length
+            - stream->bytes_accepted;
+        if ((uint64_t)size > body_remaining) {
+            pthread_mutex_unlock(&stream->lock);
+            return NETINS_UDP_ERROR;
+        }
+        if (fin && (uint64_t)size != body_remaining) {
+            pthread_mutex_unlock(&stream->lock);
+            return NETINS_UDP_ERROR;
+        }
     }
 
     int wait_ret = 0;
@@ -2081,7 +2251,14 @@ netins_udp_stream_send(netins_udp_stream_t *stream, const void *data,
         stream->send_queue_bytes += accepted;
         stream->bytes_accepted += accepted;
     }
-    if (stream->bytes_accepted == stream->config.request_body_length) {
+    if (request_body_length_unknown) {
+        if (fin && accepted == size) {
+            stream->send_fin_requested = 1;
+        }
+
+    } else if (stream->bytes_accepted
+        == stream->config.request_body_length)
+    {
         stream->send_fin_requested = 1;
     }
     netins_udp_client_t *client = stream->client;
@@ -2091,9 +2268,9 @@ netins_udp_stream_send(netins_udp_stream_t *stream, const void *data,
     return (int64_t)accepted;
 }
 
-int64_t
-netins_udp_stream_recv(netins_udp_stream_t *stream, void *buffer,
-    size_t capacity, int *fin, uint32_t timeout_ms)
+static int64_t
+netins_udp_stream_recv_internal(netins_udp_stream_t *stream, void *buffer,
+    size_t capacity, int *fin, uint32_t timeout_ms, int peek)
 {
     if (stream == NULL || fin == NULL
         || (capacity > 0 && buffer == NULL))
@@ -2147,6 +2324,30 @@ netins_udp_stream_recv(netins_udp_stream_t *stream, void *buffer,
         return NETINS_UDP_BUFFER_TOO_SMALL;
     }
 
+    if (peek) {
+        size_t copied = 0;
+        netins_udp_buffer_t *item = stream->recv_head;
+        size_t item_offset = item->offset;
+        while (copied < capacity && item != NULL) {
+            size_t available = item->length - item_offset;
+            size_t amount = available < capacity - copied
+                ? available : capacity - copied;
+            memcpy((unsigned char *)buffer + copied,
+                item->data + item_offset, amount);
+            copied += amount;
+            item_offset += amount;
+            if (item_offset == item->length) {
+                item = item->next;
+                if (item != NULL) {
+                    item_offset = item->offset;
+                }
+            }
+        }
+        *fin = item == NULL && stream->recv_finished;
+        pthread_mutex_unlock(&stream->lock);
+        return (int64_t)copied;
+    }
+
     size_t copied = 0;
     while (copied < capacity && stream->recv_head != NULL) {
         netins_udp_buffer_t *item = stream->recv_head;
@@ -2174,6 +2375,23 @@ netins_udp_stream_recv(netins_udp_stream_t *stream, void *buffer,
     pthread_mutex_unlock(&stream->lock);
     netins_udp_client_wake(client);
     return (int64_t)copied;
+}
+
+int64_t
+netins_udp_stream_recv(netins_udp_stream_t *stream, void *buffer,
+    size_t capacity, int *fin, uint32_t timeout_ms)
+{
+    return netins_udp_stream_recv_internal(stream, buffer, capacity,
+        fin, timeout_ms, 0);
+}
+
+int64_t
+netins_udp_client_h3_request_recv(netins_udp_stream_t *stream,
+    void *buffer, size_t capacity, int *fin, int peek,
+    uint32_t timeout_ms)
+{
+    return netins_udp_stream_recv_internal(stream, buffer, capacity,
+        fin, timeout_ms, peek != 0);
 }
 
 int
@@ -2213,6 +2431,81 @@ netins_udp_stream_get_info(netins_udp_stream_t *stream,
     *out = info;
     pthread_mutex_unlock(&stream->lock);
     return NETINS_UDP_OK;
+}
+
+int
+netins_udp_client_h3_request_get_info(netins_udp_stream_t *stream,
+    netins_udp_client_h3_info_t *out)
+{
+    if (stream == NULL || out == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&stream->lock);
+    memset(out, 0, sizeof(*out));
+    out->stream_id = stream->stream_id;
+    out->response_status = stream->response_status;
+    out->request_headers_ready = stream->request_headers_sent;
+    out->response_headers_ready = stream->response_headers_received;
+    out->send_finished = stream->send_finished;
+    out->receive_finished = stream->recv_finished;
+    out->stream_error = stream->stream_error;
+    out->bytes_accepted = stream->bytes_accepted;
+    out->bytes_delivered = stream->bytes_delivered;
+    snprintf(out->request_authority, sizeof(out->request_authority),
+        "%s", stream->config.authority);
+    out->response_content_length_known =
+        stream->h3_extension != NULL
+        && stream->h3_extension->response_content_length_known;
+    out->response_content_length = stream->response_content_length;
+    snprintf(out->response_content_type,
+        sizeof(out->response_content_type), "%s",
+        stream->response_content_type);
+    if (stream->h3_extension != NULL) {
+        out->peer_header_count =
+            stream->h3_extension->peer_header_count;
+        memcpy(out->peer_headers,
+            stream->h3_extension->peer_headers,
+            sizeof(out->peer_headers));
+    }
+    pthread_mutex_unlock(&stream->lock);
+    return NETINS_UDP_OK;
+}
+
+void
+netins_udp_client_h3_request_close_async(netins_udp_stream_t *stream)
+{
+    if (stream == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&stream->lock);
+    stream->close_requested = 1;
+    if (stream->state != NETINS_UDP_STREAM_STATE_CLOSED
+        && stream->state != NETINS_UDP_STREAM_STATE_ERROR)
+    {
+        stream->state = NETINS_UDP_STREAM_STATE_CLOSING;
+    }
+    netins_udp_client_t *client = stream->client;
+    pthread_cond_broadcast(&stream->cond);
+    pthread_mutex_unlock(&stream->lock);
+    netins_udp_client_wake(client);
+}
+
+void
+netins_udp_client_h3_request_abandon(netins_udp_stream_t *stream)
+{
+    if (stream == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&stream->lock);
+    int release_public_ref = stream->public_ref;
+    stream->public_ref = 0;
+    pthread_mutex_unlock(&stream->lock);
+    if (release_public_ref) {
+        netins_udp_stream_release(stream);
+    }
 }
 
 int

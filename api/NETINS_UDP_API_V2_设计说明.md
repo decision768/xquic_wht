@@ -5,15 +5,17 @@
 本文档是 `netins_udp` V2 的接口契约，阶段二以此文档和
 `api/draft/netins_udp_v2.h` 为准。
 
-当前正式构建仍使用 V1 头文件 `include/xquic/netins_udp.h`。V2 草案暂不参与
-编译、安装或符号导出，避免在观察器重命名和 V2 实现完成之前破坏当前分支。
+当前安装头文件仍是 V1 的 `include/xquic/netins_udp.h`。V2 草案已经作为内部
+契约参与客户端生命周期和 HTTP/3 request 数据面的编译、测试及增量符号导出，
+但尚不安装，也不把 `netins_udp_get_api_version()` 切换到 2。
 
 阶段 3.5 已恢复 XQUIC 原公共 ABI，并把扩展统计、连接生命周期、路径元数据和
 RX 公平预算隔离到 NetIns 内部 backend。本文以下规则是正式 V2 对象实现必须
 遵守的冻结契约。
 
-V2 是一次明确的 ABI 断代，不保证与尚未发布的 V1 API 二进制兼容。阶段三完成
-后，草案头文件才会替换正式公共头文件，并同步更新动态库导出符号和 SONAME。
+V2 是一次明确的 ABI 断代，不保证与尚未发布的 V1 API 二进制兼容。只有连接、
+服务端、数据、状态和通知对象全部闭环并完成 ABI 检查后，草案头文件才会替换
+正式公共头文件，并同步更新动态库版本。
 
 ## 2. 设计目标
 
@@ -128,6 +130,8 @@ CONNECTED/LISTENING ──shutdown/close/error──> CLOSING ──> CLOSED/ERR
 - `accept()` 阻塞到一个连接达到可交付状态。
 - `send/recv`、stream 和 H3 body 收发在没有空间/数据时阻塞。
 - `send/recv` 超时值为 0 表示无限等待。
+- 有限收发超时到期返回 `-1/ETIMEDOUT`；非阻塞时暂时无法推进返回
+  `-1/EAGAIN`。
 - 默认连接超时 20 秒，默认关闭等待 1 秒。
 
 设置 `NETINS_UDP_OPT_NONBLOCK=1` 后：
@@ -225,6 +229,8 @@ content-length 和 content-type。mini 使用的 `x-stream-index`、
 正文长度已知时必须填写准确值，API 校验累计发送量。设置为
 `NETINS_UDP_CONTENT_LENGTH_UNKNOWN` 时不发送 Content-Length，由带
 `NETINS_UDP_MSG_FIN` 的最后一次 send 决定正文结束。
+对端未发送 Content-Length 时，request info 的 `response_content_length`
+同样返回 `NETINS_UDP_CONTENT_LENGTH_UNKNOWN`，与明确声明的零长度区分。
 
 当前 mini 的 GET/POST、多 stream 分片和文件偏移元数据将在阶段七迁入 H3
 扩展；这些元数据不进入普通 QUIC stream API。
@@ -518,21 +524,30 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
 也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-客户端生命周期阶段已实现并编译以下增量 V2 符号：
+客户端生命周期和阶段五 HTTP/3 数据对象已实现并编译以下增量 V2 符号：
 
 - `netins_udp_init()` / `netins_udp_cleanup()`；
 - `netins_udp_new()` / `netins_udp_close()`；
 - `netins_udp_set_opt()` / `netins_udp_get_opt()`；
 - `netins_udp_connect()` / `netins_udp_get_state()`；
 - 连接句柄错误查询和 TLS 配置初始化。
+- H3 request/response 配置初始化和扩展头添加；
+- 客户端 `netins_udp_h3_request_open/send/recv/get_info/close`；
+- H3 request 错误查询。
 
 这些函数通过私有 transport bridge 复用现有 standalone H3 client。V1 的
 `netins_udp_client_connect()` 仍保持原阻塞语义，mini 的 socket、Libevent、
 调度器和回调流程没有迁入或替换。
 
-本阶段仅闭环 HTTP/3 客户端连接生命周期。调用 connect 前必须设置
-`APP_PROTOCOL=HTTP3`；默认 RAW_STREAM、普通 stream 收发、server engine、
-accept 队列、通知 fd、SOCKOPT 和自定义客户端证书/CA 文件仍待后续阶段实现。
+阶段五通过私有 bridge 把 V2 request 映射到既有 standalone H3 stream。支持
+GET/POST、已知或未知正文长度、部分收发、显式 FIN、DONTWAIT、PEEK、扩展请求
+头和扩展响应头快照。request 打开时复制连接的阻塞模式及收发/关闭超时；连接
+关闭会中止底层 stream，但 request 句柄仍可查询并必须单独 close。
+
+调用 connect 前仍必须设置 `APP_PROTOCOL=HTTP3`。连接级 `netins_udp_send/recv`
+属于 RAW_STREAM，在当前实现中明确返回 `EOPNOTSUPP`。默认 RAW_STREAM、普通
+stream、server engine、accept 队列、request/connection 通知 fd、SOCKOPT 和
+自定义客户端证书/CA 文件仍待后续阶段实现。
 
 为避免中途版本破坏，正式 `include/xquic/netins_udp.h` 和现有
 `netins_udp_get_api_version()==1` 暂不切换。`api/draft/netins_udp_v2.h` 已用于

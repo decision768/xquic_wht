@@ -13,15 +13,17 @@ The installed API is still V1. The unified client/listener/accepted-
 connection contract for V2 is documented in
 [`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
 non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
-The V2 client lifecycle symbols are now compiled internally and tested against
-that draft header, but the header and API version are not installed/switched
-until the remaining V2 objects are implemented.
+The V2 client lifecycle and client HTTP/3 request symbols are now compiled
+internally and tested against that draft header, but the header and API version
+are not installed/switched until the remaining V2 objects are implemented.
 
 The current V2 lifecycle slice supports HTTP/3 connections by adapting the
 existing standalone client. Before `netins_udp_connect()`, set
-`NETINS_UDP_OPT_APP_PROTOCOL` to `NETINS_UDP_APP_HTTP3`. RAW_STREAM, data
-transfer, listener/accept, notification descriptors, custom CA/client
-certificate files, and generic SOCKOPT handling remain later V2 stages.
+`NETINS_UDP_OPT_APP_PROTOCOL` to `NETINS_UDP_APP_HTTP3`. Client GET/POST request
+objects support partial send/receive, FIN, DONTWAIT, PEEK, extension headers,
+request info and independent close. RAW_STREAM, listener/accept, notification
+descriptors, custom CA/client certificate files, and generic SOCKOPT handling
+remain later V2 stages.
 
 ## Independent client connection
 

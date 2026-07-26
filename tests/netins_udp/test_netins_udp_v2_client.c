@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "api/draft/netins_udp_v2.h"
+#include "netins_udp_v2_internal.h"
 #include "netins_udp_v2_transport.h"
 
 struct netins_udp_client_s {
@@ -394,6 +395,16 @@ main(void)
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_ERROR);
     assert(netins_udp_get_last_error_code(client) == EOPNOTSUPP);
     netins_udp_close(client);
+    assert(netins_udp_cleanup() == NETINS_UDP_OK);
+
+    assert(netins_udp_init() == NETINS_UDP_OK);
+    client = netins_udp_new(NETINS_UDP_TYPE_QUIC);
+    assert(client != NULL);
+    assert(netins_udp_v2_child_handle_acquire() == NETINS_UDP_OK);
+    netins_udp_close(client);
+    assert(netins_udp_cleanup() == NETINS_UDP_ERROR);
+    assert(errno == EBUSY);
+    netins_udp_v2_child_handle_release();
     assert(netins_udp_cleanup() == NETINS_UDP_OK);
 
     assert(g_create_count == g_close_count);
