@@ -9,11 +9,19 @@ Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使
 
 ## V2 contract work
 
-The currently compiled API is V1. The unified client/listener/accepted-
-connection contract planned for V2 is documented in
+The installed API is still V1. The unified client/listener/accepted-
+connection contract for V2 is documented in
 [`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
 non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
-These files define the next ABI but do not change the current build yet.
+The V2 client lifecycle symbols are now compiled internally and tested against
+that draft header, but the header and API version are not installed/switched
+until the remaining V2 objects are implemented.
+
+The current V2 lifecycle slice supports HTTP/3 connections by adapting the
+existing standalone client. Before `netins_udp_connect()`, set
+`NETINS_UDP_OPT_APP_PROTOCOL` to `NETINS_UDP_APP_HTTP3`. RAW_STREAM, data
+transfer, listener/accept, notification descriptors, custom CA/client
+certificate files, and generic SOCKOPT handling remain later V2 stages.
 
 ## Independent client connection
 

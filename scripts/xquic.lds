@@ -162,6 +162,17 @@ XQUIC_VERS_1.0 {
         netins_udp_conn_state_name;
         netins_udp_path_state_name;
         netins_udp_app_path_status_name;
+        netins_udp_init;
+        netins_udp_cleanup;
+        netins_udp_new;
+        netins_udp_close;
+        netins_udp_set_opt;
+        netins_udp_get_opt;
+        netins_udp_tls_config_init;
+        netins_udp_connect;
+        netins_udp_get_state;
+        netins_udp_get_last_error_code;
+        netins_udp_get_last_error_msg;
     local:
         *;
 };

@@ -484,6 +484,8 @@ V2 目标是公共 API 线程安全：
 - 同一 stream 同一方向的并发调用由 API 串行化，但调用方不应依赖调用顺序。
 - `close()` 与正在阻塞的操作并发时，API 唤醒阻塞调用并使其以
   `ECANCELED/ECONNABORTED` 结束，然后再释放资源。
+- `close()` 开始后调用方不得再发起使用同一句柄的新调用；已进入 API 的调用由
+  句柄内部引用保护，`close()` 会等待它们退出后再释放内存。
 
 日志回调由 API engine 工作线程调用。回调要求：
 
@@ -510,12 +512,28 @@ V2 目标是公共 API 线程安全：
 V1 观察器注册表可保留为内部诊断能力，阶段三使用
 `netins_udp_observer_*` 命名，不能继续占用统一连接 API 名称。
 
-## 14. 阶段 3.5 边界
+## 14. 当前实现边界
 
 阶段 3.5 完成公共 ABI 恢复、NetIns 内部扩展统计、应用字节去重语义、稳定路径
 槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
 也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-正式 `include/xquic/netins_udp.h`、server engine、accept 队列、默认 RAW stream、
-子对象通知 fd 和上述 V2 导出符号将在下一阶段按本契约实现；完成实现和 ABI
-检查前，`api/draft/netins_udp_v2.h` 仍不参与安装或正式编译。
+客户端生命周期阶段已实现并编译以下增量 V2 符号：
+
+- `netins_udp_init()` / `netins_udp_cleanup()`；
+- `netins_udp_new()` / `netins_udp_close()`；
+- `netins_udp_set_opt()` / `netins_udp_get_opt()`；
+- `netins_udp_connect()` / `netins_udp_get_state()`；
+- 连接句柄错误查询和 TLS 配置初始化。
+
+这些函数通过私有 transport bridge 复用现有 standalone H3 client。V1 的
+`netins_udp_client_connect()` 仍保持原阻塞语义，mini 的 socket、Libevent、
+调度器和回调流程没有迁入或替换。
+
+本阶段仅闭环 HTTP/3 客户端连接生命周期。调用 connect 前必须设置
+`APP_PROTOCOL=HTTP3`；默认 RAW_STREAM、普通 stream 收发、server engine、
+accept 队列、通知 fd、SOCKOPT 和自定义客户端证书/CA 文件仍待后续阶段实现。
+
+为避免中途版本破坏，正式 `include/xquic/netins_udp.h` 和现有
+`netins_udp_get_api_version()==1` 暂不切换。`api/draft/netins_udp_v2.h` 已用于
+内部编译和测试，但仍不安装；完成全部 V2 符号和 ABI 检查后再统一切换到版本 2。

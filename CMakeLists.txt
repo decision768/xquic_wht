@@ -420,6 +420,8 @@ set (
     "src/netins_udp/netins_udp_observer.c"
     "src/netins_udp/netins_udp_transport_metrics.c"
     "src/netins_udp/netins_udp_client.c"
+    "src/netins_udp/netins_udp_v2_client.c"
+    "src/netins_udp/netins_udp_v2_transport.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
@@ -456,11 +458,25 @@ if(NETINS_UDP_BUILD_TESTS)
     target_link_libraries(netins_udp_unit_test pthread)
     add_test(NAME netins_udp_unit_test COMMAND netins_udp_unit_test)
 
+    add_executable(netins_udp_v2_client_unit_test
+        src/netins_udp/netins_udp_v2_client.c
+        tests/netins_udp/test_netins_udp_v2_client.c
+    )
+    target_include_directories(netins_udp_v2_client_unit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
+    )
+    target_link_libraries(netins_udp_v2_client_unit_test pthread)
+    add_test(NAME netins_udp_v2_client_unit_test
+        COMMAND netins_udp_v2_client_unit_test)
+
     add_library(netins_udp_example OBJECT
         api/examples/netins_udp_snapshot_example.c
         api/examples/netins_udp_connect_example.c
+        api/examples/netins_udp_v2_client_lifecycle_example.c
     )
     target_include_directories(netins_udp_example PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 endif()

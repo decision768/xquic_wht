@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "netins_udp_backend.h"
+#include "netins_udp_client_internal.h"
 #include "netins_udp_observer_internal.h"
 
 #include <arpa/inet.h>
@@ -125,6 +126,11 @@ struct netins_udp_client_s {
 
     netins_udp_stream_t *streams;
     size_t stream_count;
+
+    xqc_cong_ctrl_callback_t congestion_control;
+    xqc_scheduler_callback_t scheduler;
+    uint32_t idle_timeout_ms;
+    uint32_t close_timeout_ms;
 
     char ciphers[256];
     char groups[128];
@@ -1079,12 +1085,13 @@ netins_udp_client_start_connection(netins_udp_client_t *client)
 {
     xqc_conn_settings_t settings;
     memset(&settings, 0, sizeof(settings));
-    settings.cong_ctrl_callback = xqc_bbr_cb;
+    settings.cong_ctrl_callback = client->congestion_control;
     settings.cc_params.customize_on = 1;
     settings.cc_params.init_cwnd = client->config.initial_cwnd_packets;
     settings.proto_version = XQC_VERSION_V1;
+    settings.idle_time_out = client->idle_timeout_ms;
     settings.spurious_loss_detect_on = 1;
-    settings.scheduler_callback = xqc_minrtt_scheduler_cb;
+    settings.scheduler_callback = client->scheduler;
     settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
     settings.adaptive_ack_frequency = 1;
     settings.mp_ack_on_any_path = 0;
@@ -2328,6 +2335,9 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     client->wake_pipe[1] = -1;
     netins_udp_backend_rx_policy_init(&client->rx_policy);
     client->state = NETINS_UDP_STATE_NEW;
+    client->congestion_control = xqc_bbr_cb;
+    client->scheduler = xqc_minrtt_scheduler_cb;
+    client->close_timeout_ms = NETINS_UDP_CLIENT_CLOSE_WAIT_MS;
     snprintf(client->ciphers, sizeof(client->ciphers), "%s", XQC_TLS_CIPHERS);
     snprintf(client->groups, sizeof(client->groups), "%s", XQC_TLS_GROUPS);
     if (pthread_mutex_init(&client->lock, NULL) != 0) {
@@ -2406,7 +2416,33 @@ netins_udp_client_wait_connected(netins_udp_client_t *client,
 }
 
 int
-netins_udp_client_connect(netins_udp_client_t *client)
+netins_udp_client_configure_transport(netins_udp_client_t *client,
+    const xqc_cong_ctrl_callback_t *congestion_control,
+    const xqc_scheduler_callback_t *scheduler,
+    uint32_t idle_timeout_ms, uint32_t close_timeout_ms)
+{
+    if (client == NULL || congestion_control == NULL || scheduler == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&client->lock);
+    if (client->connect_started || client->state != NETINS_UDP_STATE_NEW) {
+        netins_udp_client_set_error_locked(client, EBUSY,
+            "transport options must be configured before connect");
+        pthread_mutex_unlock(&client->lock);
+        return NETINS_UDP_ERROR;
+    }
+    client->congestion_control = *congestion_control;
+    client->scheduler = *scheduler;
+    client->idle_timeout_ms = idle_timeout_ms;
+    client->close_timeout_ms = close_timeout_ms != 0
+        ? close_timeout_ms : NETINS_UDP_CLIENT_CLOSE_WAIT_MS;
+    pthread_mutex_unlock(&client->lock);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_client_start_async(netins_udp_client_t *client)
 {
     if (client == NULL) {
         return NETINS_UDP_ERROR;
@@ -2457,8 +2493,7 @@ netins_udp_client_connect(netins_udp_client_t *client)
         goto fail;
     }
     client->thread_started = 1;
-    return netins_udp_client_wait_connected(client,
-        client->config.connect_timeout_ms);
+    return NETINS_UDP_OK;
 
 fail:
     pthread_mutex_lock(&client->lock);
@@ -2470,6 +2505,28 @@ fail:
     pthread_cond_broadcast(&client->state_cond);
     pthread_mutex_unlock(&client->lock);
     return NETINS_UDP_ERROR;
+}
+
+void
+netins_udp_client_set_close_timeout(netins_udp_client_t *client,
+    uint32_t close_timeout_ms)
+{
+    if (client == NULL || close_timeout_ms == 0) {
+        return;
+    }
+    pthread_mutex_lock(&client->lock);
+    client->close_timeout_ms = close_timeout_ms;
+    pthread_mutex_unlock(&client->lock);
+}
+
+int
+netins_udp_client_connect(netins_udp_client_t *client)
+{
+    if (netins_udp_client_start_async(client) != NETINS_UDP_OK) {
+        return NETINS_UDP_ERROR;
+    }
+    return netins_udp_client_wait_connected(client,
+        client->config.connect_timeout_ms);
 }
 
 int
@@ -2533,6 +2590,22 @@ netins_udp_client_get_last_error_msg(netins_udp_client_t *client,
 }
 
 void
+netins_udp_client_request_close(netins_udp_client_t *client)
+{
+    if (client == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&client->lock);
+    if (client->state != NETINS_UDP_STATE_CLOSED) {
+        client->close_requested = 1;
+    }
+    pthread_cond_broadcast(&client->state_cond);
+    pthread_mutex_unlock(&client->lock);
+    netins_udp_client_wake(client);
+}
+
+void
 netins_udp_client_close(netins_udp_client_t *client)
 {
     if (client == NULL) {
@@ -2547,7 +2620,7 @@ netins_udp_client_close(netins_udp_client_t *client)
         netins_udp_client_wake(client);
 
         struct timespec deadline;
-        if (netins_udp_client_make_deadline(NETINS_UDP_CLIENT_CLOSE_WAIT_MS,
+        if (netins_udp_client_make_deadline(client->close_timeout_ms,
                 &deadline) == NETINS_UDP_OK)
         {
             pthread_mutex_lock(&client->lock);
