@@ -3,7 +3,7 @@
 #endif
 #define _POSIX_C_SOURCE 200809L
 
-#include "netins_udp_internal.h"
+#include "netins_udp_observer_internal.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -112,7 +112,7 @@ struct netins_udp_client_s {
     xqc_h3_conn_t *h3_conn;
     xqc_cid_t cid;
     int cid_valid;
-    netins_udp_t *status;
+    netins_udp_observer_t *observer;
 
     netins_udp_client_path_t paths[NETINS_UDP_MAX_PATHS];
     uint32_t path_count;
@@ -363,8 +363,8 @@ netins_udp_client_fail_runtime(netins_udp_client_t *client, int error_code,
     pthread_cond_broadcast(&client->state_cond);
     pthread_mutex_unlock(&client->lock);
 
-    if (client->status != NULL) {
-        (void)netins_udp_mark_error(client->status, error_code, message);
+    if (client->observer != NULL) {
+        (void)netins_udp_observer_mark_error(client->observer, error_code, message);
     }
 }
 
@@ -606,10 +606,10 @@ static void
 netins_udp_client_update_path_metadata(netins_udp_client_t *client,
     netins_udp_client_path_t *path)
 {
-    if (client->status == NULL || path == NULL || !path->active) {
+    if (client->observer == NULL || path == NULL || !path->active) {
         return;
     }
-    (void)netins_udp_set_path_metadata(client->status, path->path_id,
+    (void)netins_udp_observer_set_path_metadata(client->observer, path->path_id,
         path->interface_name[0] != '\0' ? path->interface_name : NULL,
         (const struct sockaddr *)&path->local_addr, path->local_addrlen,
         (const struct sockaddr *)&path->peer_addr, path->peer_addrlen);
@@ -709,8 +709,8 @@ netins_udp_client_update_cid(xqc_connection_t *conn,
     memcpy(&client->cid, new_cid, sizeof(client->cid));
     client->cid_valid = 1;
     pthread_mutex_unlock(&client->lock);
-    if (client->status != NULL) {
-        (void)netins_udp_update_cid(client->status, new_cid);
+    if (client->observer != NULL) {
+        (void)netins_udp_observer_update_cid(client->observer, new_cid);
     }
 }
 
@@ -776,9 +776,9 @@ netins_udp_client_h3_conn_close(xqc_h3_conn_t *h3_conn,
     pthread_cond_broadcast(&client->state_cond);
     pthread_mutex_unlock(&client->lock);
 
-    if (client->status != NULL) {
-        (void)netins_udp_refresh(client->status);
-        (void)netins_udp_mark_closed(client->status, conn_error);
+    if (client->observer != NULL) {
+        (void)netins_udp_observer_refresh(client->observer);
+        (void)netins_udp_observer_mark_closed(client->observer, conn_error);
     }
     return XQC_OK;
 }
@@ -796,9 +796,9 @@ netins_udp_client_h3_handshake_finished(xqc_h3_conn_t *h3_conn,
     pthread_cond_broadcast(&client->state_cond);
     pthread_mutex_unlock(&client->lock);
 
-    if (client->status != NULL) {
-        (void)netins_udp_mark_handshake_finished(client->status);
-        (void)netins_udp_refresh(client->status);
+    if (client->observer != NULL) {
+        (void)netins_udp_observer_mark_handshake_finished(client->observer);
+        (void)netins_udp_observer_refresh(client->observer);
     }
 }
 
@@ -1112,17 +1112,17 @@ netins_udp_client_start_connection(netins_udp_client_t *client)
 }
 
 static int
-netins_udp_client_bind_status(netins_udp_client_t *client)
+netins_udp_client_bind_observer(netins_udp_client_t *client)
 {
-    if (netins_udp_bind(client->status, client->engine, &client->cid,
+    if (netins_udp_observer_bind(client->observer, client->engine, &client->cid,
             NETINS_UDP_ROLE_CLIENT) != NETINS_UDP_OK)
     {
         netins_udp_client_set_error(client, EIO,
-            "failed to bind status adapter to the QUIC connection");
+            "failed to bind observer to the QUIC connection");
         return NETINS_UDP_ERROR;
     }
     netins_udp_client_update_path_metadata(client, &client->paths[0]);
-    (void)netins_udp_refresh(client->status);
+    (void)netins_udp_observer_refresh(client->observer);
     return NETINS_UDP_OK;
 }
 
@@ -1574,8 +1574,8 @@ netins_udp_client_drive_close(netins_udp_client_t *client)
     pthread_mutex_unlock(&client->lock);
 
     if (should_close && client->engine != NULL && client->cid_valid) {
-        if (client->status != NULL) {
-            (void)netins_udp_mark_closing(client->status);
+        if (client->observer != NULL) {
+            (void)netins_udp_observer_mark_closing(client->observer);
         }
         (void)xqc_h3_conn_close(client->engine, &client->cid);
         xqc_engine_main_logic(client->engine);
@@ -1599,9 +1599,9 @@ netins_udp_client_run_engine_timer(netins_udp_client_t *client,
 }
 
 static void
-netins_udp_client_refresh_status(netins_udp_client_t *client, uint64_t now_us)
+netins_udp_client_refresh_observer(netins_udp_client_t *client, uint64_t now_us)
 {
-    if (client->status == NULL
+    if (client->observer == NULL
         || now_us - client->last_refresh_us < NETINS_UDP_CLIENT_REFRESH_US)
     {
         return;
@@ -1609,7 +1609,7 @@ netins_udp_client_refresh_status(netins_udp_client_t *client, uint64_t now_us)
     for (uint32_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
         netins_udp_client_update_path_metadata(client, &client->paths[i]);
     }
-    (void)netins_udp_refresh(client->status);
+    (void)netins_udp_observer_refresh(client->observer);
     client->last_refresh_us = now_us;
 }
 
@@ -1720,7 +1720,7 @@ netins_udp_client_thread_main(void *argument)
         now_us = netins_udp_client_now_us();
         netins_udp_client_run_engine_timer(client, now_us);
         netins_udp_client_maybe_create_paths(client, now_us);
-        netins_udp_client_refresh_status(client, now_us);
+        netins_udp_client_refresh_observer(client, now_us);
     }
     return NULL;
 }
@@ -2324,8 +2324,8 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
         free(client);
         return NETINS_UDP_ERROR;
     }
-    client->status = netins_udp_new();
-    if (client->status == NULL) {
+    client->observer = netins_udp_observer_new();
+    if (client->observer == NULL) {
         pthread_cond_destroy(&client->state_cond);
         pthread_mutex_destroy(&client->lock);
         free(client);
@@ -2429,7 +2429,7 @@ netins_udp_client_connect(netins_udp_client_t *client)
 
     if (netins_udp_client_create_engine(client) != NETINS_UDP_OK
         || netins_udp_client_start_connection(client) != NETINS_UDP_OK
-        || netins_udp_client_bind_status(client) != NETINS_UDP_OK)
+        || netins_udp_client_bind_observer(client) != NETINS_UDP_OK)
     {
         goto fail;
     }
@@ -2472,11 +2472,11 @@ netins_udp_client_get_state(netins_udp_client_t *client)
 uint64_t
 netins_udp_client_get_connection_id(netins_udp_client_t *client)
 {
-    if (client == NULL || client->status == NULL) {
+    if (client == NULL || client->observer == NULL) {
         return NETINS_UDP_INVALID_CONNECTION_ID;
     }
     netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
-    if (netins_udp_get_info(client->status, &info) != NETINS_UDP_OK) {
+    if (netins_udp_observer_get_info(client->observer, &info) != NETINS_UDP_OK) {
         return NETINS_UDP_INVALID_CONNECTION_ID;
     }
     return info.connection_id;
@@ -2486,10 +2486,10 @@ int
 netins_udp_client_get_snapshot(netins_udp_client_t *client,
     netins_udp_snapshot_t *out)
 {
-    if (client == NULL || client->status == NULL) {
+    if (client == NULL || client->observer == NULL) {
         return NETINS_UDP_ERROR;
     }
-    return netins_udp_get_snapshot(client->status, out);
+    return netins_udp_observer_get_snapshot(client->observer, out);
 }
 
 int
@@ -2556,9 +2556,9 @@ netins_udp_client_close(netins_udp_client_t *client)
         client->thread_started = 0;
     }
 
-    if (client->status != NULL) {
-        (void)netins_udp_refresh(client->status);
-        (void)netins_udp_mark_closed(client->status,
+    if (client->observer != NULL) {
+        (void)netins_udp_observer_refresh(client->observer);
+        (void)netins_udp_observer_mark_closed(client->observer,
             client->last_error_code);
     }
     if (client->engine != NULL) {
@@ -2578,9 +2578,9 @@ netins_udp_client_close(netins_udp_client_t *client)
     if (client->wake_pipe[1] >= 0) {
         close(client->wake_pipe[1]);
     }
-    if (client->status != NULL) {
-        netins_udp_close(client->status);
-        client->status = NULL;
+    if (client->observer != NULL) {
+        netins_udp_observer_close(client->observer);
+        client->observer = NULL;
     }
     pthread_cond_destroy(&client->state_cond);
     pthread_mutex_destroy(&client->lock);

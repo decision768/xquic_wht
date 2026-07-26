@@ -1,6 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "netins_udp_internal.h"
+#include "netins_udp_observer_internal.h"
 
 #include <errno.h>
 #include <netdb.h>
@@ -23,15 +23,15 @@ _Static_assert((int)NETINS_UDP_APP_PATH_FROZEN
         == (int)XQC_APP_PATH_STATUS_FROZEN,
     "netins UDP application path values must match XQUIC");
 
-typedef struct netins_udp_path_metadata_s {
+typedef struct netins_udp_observer_path_metadata_s {
     int valid;
     uint64_t path_id;
     char interface_name[NETINS_UDP_INTERFACE_NAME_LEN];
     char local_address[NETINS_UDP_ADDRESS_LEN];
     char peer_address[NETINS_UDP_ADDRESS_LEN];
-} netins_udp_path_metadata_t;
+} netins_udp_observer_path_metadata_t;
 
-struct netins_udp_s {
+struct netins_udp_observer_s {
     pthread_mutex_t lock;
     size_t reference_count;
 
@@ -39,10 +39,10 @@ struct netins_udp_s {
     xqc_cid_t cid;
     int bound;
     int registered;
-    struct netins_udp_s *registry_next;
+    struct netins_udp_observer_s *registry_next;
 
     netins_udp_snapshot_t snapshot;
-    netins_udp_path_metadata_t path_metadata[NETINS_UDP_MAX_PATHS];
+    netins_udp_observer_path_metadata_t path_metadata[NETINS_UDP_MAX_PATHS];
 
     netins_udp_logger_cb logger;
     void *logger_user_data;
@@ -50,12 +50,12 @@ struct netins_udp_s {
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
 };
 
-static pthread_mutex_t g_netins_udp_registry_lock = PTHREAD_MUTEX_INITIALIZER;
-static netins_udp_t *g_netins_udp_registry_head;
-static uint64_t g_netins_udp_next_connection_id = 1;
+static pthread_mutex_t g_netins_udp_observer_registry_lock = PTHREAD_MUTEX_INITIALIZER;
+static netins_udp_observer_t *g_netins_udp_observer_registry_head;
+static uint64_t g_netins_udp_observer_next_connection_id = 1;
 
 static uint64_t
-netins_udp_now_us(void)
+netins_udp_observer_now_us(void)
 {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
@@ -66,7 +66,7 @@ netins_udp_now_us(void)
 }
 
 static void
-netins_udp_copy_string(char *dst, size_t dst_len, const char *src,
+netins_udp_observer_copy_string(char *dst, size_t dst_len, const char *src,
     size_t src_len)
 {
     if (dst == NULL || dst_len == 0) {
@@ -89,7 +89,7 @@ netins_udp_copy_string(char *dst, size_t dst_len, const char *src,
 }
 
 static void
-netins_udp_init_info(netins_udp_info_t *info)
+netins_udp_observer_init_info(netins_udp_info_t *info)
 {
     memset(info, 0, sizeof(*info));
     info->struct_size = sizeof(*info);
@@ -100,7 +100,7 @@ netins_udp_init_info(netins_udp_info_t *info)
 }
 
 static void
-netins_udp_init_statis(netins_udp_statis_t *statis)
+netins_udp_observer_init_statis(netins_udp_statis_t *statis)
 {
     memset(statis, 0, sizeof(*statis));
     statis->struct_size = sizeof(*statis);
@@ -108,7 +108,7 @@ netins_udp_init_statis(netins_udp_statis_t *statis)
 }
 
 static void
-netins_udp_init_path_statis(netins_udp_path_statis_t *path)
+netins_udp_observer_init_path_statis(netins_udp_path_statis_t *path)
 {
     memset(path, 0, sizeof(*path));
     path->struct_size = sizeof(*path);
@@ -117,20 +117,20 @@ netins_udp_init_path_statis(netins_udp_path_statis_t *path)
 }
 
 static void
-netins_udp_init_snapshot(netins_udp_snapshot_t *snapshot)
+netins_udp_observer_init_snapshot(netins_udp_snapshot_t *snapshot)
 {
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->struct_size = sizeof(*snapshot);
     snapshot->api_version = NETINS_UDP_API_VERSION;
-    netins_udp_init_info(&snapshot->info);
-    netins_udp_init_statis(&snapshot->statis);
+    netins_udp_observer_init_info(&snapshot->info);
+    netins_udp_observer_init_statis(&snapshot->statis);
     for (size_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
-        netins_udp_init_path_statis(&snapshot->paths[i]);
+        netins_udp_observer_init_path_statis(&snapshot->paths[i]);
     }
 }
 
 static void
-netins_udp_set_error_locked(netins_udp_t *netins, int error_code,
+netins_udp_observer_set_error_locked(netins_udp_observer_t *netins, int error_code,
     const char *error_message)
 {
     netins->last_error_code = error_code;
@@ -143,19 +143,19 @@ netins_udp_set_error_locked(netins_udp_t *netins, int error_code,
 }
 
 static void
-netins_udp_set_error(netins_udp_t *netins, int error_code,
+netins_udp_observer_set_error(netins_udp_observer_t *netins, int error_code,
     const char *error_message)
 {
     if (netins == NULL) {
         return;
     }
     pthread_mutex_lock(&netins->lock);
-    netins_udp_set_error_locked(netins, error_code, error_message);
+    netins_udp_observer_set_error_locked(netins, error_code, error_message);
     pthread_mutex_unlock(&netins->lock);
 }
 
 static void
-netins_udp_log(netins_udp_t *netins, int level, const char *message)
+netins_udp_observer_log(netins_udp_observer_t *netins, int level, const char *message)
 {
     netins_udp_logger_cb logger = NULL;
     void *user_data = NULL;
@@ -175,7 +175,7 @@ netins_udp_log(netins_udp_t *netins, int level, const char *message)
 }
 
 static int
-netins_udp_output_valid(uint32_t struct_size, uint32_t api_version,
+netins_udp_observer_output_valid(uint32_t struct_size, uint32_t api_version,
     size_t required_size)
 {
     if (api_version != NETINS_UDP_API_VERSION) {
@@ -188,7 +188,7 @@ netins_udp_output_valid(uint32_t struct_size, uint32_t api_version,
 }
 
 static double
-netins_udp_rate_mbps(uint64_t current, uint64_t previous,
+netins_udp_observer_rate_mbps(uint64_t current, uint64_t previous,
     uint64_t interval_us)
 {
     if (interval_us == 0 || current < previous) {
@@ -198,7 +198,7 @@ netins_udp_rate_mbps(uint64_t current, uint64_t previous,
 }
 
 static const netins_udp_path_statis_t *
-netins_udp_find_previous_path(const netins_udp_snapshot_t *snapshot,
+netins_udp_observer_find_previous_path(const netins_udp_snapshot_t *snapshot,
     uint64_t path_id)
 {
     for (size_t i = 0; i < snapshot->path_count; ++i) {
@@ -209,8 +209,8 @@ netins_udp_find_previous_path(const netins_udp_snapshot_t *snapshot,
     return NULL;
 }
 
-static const netins_udp_path_metadata_t *
-netins_udp_find_metadata(const netins_udp_path_metadata_t *metadata,
+static const netins_udp_observer_path_metadata_t *
+netins_udp_observer_find_metadata(const netins_udp_observer_path_metadata_t *metadata,
     uint64_t path_id)
 {
     for (size_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
@@ -222,7 +222,7 @@ netins_udp_find_metadata(const netins_udp_path_metadata_t *metadata,
 }
 
 static int
-netins_udp_raw_stats_valid(const xqc_conn_stats_t *stats)
+netins_udp_observer_raw_stats_valid(const xqc_conn_stats_t *stats)
 {
     if (stats->alpn[0] != '\0' || stats->conn_info[0] != '\0') {
         return 1;
@@ -236,20 +236,20 @@ netins_udp_raw_stats_valid(const xqc_conn_stats_t *stats)
 }
 
 static void
-netins_udp_destroy(netins_udp_t *netins)
+netins_udp_observer_destroy(netins_udp_observer_t *netins)
 {
     pthread_mutex_destroy(&netins->lock);
     free(netins);
 }
 
 static void
-netins_udp_retain_locked(netins_udp_t *netins)
+netins_udp_observer_retain_locked(netins_udp_observer_t *netins)
 {
     netins->reference_count++;
 }
 
 static void
-netins_udp_release(netins_udp_t *netins)
+netins_udp_observer_release(netins_udp_observer_t *netins)
 {
     int destroy = 0;
     pthread_mutex_lock(&netins->lock);
@@ -259,44 +259,44 @@ netins_udp_release(netins_udp_t *netins)
     destroy = netins->reference_count == 0;
     pthread_mutex_unlock(&netins->lock);
     if (destroy) {
-        netins_udp_destroy(netins);
+        netins_udp_observer_destroy(netins);
     }
 }
 
 static int
-netins_udp_register(netins_udp_t *netins)
+netins_udp_observer_register(netins_udp_observer_t *netins)
 {
-    pthread_mutex_lock(&g_netins_udp_registry_lock);
+    pthread_mutex_lock(&g_netins_udp_observer_registry_lock);
     pthread_mutex_lock(&netins->lock);
 
     if (!netins->registered) {
-        if (g_netins_udp_next_connection_id == NETINS_UDP_INVALID_CONNECTION_ID) {
+        if (g_netins_udp_observer_next_connection_id == NETINS_UDP_INVALID_CONNECTION_ID) {
             pthread_mutex_unlock(&netins->lock);
-            pthread_mutex_unlock(&g_netins_udp_registry_lock);
-            netins_udp_set_error(netins, EOVERFLOW,
+            pthread_mutex_unlock(&g_netins_udp_observer_registry_lock);
+            netins_udp_observer_set_error(netins, EOVERFLOW,
                 "connection ID space exhausted");
             return NETINS_UDP_ERROR;
         }
         netins->snapshot.info.connection_id =
-            g_netins_udp_next_connection_id++;
-        netins->registry_next = g_netins_udp_registry_head;
-        g_netins_udp_registry_head = netins;
+            g_netins_udp_observer_next_connection_id++;
+        netins->registry_next = g_netins_udp_observer_registry_head;
+        g_netins_udp_observer_registry_head = netins;
         netins->registered = 1;
-        netins_udp_retain_locked(netins); /* registry reference */
+        netins_udp_observer_retain_locked(netins); /* registry reference */
     }
 
     pthread_mutex_unlock(&netins->lock);
-    pthread_mutex_unlock(&g_netins_udp_registry_lock);
+    pthread_mutex_unlock(&g_netins_udp_observer_registry_lock);
     return NETINS_UDP_OK;
 }
 
 static void
-netins_udp_unregister(netins_udp_t *netins)
+netins_udp_observer_unregister(netins_udp_observer_t *netins)
 {
     int release_registry_reference = 0;
 
-    pthread_mutex_lock(&g_netins_udp_registry_lock);
-    netins_udp_t **cursor = &g_netins_udp_registry_head;
+    pthread_mutex_lock(&g_netins_udp_observer_registry_lock);
+    netins_udp_observer_t **cursor = &g_netins_udp_observer_registry_head;
     while (*cursor != NULL && *cursor != netins) {
         cursor = &(*cursor)->registry_next;
     }
@@ -308,10 +308,10 @@ netins_udp_unregister(netins_udp_t *netins)
         pthread_mutex_unlock(&netins->lock);
         release_registry_reference = 1;
     }
-    pthread_mutex_unlock(&g_netins_udp_registry_lock);
+    pthread_mutex_unlock(&g_netins_udp_observer_registry_lock);
 
     if (release_registry_reference) {
-        netins_udp_release(netins);
+        netins_udp_observer_release(netins);
     }
 }
 
@@ -321,10 +321,10 @@ netins_udp_get_api_version(void)
     return NETINS_UDP_API_VERSION;
 }
 
-netins_udp_t *
-netins_udp_new(void)
+netins_udp_observer_t *
+netins_udp_observer_new(void)
 {
-    netins_udp_t *netins = calloc(1, sizeof(*netins));
+    netins_udp_observer_t *netins = calloc(1, sizeof(*netins));
     if (netins == NULL) {
         return NULL;
     }
@@ -334,44 +334,44 @@ netins_udp_new(void)
     }
 
     netins->reference_count = 1;
-    netins_udp_init_snapshot(&netins->snapshot);
+    netins_udp_observer_init_snapshot(&netins->snapshot);
     netins->snapshot.info.connection_state = NETINS_UDP_STATE_NEW;
     return netins;
 }
 
 void
-netins_udp_close(netins_udp_t *netins)
+netins_udp_observer_close(netins_udp_observer_t *netins)
 {
     if (netins != NULL) {
-        netins_udp_release(netins);
+        netins_udp_observer_release(netins);
     }
 }
 
-netins_udp_t *
-netins_udp_open(uint64_t connection_id)
+netins_udp_observer_t *
+netins_udp_observer_open(uint64_t connection_id)
 {
-    netins_udp_t *result = NULL;
-    pthread_mutex_lock(&g_netins_udp_registry_lock);
-    for (netins_udp_t *item = g_netins_udp_registry_head;
+    netins_udp_observer_t *result = NULL;
+    pthread_mutex_lock(&g_netins_udp_observer_registry_lock);
+    for (netins_udp_observer_t *item = g_netins_udp_observer_registry_head;
          item != NULL; item = item->registry_next)
     {
         pthread_mutex_lock(&item->lock);
         if (item->registered
             && item->snapshot.info.connection_id == connection_id)
         {
-            netins_udp_retain_locked(item);
+            netins_udp_observer_retain_locked(item);
             result = item;
             pthread_mutex_unlock(&item->lock);
             break;
         }
         pthread_mutex_unlock(&item->lock);
     }
-    pthread_mutex_unlock(&g_netins_udp_registry_lock);
+    pthread_mutex_unlock(&g_netins_udp_observer_registry_lock);
     return result;
 }
 
 int
-netins_udp_list_connections(uint64_t *connection_ids, size_t capacity,
+netins_udp_observer_list_connections(uint64_t *connection_ids, size_t capacity,
     size_t *connection_count)
 {
     if (connection_count == NULL || (connection_ids == NULL && capacity != 0)) {
@@ -379,8 +379,8 @@ netins_udp_list_connections(uint64_t *connection_ids, size_t capacity,
     }
 
     size_t total = 0;
-    pthread_mutex_lock(&g_netins_udp_registry_lock);
-    for (netins_udp_t *item = g_netins_udp_registry_head;
+    pthread_mutex_lock(&g_netins_udp_observer_registry_lock);
+    for (netins_udp_observer_t *item = g_netins_udp_observer_registry_head;
          item != NULL; item = item->registry_next)
     {
         pthread_mutex_lock(&item->lock);
@@ -392,7 +392,7 @@ netins_udp_list_connections(uint64_t *connection_ids, size_t capacity,
         }
         pthread_mutex_unlock(&item->lock);
     }
-    pthread_mutex_unlock(&g_netins_udp_registry_lock);
+    pthread_mutex_unlock(&g_netins_udp_observer_registry_lock);
 
     *connection_count = total;
     if (connection_ids == NULL) {
@@ -402,14 +402,14 @@ netins_udp_list_connections(uint64_t *connection_ids, size_t capacity,
 }
 
 int
-netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
+netins_udp_observer_bind(netins_udp_observer_t *netins, xqc_engine_t *engine,
     const xqc_cid_t *cid, netins_udp_role_t role)
 {
     if (netins == NULL || engine == NULL || cid == NULL
         || (role != NETINS_UDP_ROLE_CLIENT && role != NETINS_UDP_ROLE_SERVER))
     {
         if (netins != NULL) {
-            netins_udp_set_error(netins, EINVAL,
+            netins_udp_observer_set_error(netins, EINVAL,
                 "invalid engine, CID, or connection role");
         }
         return NETINS_UDP_ERROR;
@@ -417,8 +417,8 @@ netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
 
     pthread_mutex_lock(&netins->lock);
     if (netins->bound || netins->registered) {
-        netins_udp_set_error_locked(netins, EALREADY,
-            "adapter is already bound");
+        netins_udp_observer_set_error_locked(netins, EALREADY,
+            "observer is already bound");
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_ERROR;
     }
@@ -427,10 +427,10 @@ netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
     netins->bound = 1;
     netins->snapshot.info.role = role;
     netins->snapshot.info.connection_state = NETINS_UDP_STATE_CONNECTING;
-    netins_udp_set_error_locked(netins, 0, NULL);
+    netins_udp_observer_set_error_locked(netins, 0, NULL);
     pthread_mutex_unlock(&netins->lock);
 
-    if (netins_udp_refresh(netins) != NETINS_UDP_OK) {
+    if (netins_udp_observer_refresh(netins) != NETINS_UDP_OK) {
         pthread_mutex_lock(&netins->lock);
         netins->engine = NULL;
         memset(&netins->cid, 0, sizeof(netins->cid));
@@ -440,7 +440,7 @@ netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
         return NETINS_UDP_ERROR;
     }
 
-    if (netins_udp_register(netins) != NETINS_UDP_OK) {
+    if (netins_udp_observer_register(netins) != NETINS_UDP_OK) {
         pthread_mutex_lock(&netins->lock);
         netins->engine = NULL;
         netins->bound = 0;
@@ -449,13 +449,13 @@ netins_udp_bind(netins_udp_t *netins, xqc_engine_t *engine,
         return NETINS_UDP_ERROR;
     }
 
-    netins_udp_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
-        "netins UDP adapter bound to XQUIC connection");
+    netins_udp_observer_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+        "netins UDP observer bound to XQUIC connection");
     return NETINS_UDP_OK;
 }
 
 int
-netins_udp_update_cid(netins_udp_t *netins, const xqc_cid_t *cid)
+netins_udp_observer_update_cid(netins_udp_observer_t *netins, const xqc_cid_t *cid)
 {
     if (netins == NULL || cid == NULL) {
         return NETINS_UDP_ERROR;
@@ -463,8 +463,8 @@ netins_udp_update_cid(netins_udp_t *netins, const xqc_cid_t *cid)
 
     pthread_mutex_lock(&netins->lock);
     if (!netins->bound || netins->engine == NULL) {
-        netins_udp_set_error_locked(netins, ENOTCONN,
-            "adapter is not bound to a live connection");
+        netins_udp_observer_set_error_locked(netins, ENOTCONN,
+            "observer is not bound to a live connection");
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_ERROR;
     }
@@ -474,12 +474,12 @@ netins_udp_update_cid(netins_udp_t *netins, const xqc_cid_t *cid)
 }
 
 int
-netins_udp_refresh(netins_udp_t *netins)
+netins_udp_observer_refresh(netins_udp_observer_t *netins)
 {
     xqc_engine_t *engine = NULL;
     xqc_cid_t cid;
     netins_udp_snapshot_t previous;
-    netins_udp_path_metadata_t metadata[NETINS_UDP_MAX_PATHS];
+    netins_udp_observer_path_metadata_t metadata[NETINS_UDP_MAX_PATHS];
 
     if (netins == NULL) {
         return NETINS_UDP_ERROR;
@@ -487,8 +487,8 @@ netins_udp_refresh(netins_udp_t *netins)
 
     pthread_mutex_lock(&netins->lock);
     if (!netins->bound || netins->engine == NULL) {
-        netins_udp_set_error_locked(netins, ENOTCONN,
-            "adapter is not bound to a live connection");
+        netins_udp_observer_set_error_locked(netins, ENOTCONN,
+            "observer is not bound to a live connection");
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_ERROR;
     }
@@ -499,14 +499,14 @@ netins_udp_refresh(netins_udp_t *netins)
     pthread_mutex_unlock(&netins->lock);
 
     xqc_conn_stats_t raw = xqc_conn_get_stats(engine, &cid);
-    if (!netins_udp_raw_stats_valid(&raw)) {
-        netins_udp_set_error(netins, ENOENT,
+    if (!netins_udp_observer_raw_stats_valid(&raw)) {
+        netins_udp_observer_set_error(netins, ENOENT,
             "XQUIC connection not found for bound CID");
         return NETINS_UDP_NOT_FOUND;
     }
 
     netins_udp_snapshot_t next;
-    netins_udp_init_snapshot(&next);
+    netins_udp_observer_init_snapshot(&next);
     next.info.connection_id = previous.info.connection_id;
     next.info.role = previous.info.role;
     next.info.connection_state = previous.info.connection_state;
@@ -514,15 +514,15 @@ netins_udp_refresh(netins_udp_t *netins)
     next.info.multipath_mode = raw.enable_multipath;
     next.info.mp_state = raw.mp_state;
     next.info.conn_error = raw.conn_err;
-    netins_udp_copy_string(next.info.alpn, sizeof(next.info.alpn), raw.alpn,
+    netins_udp_observer_copy_string(next.info.alpn, sizeof(next.info.alpn), raw.alpn,
         sizeof(raw.alpn));
-    netins_udp_copy_string(next.info.conn_info, sizeof(next.info.conn_info),
+    netins_udp_observer_copy_string(next.info.conn_info, sizeof(next.info.conn_info),
         raw.conn_info, sizeof(raw.conn_info));
-    netins_udp_copy_string(next.info.extern_conn_info,
+    netins_udp_observer_copy_string(next.info.extern_conn_info,
         sizeof(next.info.extern_conn_info), raw.extern_conn_info,
         sizeof(raw.extern_conn_info));
 
-    next.statis.snapshot_time_us = netins_udp_now_us();
+    next.statis.snapshot_time_us = netins_udp_observer_now_us();
     if (previous.statis.snapshot_time_us > 0
         && next.statis.snapshot_time_us >= previous.statis.snapshot_time_us)
     {
@@ -566,47 +566,47 @@ netins_udp_refresh(netins_udp_t *netins)
             src->path_recv_effective_reinject_bytes;
         dst->srtt_us = src->path_srtt;
 
-        const netins_udp_path_metadata_t *path_metadata =
-            netins_udp_find_metadata(metadata, dst->path_id);
+        const netins_udp_observer_path_metadata_t *path_metadata =
+            netins_udp_observer_find_metadata(metadata, dst->path_id);
         if (path_metadata != NULL) {
-            netins_udp_copy_string(dst->interface_name,
+            netins_udp_observer_copy_string(dst->interface_name,
                 sizeof(dst->interface_name), path_metadata->interface_name,
                 sizeof(path_metadata->interface_name));
-            netins_udp_copy_string(dst->local_address,
+            netins_udp_observer_copy_string(dst->local_address,
                 sizeof(dst->local_address), path_metadata->local_address,
                 sizeof(path_metadata->local_address));
-            netins_udp_copy_string(dst->peer_address,
+            netins_udp_observer_copy_string(dst->peer_address,
                 sizeof(dst->peer_address), path_metadata->peer_address,
                 sizeof(path_metadata->peer_address));
         }
 
         const netins_udp_path_statis_t *old_path =
-            netins_udp_find_previous_path(&previous, dst->path_id);
+            netins_udp_observer_find_previous_path(&previous, dst->path_id);
         if (old_path != NULL) {
             if (dst->interface_name[0] == '\0') {
-                netins_udp_copy_string(dst->interface_name,
+                netins_udp_observer_copy_string(dst->interface_name,
                     sizeof(dst->interface_name), old_path->interface_name,
                     sizeof(old_path->interface_name));
             }
             if (dst->local_address[0] == '\0') {
-                netins_udp_copy_string(dst->local_address,
+                netins_udp_observer_copy_string(dst->local_address,
                     sizeof(dst->local_address), old_path->local_address,
                     sizeof(old_path->local_address));
             }
             if (dst->peer_address[0] == '\0') {
-                netins_udp_copy_string(dst->peer_address,
+                netins_udp_observer_copy_string(dst->peer_address,
                     sizeof(dst->peer_address), old_path->peer_address,
                     sizeof(old_path->peer_address));
             }
-            dst->send_mbps = netins_udp_rate_mbps(dst->bytes_sent,
+            dst->send_mbps = netins_udp_observer_rate_mbps(dst->bytes_sent,
                 old_path->bytes_sent, next.statis.sample_interval_us);
-            dst->wire_send_mbps = netins_udp_rate_mbps(dst->bytes_wire_sent,
+            dst->wire_send_mbps = netins_udp_observer_rate_mbps(dst->bytes_wire_sent,
                 old_path->bytes_wire_sent, next.statis.sample_interval_us);
-            dst->delivery_mbps = netins_udp_rate_mbps(dst->bytes_delivered,
+            dst->delivery_mbps = netins_udp_observer_rate_mbps(dst->bytes_delivered,
                 old_path->bytes_delivered, next.statis.sample_interval_us);
-            dst->recv_mbps = netins_udp_rate_mbps(dst->bytes_recv,
+            dst->recv_mbps = netins_udp_observer_rate_mbps(dst->bytes_recv,
                 old_path->bytes_recv, next.statis.sample_interval_us);
-            dst->effective_recv_mbps = netins_udp_rate_mbps(
+            dst->effective_recv_mbps = netins_udp_observer_rate_mbps(
                 dst->bytes_recv_effective, old_path->bytes_recv_effective,
                 next.statis.sample_interval_us);
         }
@@ -637,17 +637,17 @@ netins_udp_refresh(netins_udp_t *netins)
     }
 
     next.info.path_count = next.path_count;
-    next.statis.send_mbps = netins_udp_rate_mbps(next.statis.bytes_sent,
+    next.statis.send_mbps = netins_udp_observer_rate_mbps(next.statis.bytes_sent,
         previous.statis.bytes_sent, next.statis.sample_interval_us);
-    next.statis.wire_send_mbps = netins_udp_rate_mbps(
+    next.statis.wire_send_mbps = netins_udp_observer_rate_mbps(
         next.statis.bytes_wire_sent, previous.statis.bytes_wire_sent,
         next.statis.sample_interval_us);
-    next.statis.delivery_mbps = netins_udp_rate_mbps(
+    next.statis.delivery_mbps = netins_udp_observer_rate_mbps(
         next.statis.bytes_delivered, previous.statis.bytes_delivered,
         next.statis.sample_interval_us);
-    next.statis.recv_mbps = netins_udp_rate_mbps(next.statis.bytes_recv,
+    next.statis.recv_mbps = netins_udp_observer_rate_mbps(next.statis.bytes_recv,
         previous.statis.bytes_recv, next.statis.sample_interval_us);
-    next.statis.effective_recv_mbps = netins_udp_rate_mbps(
+    next.statis.effective_recv_mbps = netins_udp_observer_rate_mbps(
         next.statis.bytes_recv_effective,
         previous.statis.bytes_recv_effective,
         next.statis.sample_interval_us);
@@ -658,18 +658,18 @@ netins_udp_refresh(netins_udp_t *netins)
         return NETINS_UDP_NOT_FOUND;
     }
     memcpy(&netins->snapshot, &next, sizeof(next));
-    netins_udp_set_error_locked(netins, 0, NULL);
+    netins_udp_observer_set_error_locked(netins, 0, NULL);
     pthread_mutex_unlock(&netins->lock);
     return NETINS_UDP_OK;
 }
 
 int
-netins_udp_mark_handshake_finished(netins_udp_t *netins)
+netins_udp_observer_mark_handshake_finished(netins_udp_observer_t *netins)
 {
     if (netins == NULL) {
         return NETINS_UDP_ERROR;
     }
-    int refresh_result = netins_udp_refresh(netins);
+    int refresh_result = netins_udp_observer_refresh(netins);
     pthread_mutex_lock(&netins->lock);
     if (!netins->bound) {
         pthread_mutex_unlock(&netins->lock);
@@ -683,7 +683,7 @@ netins_udp_mark_handshake_finished(netins_udp_t *netins)
 }
 
 int
-netins_udp_mark_closing(netins_udp_t *netins)
+netins_udp_observer_mark_closing(netins_udp_observer_t *netins)
 {
     if (netins == NULL) {
         return NETINS_UDP_ERROR;
@@ -697,7 +697,7 @@ netins_udp_mark_closing(netins_udp_t *netins)
 }
 
 int
-netins_udp_mark_closed(netins_udp_t *netins, int conn_error)
+netins_udp_observer_mark_closed(netins_udp_observer_t *netins, int conn_error)
 {
     if (netins == NULL) {
         return NETINS_UDP_ERROR;
@@ -707,11 +707,11 @@ netins_udp_mark_closed(netins_udp_t *netins, int conn_error)
     int already_detached = !netins->bound;
     pthread_mutex_unlock(&netins->lock);
     if (already_detached) {
-        netins_udp_unregister(netins);
+        netins_udp_observer_unregister(netins);
         return NETINS_UDP_OK;
     }
 
-    (void)netins_udp_refresh(netins);
+    (void)netins_udp_observer_refresh(netins);
 
     pthread_mutex_lock(&netins->lock);
     int keep_error = netins->snapshot.info.connection_state
@@ -728,21 +728,21 @@ netins_udp_mark_closed(netins_udp_t *netins, int conn_error)
         char message[128];
         snprintf(message, sizeof(message),
             "XQUIC connection closed with error: %d", final_error);
-        netins_udp_set_error_locked(netins, final_error, message);
+        netins_udp_observer_set_error_locked(netins, final_error, message);
     } else {
-        netins_udp_set_error_locked(netins, 0, NULL);
+        netins_udp_observer_set_error_locked(netins, 0, NULL);
     }
     netins->bound = 0;
     netins->engine = NULL;
     memset(&netins->cid, 0, sizeof(netins->cid));
     pthread_mutex_unlock(&netins->lock);
 
-    netins_udp_unregister(netins);
+    netins_udp_observer_unregister(netins);
     return NETINS_UDP_OK;
 }
 
 int
-netins_udp_mark_error(netins_udp_t *netins, int error_code,
+netins_udp_observer_mark_error(netins_udp_observer_t *netins, int error_code,
     const char *error_message)
 {
     if (netins == NULL) {
@@ -751,15 +751,15 @@ netins_udp_mark_error(netins_udp_t *netins, int error_code,
     pthread_mutex_lock(&netins->lock);
     netins->snapshot.info.connection_state = NETINS_UDP_STATE_ERROR;
     netins->snapshot.info.conn_error = error_code;
-    netins_udp_set_error_locked(netins, error_code, error_message);
+    netins_udp_observer_set_error_locked(netins, error_code, error_message);
     pthread_mutex_unlock(&netins->lock);
-    netins_udp_log(netins, NETINS_UDP_LOG_LEVEL_ERROR,
+    netins_udp_observer_log(netins, NETINS_UDP_LOG_LEVEL_ERROR,
         error_message != NULL ? error_message : "XQUIC connection error");
     return NETINS_UDP_OK;
 }
 
 static int
-netins_udp_format_address(const struct sockaddr *addr, socklen_t addr_len,
+netins_udp_observer_format_address(const struct sockaddr *addr, socklen_t addr_len,
     char *output, size_t output_len)
 {
     if (addr == NULL || addr_len == 0 || output == NULL || output_len == 0) {
@@ -801,7 +801,7 @@ netins_udp_format_address(const struct sockaddr *addr, socklen_t addr_len,
 }
 
 int
-netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
+netins_udp_observer_set_path_metadata(netins_udp_observer_t *netins, uint64_t path_id,
     const char *interface_name, const struct sockaddr *local_addr,
     socklen_t local_addr_len, const struct sockaddr *peer_addr,
     socklen_t peer_addr_len)
@@ -812,13 +812,13 @@ netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
 
     char local_text[NETINS_UDP_ADDRESS_LEN] = {0};
     char peer_text[NETINS_UDP_ADDRESS_LEN] = {0};
-    (void)netins_udp_format_address(local_addr, local_addr_len, local_text,
+    (void)netins_udp_observer_format_address(local_addr, local_addr_len, local_text,
         sizeof(local_text));
-    (void)netins_udp_format_address(peer_addr, peer_addr_len, peer_text,
+    (void)netins_udp_observer_format_address(peer_addr, peer_addr_len, peer_text,
         sizeof(peer_text));
 
     pthread_mutex_lock(&netins->lock);
-    netins_udp_path_metadata_t *slot = NULL;
+    netins_udp_observer_path_metadata_t *slot = NULL;
     for (size_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
         if (netins->path_metadata[i].valid
             && netins->path_metadata[i].path_id == path_id)
@@ -831,7 +831,7 @@ netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
         }
     }
     if (slot == NULL) {
-        netins_udp_set_error_locked(netins, ENOSPC,
+        netins_udp_observer_set_error_locked(netins, ENOSPC,
             "path metadata table is full");
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_BUFFER_TOO_SMALL;
@@ -840,16 +840,16 @@ netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
     slot->valid = 1;
     slot->path_id = path_id;
     if (interface_name != NULL) {
-        netins_udp_copy_string(slot->interface_name,
+        netins_udp_observer_copy_string(slot->interface_name,
             sizeof(slot->interface_name), interface_name,
             strlen(interface_name));
     }
     if (local_text[0] != '\0') {
-        netins_udp_copy_string(slot->local_address,
+        netins_udp_observer_copy_string(slot->local_address,
             sizeof(slot->local_address), local_text, strlen(local_text));
     }
     if (peer_text[0] != '\0') {
-        netins_udp_copy_string(slot->peer_address,
+        netins_udp_observer_copy_string(slot->peer_address,
             sizeof(slot->peer_address), peer_text, strlen(peer_text));
     }
 
@@ -858,13 +858,13 @@ netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
         if (path->path_id != path_id) {
             continue;
         }
-        netins_udp_copy_string(path->interface_name,
+        netins_udp_observer_copy_string(path->interface_name,
             sizeof(path->interface_name), slot->interface_name,
             sizeof(slot->interface_name));
-        netins_udp_copy_string(path->local_address,
+        netins_udp_observer_copy_string(path->local_address,
             sizeof(path->local_address), slot->local_address,
             sizeof(slot->local_address));
-        netins_udp_copy_string(path->peer_address,
+        netins_udp_observer_copy_string(path->peer_address,
             sizeof(path->peer_address), slot->peer_address,
             sizeof(slot->peer_address));
         break;
@@ -874,15 +874,15 @@ netins_udp_set_path_metadata(netins_udp_t *netins, uint64_t path_id,
 }
 
 int
-netins_udp_get_snapshot(netins_udp_t *netins, netins_udp_snapshot_t *out)
+netins_udp_observer_get_snapshot(netins_udp_observer_t *netins, netins_udp_snapshot_t *out)
 {
     if (netins == NULL || out == NULL) {
         return NETINS_UDP_ERROR;
     }
-    int validation = netins_udp_output_valid(out->struct_size,
+    int validation = netins_udp_observer_output_valid(out->struct_size,
         out->api_version, sizeof(*out));
     if (validation != NETINS_UDP_OK) {
-        netins_udp_set_error(netins, EPROTO,
+        netins_udp_observer_set_error(netins, EPROTO,
             "snapshot API version or structure size mismatch");
         return validation;
     }
@@ -893,28 +893,28 @@ netins_udp_get_snapshot(netins_udp_t *netins, netins_udp_snapshot_t *out)
 }
 
 int
-netins_udp_get_snapshot_by_id(uint64_t connection_id,
+netins_udp_observer_get_snapshot_by_id(uint64_t connection_id,
     netins_udp_snapshot_t *out)
 {
-    netins_udp_t *netins = netins_udp_open(connection_id);
+    netins_udp_observer_t *netins = netins_udp_observer_open(connection_id);
     if (netins == NULL) {
         return NETINS_UDP_NOT_FOUND;
     }
-    int result = netins_udp_get_snapshot(netins, out);
-    netins_udp_close(netins);
+    int result = netins_udp_observer_get_snapshot(netins, out);
+    netins_udp_observer_close(netins);
     return result;
 }
 
 int
-netins_udp_get_info(netins_udp_t *netins, netins_udp_info_t *out)
+netins_udp_observer_get_info(netins_udp_observer_t *netins, netins_udp_info_t *out)
 {
     if (netins == NULL || out == NULL) {
         return NETINS_UDP_ERROR;
     }
-    int validation = netins_udp_output_valid(out->struct_size,
+    int validation = netins_udp_observer_output_valid(out->struct_size,
         out->api_version, sizeof(*out));
     if (validation != NETINS_UDP_OK) {
-        netins_udp_set_error(netins, EPROTO,
+        netins_udp_observer_set_error(netins, EPROTO,
             "info API version or structure size mismatch");
         return validation;
     }
@@ -925,15 +925,15 @@ netins_udp_get_info(netins_udp_t *netins, netins_udp_info_t *out)
 }
 
 int
-netins_udp_get_statis(netins_udp_t *netins, netins_udp_statis_t *out)
+netins_udp_observer_get_statis(netins_udp_observer_t *netins, netins_udp_statis_t *out)
 {
     if (netins == NULL || out == NULL) {
         return NETINS_UDP_ERROR;
     }
-    int validation = netins_udp_output_valid(out->struct_size,
+    int validation = netins_udp_observer_output_valid(out->struct_size,
         out->api_version, sizeof(*out));
     if (validation != NETINS_UDP_OK) {
-        netins_udp_set_error(netins, EPROTO,
+        netins_udp_observer_set_error(netins, EPROTO,
             "statistics API version or structure size mismatch");
         return validation;
     }
@@ -944,22 +944,22 @@ netins_udp_get_statis(netins_udp_t *netins, netins_udp_statis_t *out)
 }
 
 int
-netins_udp_get_path_statis(netins_udp_t *netins, size_t path_index,
+netins_udp_observer_get_path_statis(netins_udp_observer_t *netins, size_t path_index,
     netins_udp_path_statis_t *out)
 {
     if (netins == NULL || out == NULL) {
         return NETINS_UDP_ERROR;
     }
-    int validation = netins_udp_output_valid(out->struct_size,
+    int validation = netins_udp_observer_output_valid(out->struct_size,
         out->api_version, sizeof(*out));
     if (validation != NETINS_UDP_OK) {
-        netins_udp_set_error(netins, EPROTO,
+        netins_udp_observer_set_error(netins, EPROTO,
             "path statistics API version or structure size mismatch");
         return validation;
     }
     pthread_mutex_lock(&netins->lock);
     if (path_index >= netins->snapshot.path_count) {
-        netins_udp_set_error_locked(netins, ENOENT,
+        netins_udp_observer_set_error_locked(netins, ENOENT,
             "path index is outside the current snapshot");
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_NOT_FOUND;
@@ -970,7 +970,7 @@ netins_udp_get_path_statis(netins_udp_t *netins, size_t path_index,
 }
 
 int
-netins_udp_set_logger(netins_udp_t *netins, netins_udp_logger_cb logger,
+netins_udp_observer_set_logger(netins_udp_observer_t *netins, netins_udp_logger_cb logger,
     void *user_data)
 {
     if (netins == NULL) {
@@ -984,7 +984,7 @@ netins_udp_set_logger(netins_udp_t *netins, netins_udp_logger_cb logger,
 }
 
 int
-netins_udp_get_last_error_code(netins_udp_t *netins)
+netins_udp_observer_get_last_error_code(netins_udp_observer_t *netins)
 {
     if (netins == NULL) {
         return EINVAL;
@@ -996,7 +996,7 @@ netins_udp_get_last_error_code(netins_udp_t *netins)
 }
 
 int
-netins_udp_get_last_error_msg(netins_udp_t *netins, char *buffer,
+netins_udp_observer_get_last_error_msg(netins_udp_observer_t *netins, char *buffer,
     size_t buffer_len)
 {
     if (netins == NULL || buffer == NULL || buffer_len == 0) {

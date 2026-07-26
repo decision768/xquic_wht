@@ -25,7 +25,7 @@
  * 输出结构体说明：调用 getter 前必须使用对应的 INITIALIZER 初始化，例如：
  *
  *     netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
- *     int ret = netins_udp_get_snapshot(handle, &snapshot);
+ *     int ret = netins_udp_observer_get_snapshot(handle, &snapshot);
  *
  * 除 loss_rate 外，所有 *_mbps 字段单位均为 Mbit/s；所有 *_us 字段单位均为
  * 微秒；所有 bytes_* 字段单位均为字节。
@@ -83,8 +83,8 @@ extern "C" {
 /** 无效的进程内 connection_id。 */
 #define NETINS_UDP_INVALID_CONNECTION_ID  UINT64_MAX
 
-/** 不透明的连接状态句柄，第三方不能直接访问其内部成员。 */
-typedef struct netins_udp_s netins_udp_t;
+/** 不透明的连接状态观察器，第三方不能直接访问其内部成员。 */
+typedef struct netins_udp_observer_s netins_udp_observer_t;
 /** 不透明的独立 QUIC/H3 客户端对象。 */
 typedef struct netins_udp_client_s netins_udp_client_t;
 /** 不透明的 HTTP/3 请求/stream 对象。 */
@@ -486,13 +486,13 @@ typedef struct netins_udp_snapshot_s {
     uint64_t reserved[8];
 } netins_udp_snapshot_t;
 
-/** 初始化 netins_udp_info_t，调用 netins_udp_get_info() 前必须使用。 */
+/** 初始化 netins_udp_info_t，调用 netins_udp_observer_get_info() 前必须使用。 */
 #define NETINS_UDP_INFO_INITIALIZER \
     { sizeof(netins_udp_info_t), NETINS_UDP_API_VERSION }
-/** 初始化 netins_udp_statis_t，调用 netins_udp_get_statis() 前必须使用。 */
+/** 初始化 netins_udp_statis_t，调用 netins_udp_observer_get_statis() 前必须使用。 */
 #define NETINS_UDP_STATIS_INITIALIZER \
     { sizeof(netins_udp_statis_t), NETINS_UDP_API_VERSION }
-/** 初始化单路径输出，调用 netins_udp_get_path_statis() 前必须使用。 */
+/** 初始化单路径输出，调用 netins_udp_observer_get_path_statis() 前必须使用。 */
 #define NETINS_UDP_PATH_STATIS_INITIALIZER \
     { sizeof(netins_udp_path_statis_t), NETINS_UDP_API_VERSION }
 /** 初始化完整快照，调用 snapshot getter 前必须使用。 */
@@ -633,29 +633,29 @@ NETINS_UDP_PUBLIC void netins_udp_client_close(
     netins_udp_client_t *client);
 
 /**
- * 创建一个尚未绑定 XQUIC 连接的适配器。
+ * 创建一个尚未绑定 XQUIC 连接的状态观察器。
  * @return 成功返回新句柄，内存不足时返回 NULL。
  * @note 该函数主要供 mini_client/mini_server 宿主集成代码使用。
- *       普通第三方查询现有连接时应使用 netins_udp_open()。
+ *       普通第三方查询现有连接时应使用 netins_udp_observer_open()。
  */
-NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(void);
+NETINS_UDP_PUBLIC netins_udp_observer_t *netins_udp_observer_new(void);
 
 /**
  * 释放当前调用方持有的一次句柄引用。
- * @param netins netins_udp_new() 或 netins_udp_open() 返回的句柄；可为 NULL。
+ * @param netins netins_udp_observer_new() 或 netins_udp_observer_open() 返回的句柄；可为 NULL。
  * @note 本函数绝不会关闭 XQUIC/QUIC 连接，只管理状态接口句柄的引用计数。
  *       同一个引用只能释放一次，释放后不得继续使用该指针。
  */
-NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);
+NETINS_UDP_PUBLIC void netins_udp_observer_close(netins_udp_observer_t *netins);
 
 /**
  * 根据进程内 connection_id 打开一个仍在注册表中的活动连接。
- * @param connection_id 由 netins_udp_list_connections() 或 info 输出获得。
+ * @param connection_id 由 netins_udp_observer_list_connections() 或 info 输出获得。
  * @return 成功返回带独立引用的句柄；连接不存在或已经关闭时返回 NULL。
- * @note 返回的句柄必须由调用方使用 netins_udp_close() 释放。
+ * @note 返回的句柄必须由调用方使用 netins_udp_observer_close() 释放。
  *       若在连接关闭前成功 open，关闭后仍可通过该句柄读取最终快照。
  */
-NETINS_UDP_PUBLIC netins_udp_t *netins_udp_open(uint64_t connection_id);
+NETINS_UDP_PUBLIC netins_udp_observer_t *netins_udp_observer_open(uint64_t connection_id);
 
 /**
  * 枚举当前进程内仍然存活并已注册的 XQUIC 连接。
@@ -670,17 +670,17 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_open(uint64_t connection_id);
  * @return NETINS_UDP_OK；容量不足返回 NETINS_UDP_BUFFER_TOO_SMALL；
  *         参数错误返回 NETINS_UDP_ERROR。
  */
-NETINS_UDP_PUBLIC int netins_udp_list_connections(uint64_t *connection_ids,
+NETINS_UDP_PUBLIC int netins_udp_observer_list_connections(uint64_t *connection_ids,
     size_t capacity, size_t *connection_count);
 
 /**
  * 从指定句柄复制一份完整且线程安全的缓存快照。
- * @param netins netins_udp_open()/new() 获得的有效句柄。
+ * @param netins netins_udp_observer_open()/new() 获得的有效句柄。
  * @param out 输出完整快照；调用前必须使用 NETINS_UDP_SNAPSHOT_INITIALIZER。
  * @return netins_udp_result_t。
  * @note 本函数不直接调用 XQUIC，因此第三方线程可安全调用。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_snapshot(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_snapshot(netins_udp_observer_t *netins,
     netins_udp_snapshot_t *out);
 
 /**
@@ -690,7 +690,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_snapshot(netins_udp_t *netins,
  * @return NETINS_UDP_OK；连接已关闭或不存在返回 NETINS_UDP_NOT_FOUND；
  *         也可能返回版本或结构体大小错误。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_snapshot_by_id(uint64_t connection_id,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_snapshot_by_id(uint64_t connection_id,
     netins_udp_snapshot_t *out);
 
 /**
@@ -699,7 +699,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_snapshot_by_id(uint64_t connection_id,
  * @param out 输出信息；调用前必须使用 NETINS_UDP_INFO_INITIALIZER。
  * @return netins_udp_result_t。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_info(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_info(netins_udp_observer_t *netins,
     netins_udp_info_t *out);
 
 /**
@@ -708,7 +708,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_info(netins_udp_t *netins,
  * @param out 输出统计；调用前必须使用 NETINS_UDP_STATIS_INITIALIZER。
  * @return netins_udp_result_t。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_statis(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_statis(netins_udp_observer_t *netins,
     netins_udp_statis_t *out);
 
 /**
@@ -721,7 +721,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_statis(netins_udp_t *netins,
  * @return NETINS_UDP_OK；下标越界返回 NETINS_UDP_NOT_FOUND；
  *         也可能返回版本或结构体大小错误。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_path_statis(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_path_statis(netins_udp_observer_t *netins,
     size_t path_index, netins_udp_path_statis_t *out);
 
 /**
@@ -732,7 +732,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_path_statis(netins_udp_t *netins,
  * @return NETINS_UDP_OK 或 NETINS_UDP_ERROR。
  * @note 回调可能在 XQUIC/Libevent 线程运行，回调内不要阻塞或重新进入传输。
  */
-NETINS_UDP_PUBLIC int netins_udp_set_logger(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_set_logger(netins_udp_observer_t *netins,
     netins_udp_logger_cb logger, void *user_data);
 
 /**
@@ -741,7 +741,7 @@ NETINS_UDP_PUBLIC int netins_udp_set_logger(netins_udp_t *netins,
  * @return 0 表示无 API 错误；其余通常为 errno 风格错误码。
  * @note 该值与 info.conn_error 表示的 XQUIC 连接错误不是同一个概念。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_last_error_code(netins_udp_t *netins);
+NETINS_UDP_PUBLIC int netins_udp_observer_get_last_error_code(netins_udp_observer_t *netins);
 
 /**
  * 将该句柄最后一次 API 错误说明复制到调用方缓冲区。
@@ -750,7 +750,7 @@ NETINS_UDP_PUBLIC int netins_udp_get_last_error_code(netins_udp_t *netins);
  * @param buffer_len 缓冲区字节长度，必须大于 0。
  * @return NETINS_UDP_OK 或 NETINS_UDP_ERROR。
  */
-NETINS_UDP_PUBLIC int netins_udp_get_last_error_msg(netins_udp_t *netins,
+NETINS_UDP_PUBLIC int netins_udp_observer_get_last_error_msg(netins_udp_observer_t *netins,
     char *buffer, size_t buffer_len);
 
 /** 将 netins_udp_conn_state_t 转换为只读英文名称；返回值无需释放。 */

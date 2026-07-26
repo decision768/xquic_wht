@@ -416,7 +416,7 @@ endif()
 set (
     XQC_SOURCE
     ${XQC_SOURCE}
-    "src/netins_udp/netins_udp.c"
+    "src/netins_udp/netins_udp_observer.c"
     "src/netins_udp/netins_udp_client.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
@@ -444,7 +444,7 @@ option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
 if(NETINS_UDP_BUILD_TESTS)
     enable_testing()
     add_executable(netins_udp_unit_test
-        src/netins_udp/netins_udp.c
+        src/netins_udp/netins_udp_observer.c
         tests/netins_udp/test_netins_udp.c
     )
     target_include_directories(netins_udp_unit_test PRIVATE

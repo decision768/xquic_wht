@@ -10,7 +10,7 @@
 
 #include <arpa/inet.h>
 
-#include "netins_udp_internal.h"
+#include "netins_udp_observer_internal.h"
 
 static xqc_conn_stats_t g_mock_stats;
 
@@ -70,7 +70,7 @@ prepare_mock_stats(void)
 }
 
 typedef struct reader_context_s {
-    netins_udp_t *handle;
+    netins_udp_observer_t *handle;
     int failed;
 } reader_context_t;
 
@@ -80,7 +80,7 @@ snapshot_reader(void *argument)
     reader_context_t *context = argument;
     for (int i = 0; i < 2000; ++i) {
         netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
-        if (netins_udp_get_snapshot(context->handle, &snapshot)
+        if (netins_udp_observer_get_snapshot(context->handle, &snapshot)
             != NETINS_UDP_OK
             || snapshot.info.connection_id
                 == NETINS_UDP_INVALID_CONNECTION_ID)
@@ -98,21 +98,21 @@ main(void)
     prepare_mock_stats();
     assert(netins_udp_get_api_version() == NETINS_UDP_API_VERSION);
 
-    netins_udp_t *host = netins_udp_new();
+    netins_udp_observer_t *host = netins_udp_observer_new();
     assert(host != NULL);
 
     netins_udp_info_t wrong_version = NETINS_UDP_INFO_INITIALIZER;
     wrong_version.api_version++;
-    assert(netins_udp_get_info(host, &wrong_version)
+    assert(netins_udp_observer_get_info(host, &wrong_version)
         == NETINS_UDP_VERSION_MISMATCH);
 
     xqc_cid_t cid;
     memset(&cid, 0, sizeof(cid));
-    assert(netins_udp_bind(host, (xqc_engine_t *)(uintptr_t)1, &cid,
+    assert(netins_udp_observer_bind(host, (xqc_engine_t *)(uintptr_t)1, &cid,
         NETINS_UDP_ROLE_CLIENT) == NETINS_UDP_OK);
     xqc_cid_t updated_cid;
     memset(&updated_cid, 0, sizeof(updated_cid));
-    assert(netins_udp_update_cid(host, &updated_cid) == NETINS_UDP_OK);
+    assert(netins_udp_observer_update_cid(host, &updated_cid) == NETINS_UDP_OK);
 
     struct sockaddr_in local_addr;
     struct sockaddr_in peer_addr;
@@ -124,13 +124,13 @@ main(void)
     peer_addr.sin_port = htons(8443);
     assert(inet_pton(AF_INET, "10.0.0.2", &local_addr.sin_addr) == 1);
     assert(inet_pton(AF_INET, "10.0.0.1", &peer_addr.sin_addr) == 1);
-    assert(netins_udp_set_path_metadata(host, 0, "rmnet_data0",
+    assert(netins_udp_observer_set_path_metadata(host, 0, "rmnet_data0",
         (const struct sockaddr *)&local_addr, sizeof(local_addr),
         (const struct sockaddr *)&peer_addr, sizeof(peer_addr))
         == NETINS_UDP_OK);
 
     netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
-    assert(netins_udp_get_info(host, &info) == NETINS_UDP_OK);
+    assert(netins_udp_observer_get_info(host, &info) == NETINS_UDP_OK);
     assert(info.connection_id != NETINS_UDP_INVALID_CONNECTION_ID);
     assert(info.role == NETINS_UDP_ROLE_CLIENT);
     assert(info.path_count == 2);
@@ -138,17 +138,17 @@ main(void)
     assert(info.validating_path_count == 1);
 
     size_t connection_count = 0;
-    assert(netins_udp_list_connections(NULL, 0, &connection_count)
+    assert(netins_udp_observer_list_connections(NULL, 0, &connection_count)
         == NETINS_UDP_OK);
     assert(connection_count == 1);
 
     uint64_t connection_id = 0;
-    assert(netins_udp_list_connections(&connection_id, 1,
+    assert(netins_udp_observer_list_connections(&connection_id, 1,
         &connection_count) == NETINS_UDP_OK);
     assert(connection_id == info.connection_id);
 
     netins_udp_snapshot_t by_id = NETINS_UDP_SNAPSHOT_INITIALIZER;
-    assert(netins_udp_get_snapshot_by_id(connection_id, &by_id)
+    assert(netins_udp_observer_get_snapshot_by_id(connection_id, &by_id)
         == NETINS_UDP_OK);
     assert(by_id.path_count == 2);
     assert(strcmp(by_id.paths[0].interface_name, "rmnet_data0") == 0);
@@ -156,8 +156,8 @@ main(void)
     assert(by_id.statis.bytes_wire_sent == 120000);
     assert(by_id.statis.bytes_recv_effective == 130000);
 
-    assert(netins_udp_mark_handshake_finished(host) == NETINS_UDP_OK);
-    netins_udp_t *third_party = netins_udp_open(connection_id);
+    assert(netins_udp_observer_mark_handshake_finished(host) == NETINS_UDP_OK);
+    netins_udp_observer_t *third_party = netins_udp_observer_open(connection_id);
     assert(third_party != NULL);
 
     reader_context_t reader = {third_party, 0};
@@ -166,19 +166,19 @@ main(void)
     assert(pthread_join(reader_thread, NULL) == 0);
     assert(reader.failed == 0);
 
-    assert(netins_udp_mark_closed(host, 0) == NETINS_UDP_OK);
-    assert(netins_udp_list_connections(NULL, 0, &connection_count)
+    assert(netins_udp_observer_mark_closed(host, 0) == NETINS_UDP_OK);
+    assert(netins_udp_observer_list_connections(NULL, 0, &connection_count)
         == NETINS_UDP_OK);
     assert(connection_count == 0);
-    assert(netins_udp_open(connection_id) == NULL);
+    assert(netins_udp_observer_open(connection_id) == NULL);
 
     netins_udp_snapshot_t final_snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
-    assert(netins_udp_get_snapshot(third_party, &final_snapshot)
+    assert(netins_udp_observer_get_snapshot(third_party, &final_snapshot)
         == NETINS_UDP_OK);
     assert(final_snapshot.info.connection_state == NETINS_UDP_STATE_CLOSED);
 
-    netins_udp_close(third_party);
-    netins_udp_close(host);
+    netins_udp_observer_close(third_party);
+    netins_udp_observer_close(host);
     printf("netins_udp_unit_test: PASS\n");
     return 0;
 }

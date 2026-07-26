@@ -154,18 +154,18 @@ xqc_mini_cli_h3_conn_create_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, vo
     user_conn->h3_conn = conn;
     memcpy(&user_conn->cid, cid, sizeof(xqc_cid_t));
 
-    if (user_conn->netins_udp != NULL
-        && xqc_mini_cli_netins_udp_bind(user_conn, cid) != XQC_OK)
+    if (user_conn->netins_udp_observer != NULL
+        && xqc_mini_cli_netins_udp_observer_bind(user_conn, cid) != XQC_OK)
     {
         printf("[netins_udp][client] disabled for this connection\n");
-        if (user_conn->ev_netins_udp_refresh != NULL) {
-            event_del(user_conn->ev_netins_udp_refresh);
-            event_free(user_conn->ev_netins_udp_refresh);
-            user_conn->ev_netins_udp_refresh = NULL;
+        if (user_conn->ev_netins_udp_observer_refresh != NULL) {
+            event_del(user_conn->ev_netins_udp_observer_refresh);
+            event_free(user_conn->ev_netins_udp_observer_refresh);
+            user_conn->ev_netins_udp_observer_refresh = NULL;
         }
-        netins_udp_close(user_conn->netins_udp);
-        user_conn->netins_udp = NULL;
-        user_conn->netins_udp_detached = 1;
+        netins_udp_observer_close(user_conn->netins_udp_observer);
+        user_conn->netins_udp_observer = NULL;
+        user_conn->netins_udp_observer_detached = 1;
     }
 
     return XQC_OK;
@@ -177,7 +177,7 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
 
     xqc_mini_cli_diag_maybe_log(user_conn, "h3_conn_close", 1);
-    xqc_mini_cli_netins_udp_connection_closed(user_conn,
+    xqc_mini_cli_netins_udp_observer_connection_closed(user_conn,
         xqc_h3_conn_get_errno(conn));
     user_conn->h3_conn = NULL;
     event_base_loopbreak(user_conn->ctx->eb);
@@ -196,7 +196,7 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 
     xqc_mini_cli_try_rebuild_paths(user_conn);
     user_conn->handshake_finished = 1;
-    xqc_mini_cli_netins_udp_handshake_finished(user_conn);
+    xqc_mini_cli_netins_udp_observer_handshake_finished(user_conn);
     user_conn->path_wait_rounds_after_handshake = 0;
     printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
 

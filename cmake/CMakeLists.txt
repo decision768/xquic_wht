@@ -366,7 +366,7 @@ endif()
 
 set(
     NETINS_UDP_SOURCES
-    "src/netins_udp/netins_udp.c"
+    "src/netins_udp/netins_udp_observer.c"
     "src/netins_udp/netins_udp_client.c"
 )
 

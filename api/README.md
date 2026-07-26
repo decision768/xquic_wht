@@ -36,7 +36,7 @@ QUIC/H3 client without starting `mini_client`:
 
 `netins_udp_client_connect()` blocks until the H3 handshake completes or the
 configured timeout expires. The client owns its UDP sockets, XQUIC engine, poll
-thread, multipath creation attempts, and status adapter. It does not alter or
+thread, multipath creation attempts, and status observer. It does not alter or
 reuse the engines owned by `mini_client` or `mini_server`.
 
 A successful connect means that the QUIC/H3 handshake is complete. Additional
@@ -114,31 +114,31 @@ make -j netins_udp_connect_cli
 
 ## Third-party lifecycle
 
-1. Call `netins_udp_list_connections(NULL, 0, &count)` to query the number of
+1. Call `netins_udp_observer_list_connections(NULL, 0, &count)` to query the number of
    live registered connections.
-2. Allocate an ID array and call `netins_udp_list_connections()` again.
-3. Use `netins_udp_get_snapshot_by_id()` for one-shot polling, or call
-   `netins_udp_open()` to retain a connection handle.
+2. Allocate an ID array and call `netins_udp_observer_list_connections()` again.
+3. Use `netins_udp_observer_get_snapshot_by_id()` for one-shot polling, or call
+   `netins_udp_observer_open()` to retain a connection handle.
 4. Initialize every output structure with its matching
    `NETINS_UDP_*_INITIALIZER` macro before a getter call.
-5. Release a retained handle with `netins_udp_close()`.
+5. Release a retained handle with `netins_udp_observer_close()`.
 
 When XQUIC closes a connection, the connection disappears from the registry.
 A handle retained before closure remains valid and returns the final CLOSED or
-ERROR snapshot until the third party releases it. `netins_udp_close()` only
+ERROR snapshot until the third party releases it. `netins_udp_observer_close()` only
 releases the API handle; it never closes XQUIC.
 
 See `examples/netins_udp_snapshot_example.c` for polling code.
 
 ## Host integration
 
-The mini applications create and bind one adapter in their H3 connection-create
+The mini applications create and bind one observer in their H3 connection-create
 callback. A persistent Libevent timer refreshes the cached snapshot every 500
 ms from the same thread that drives XQUIC. Handshake and close callbacks update
 the lifecycle state. Client path metadata includes the configured interface
 name, while both sides report path local and peer address tuples.
 
-Adapter allocation, binding, or timer failure disables the status adapter for
+Observer allocation, binding, or timer failure disables status observation for
 that connection but does not fail the QUIC connection or data transfer.
 
 ## Build and delivery

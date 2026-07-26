@@ -154,10 +154,10 @@ typedef struct xqc_mini_svr_user_conn_s {
     struct xqc_mini_svr_user_conn_s *listener_conn;
     int                     is_connection_scope;
     struct event           *ev_timeout;
-    struct event           *ev_netins_udp_refresh;
-    netins_udp_t           *netins_udp;
+    struct event           *ev_netins_udp_observer_refresh;
+    netins_udp_observer_t  *netins_udp_observer;
     xqc_h3_conn_t          *h3_conn;
-    int                     netins_udp_reported_multipath;
+    int                     netins_udp_observer_reported_multipath;
     xqc_cid_t               cid;
     xqc_mini_svr_ctx_t     *ctx;
 

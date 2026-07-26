@@ -50,9 +50,9 @@ XQUIC 真实连接
 
 第三方有两种读取方式：
 
-1. 简单轮询：枚举 `connection_id`，调用 `netins_udp_get_snapshot_by_id()`。
-2. 长期观察：调用 `netins_udp_open()` 持有句柄，再反复调用
-   `netins_udp_get_snapshot()`，最后使用 `netins_udp_close()` 释放句柄。
+1. 简单轮询：枚举 `connection_id`，调用 `netins_udp_observer_get_snapshot_by_id()`。
+2. 长期观察：调用 `netins_udp_observer_open()` 持有句柄，再反复调用
+   `netins_udp_observer_get_snapshot()`，最后使用 `netins_udp_observer_close()` 释放句柄。
 
 推荐每 500 ms 或 1 s 查询一次。更高频率不会得到更细的传输采样，而且会增加无效
 调用。
@@ -130,7 +130,7 @@ int netins_udp_client_get_snapshot(
 ```
 
 客户端建立的连接会自动注册到现有进程内状态注册表，因此既可以直接从客户端对象
-取得快照，也可以使用 `netins_udp_list_connections()` 查询。
+取得快照，也可以使用 `netins_udp_observer_list_connections()` 查询。
 
 #### 独立客户端错误和关闭接口
 
@@ -328,12 +328,12 @@ if (netins_udp_get_api_version() != NETINS_UDP_API_VERSION) {
 
 ### 2. 连接枚举和句柄管理
 
-#### `netins_udp_list_connections()`
+#### `netins_udp_observer_list_connections()`
 
 枚举当前进程内仍然存活并已注册的 XQUIC 连接。
 
 ```c
-int netins_udp_list_connections(uint64_t *connection_ids,
+int netins_udp_observer_list_connections(uint64_t *connection_ids,
     size_t capacity, size_t *connection_count);
 ```
 
@@ -354,7 +354,7 @@ int netins_udp_list_connections(uint64_t *connection_ids,
 
 ```c
 size_t count = 0;
-int ret = netins_udp_list_connections(NULL, 0, &count);
+int ret = netins_udp_observer_list_connections(NULL, 0, &count);
 if (ret != NETINS_UDP_OK || count == 0) {
     return;
 }
@@ -365,7 +365,7 @@ if (ids == NULL) {
 }
 
 size_t actual = 0;
-ret = netins_udp_list_connections(ids, count, &actual);
+ret = netins_udp_observer_list_connections(ids, count, &actual);
 if (ret == NETINS_UDP_BUFFER_TOO_SMALL) {
     /* 两次调用之间可能建立了新连接，应扩大数组后重试。 */
 }
@@ -374,17 +374,17 @@ if (ret == NETINS_UDP_BUFFER_TOO_SMALL) {
 `connection_id` 只是当前进程注册表中的编号，不是 QUIC Connection ID，也不能在
 进程重启后继续使用。
 
-#### `netins_udp_open()`
+#### `netins_udp_observer_open()`
 
 根据 `connection_id` 打开一个活动连接的状态句柄。
 
 ```c
-netins_udp_t *netins_udp_open(uint64_t connection_id);
+netins_udp_observer_t *netins_udp_observer_open(uint64_t connection_id);
 ```
 
 **参数：**
 
-- `connection_id`：由 `netins_udp_list_connections()` 或快照中的
+- `connection_id`：由 `netins_udp_observer_list_connections()` 或快照中的
   `info.connection_id` 获得。
 
 **返回值：**
@@ -394,21 +394,21 @@ netins_udp_t *netins_udp_open(uint64_t connection_id);
 
 **说明：**
 
-- 返回的句柄必须使用 `netins_udp_close()` 释放。
+- 返回的句柄必须使用 `netins_udp_observer_close()` 释放。
 - 若在真实连接关闭前已经成功打开句柄，连接关闭后仍可读取最终的 `CLOSED` 或
   `ERROR` 快照。
 
-#### `netins_udp_close()`
+#### `netins_udp_observer_close()`
 
 释放调用方持有的状态句柄。
 
 ```c
-void netins_udp_close(netins_udp_t *netins);
+void netins_udp_observer_close(netins_udp_observer_t *netins);
 ```
 
 **参数：**
 
-- `netins`：`netins_udp_open()` 或 `netins_udp_new()` 返回的句柄；可以为 `NULL`。
+- `netins`：`netins_udp_observer_open()` 或 `netins_udp_observer_new()` 返回的句柄；可以为 `NULL`。
 
 **重要说明：**
 
@@ -416,29 +416,29 @@ void netins_udp_close(netins_udp_t *netins);
 - 释放后不得继续使用该指针。
 - 同一个句柄引用只能释放一次。
 
-#### `netins_udp_new()`
+#### `netins_udp_observer_new()`
 
-创建一个尚未绑定 XQUIC 连接的内部适配器。
+创建一个尚未绑定 XQUIC 连接的内部状态观察器。
 
 ```c
-netins_udp_t *netins_udp_new(void);
+netins_udp_observer_t *netins_udp_observer_new(void);
 ```
 
 该函数主要供 `mini_client` 和 `mini_server` 的宿主集成代码使用。普通第三方查询
-现有连接时不需要调用它，应使用 `netins_udp_list_connections()` 和
-`netins_udp_open()`。
+现有连接时不需要调用它，应使用 `netins_udp_observer_list_connections()` 和
+`netins_udp_observer_open()`。
 
 ---
 
 ### 3. 快照和状态查询
 
-#### `netins_udp_get_snapshot_by_id()`
+#### `netins_udp_observer_get_snapshot_by_id()`
 
 根据 `connection_id` 一次取得完整连接快照，无需长期持有句柄。这是第三方轮询时
 最推荐的接口。
 
 ```c
-int netins_udp_get_snapshot_by_id(uint64_t connection_id,
+int netins_udp_observer_get_snapshot_by_id(uint64_t connection_id,
     netins_udp_snapshot_t *out);
 ```
 
@@ -451,7 +451,7 @@ int netins_udp_get_snapshot_by_id(uint64_t connection_id,
 
 ```c
 netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
-int ret = netins_udp_get_snapshot_by_id(connection_id, &snapshot);
+int ret = netins_udp_observer_get_snapshot_by_id(connection_id, &snapshot);
 if (ret == NETINS_UDP_OK) {
     printf("connection=%llu state=%s paths=%u\n",
         (unsigned long long)snapshot.info.connection_id,
@@ -460,12 +460,12 @@ if (ret == NETINS_UDP_OK) {
 }
 ```
 
-#### `netins_udp_get_snapshot()`
+#### `netins_udp_observer_get_snapshot()`
 
 使用已打开的句柄复制一份完整、线程安全的缓存快照。
 
 ```c
-int netins_udp_get_snapshot(netins_udp_t *netins,
+int netins_udp_observer_get_snapshot(netins_udp_observer_t *netins,
     netins_udp_snapshot_t *out);
 ```
 
@@ -478,12 +478,12 @@ int netins_udp_get_snapshot(netins_udp_t *netins,
 
 - 返回 `netins_udp_result_t` 中的状态码。
 
-#### `netins_udp_get_info()`
+#### `netins_udp_observer_get_info()`
 
 只获取连接身份、生命周期和多路径状态。
 
 ```c
-int netins_udp_get_info(netins_udp_t *netins,
+int netins_udp_observer_get_info(netins_udp_observer_t *netins,
     netins_udp_info_t *out);
 ```
 
@@ -493,12 +493,12 @@ int netins_udp_get_info(netins_udp_t *netins,
 netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
 ```
 
-#### `netins_udp_get_statis()`
+#### `netins_udp_observer_get_statis()`
 
 只获取所有路径汇总后的累计统计和区间速率。
 
 ```c
-int netins_udp_get_statis(netins_udp_t *netins,
+int netins_udp_observer_get_statis(netins_udp_observer_t *netins,
     netins_udp_statis_t *out);
 ```
 
@@ -510,12 +510,12 @@ netins_udp_statis_t statis = NETINS_UDP_STATIS_INITIALIZER;
 
 `statis` 是当前稳定 API 名称的一部分，第三方代码应保持该拼写。
 
-#### `netins_udp_get_path_statis()`
+#### `netins_udp_observer_get_path_statis()`
 
 根据快照数组下标获取一条路径的状态和统计。
 
 ```c
-int netins_udp_get_path_statis(netins_udp_t *netins,
+int netins_udp_observer_get_path_statis(netins_udp_observer_t *netins,
     size_t path_index, netins_udp_path_statis_t *out);
 ```
 
@@ -534,12 +534,12 @@ int netins_udp_get_path_statis(netins_udp_t *netins,
 
 ### 4. 日志回调
 
-#### `netins_udp_set_logger()`
+#### `netins_udp_observer_set_logger()`
 
 设置或取消当前状态句柄的日志回调。
 
 ```c
-int netins_udp_set_logger(netins_udp_t *netins,
+int netins_udp_observer_set_logger(netins_udp_observer_t *netins,
     netins_udp_logger_cb logger, void *user_data);
 ```
 
@@ -567,7 +567,7 @@ static void udp_logger(int level, const char *message, void *user_data)
         level, message);
 }
 
-netins_udp_set_logger(handle, udp_logger, stderr);
+netins_udp_observer_set_logger(handle, udp_logger, stderr);
 ```
 
 日志回调可能在 XQUIC/Libevent 引擎线程执行，因此回调中不能长时间阻塞，也不应
@@ -577,22 +577,22 @@ netins_udp_set_logger(handle, udp_logger, stderr);
 
 ### 5. 错误处理
 
-#### `netins_udp_get_last_error_code()`
+#### `netins_udp_observer_get_last_error_code()`
 
 获取当前句柄最后一次 API 错误码。
 
 ```c
-int netins_udp_get_last_error_code(netins_udp_t *netins);
+int netins_udp_observer_get_last_error_code(netins_udp_observer_t *netins);
 ```
 
 返回 0 表示没有 API 错误，其余通常为 `errno` 风格错误码。
 
-#### `netins_udp_get_last_error_msg()`
+#### `netins_udp_observer_get_last_error_msg()`
 
 将最后一次 API 错误说明复制到调用方缓冲区。
 
 ```c
-int netins_udp_get_last_error_msg(netins_udp_t *netins,
+int netins_udp_observer_get_last_error_msg(netins_udp_observer_t *netins,
     char *buffer, size_t buffer_len);
 ```
 
@@ -600,7 +600,7 @@ int netins_udp_get_last_error_msg(netins_udp_t *netins,
 
 ```c
 char error_msg[NETINS_UDP_ERROR_MSG_LEN];
-if (netins_udp_get_last_error_msg(handle,
+if (netins_udp_observer_get_last_error_msg(handle,
         error_msg, sizeof(error_msg)) == NETINS_UDP_OK)
 {
     fprintf(stderr, "netins_udp error: %s\n", error_msg);
@@ -819,7 +819,7 @@ void third_party_poll_udp_client(void)
     size_t i;
     int ret;
 
-    ret = netins_udp_list_connections(NULL, 0, &count);
+    ret = netins_udp_observer_list_connections(NULL, 0, &count);
     if (ret != NETINS_UDP_OK || count == 0) {
         return;
     }
@@ -829,7 +829,7 @@ void third_party_poll_udp_client(void)
         return;
     }
 
-    ret = netins_udp_list_connections(ids, count, &actual);
+    ret = netins_udp_observer_list_connections(ids, count, &actual);
     if (ret != NETINS_UDP_OK) {
         free(ids);
         return;
@@ -838,7 +838,7 @@ void third_party_poll_udp_client(void)
     for (i = 0; i < actual; ++i) {
         netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 
-        ret = netins_udp_get_snapshot_by_id(ids[i], &snapshot);
+        ret = netins_udp_observer_get_snapshot_by_id(ids[i], &snapshot);
         if (ret != NETINS_UDP_OK
             || snapshot.info.role != NETINS_UDP_ROLE_CLIENT)
         {
@@ -876,7 +876,7 @@ void third_party_poll_udp_server(void)
     size_t i;
     int ret;
 
-    ret = netins_udp_list_connections(NULL, 0, &count);
+    ret = netins_udp_observer_list_connections(NULL, 0, &count);
     if (ret != NETINS_UDP_OK || count == 0) {
         return;
     }
@@ -886,7 +886,7 @@ void third_party_poll_udp_server(void)
         return;
     }
 
-    ret = netins_udp_list_connections(ids, count, &actual);
+    ret = netins_udp_observer_list_connections(ids, count, &actual);
     if (ret != NETINS_UDP_OK) {
         free(ids);
         return;
@@ -897,7 +897,7 @@ void third_party_poll_udp_server(void)
         uint64_t delivered_total = 0;
         size_t path_index;
 
-        ret = netins_udp_get_snapshot_by_id(ids[i], &snapshot);
+        ret = netins_udp_observer_get_snapshot_by_id(ids[i], &snapshot);
         if (ret != NETINS_UDP_OK
             || snapshot.info.role != NETINS_UDP_ROLE_SERVER)
         {
@@ -959,11 +959,11 @@ void third_party_poll_udp_server(void)
 ### 1. 所需文件
 
 - 公共头文件：`include/xquic/netins_udp.h`
-- API 实现：`src/netins_udp/netins_udp.c`
+- observer 实现：`src/netins_udp/netins_udp_observer.c`
 - 独立客户端建连与 HTTP/3 收发实现：`src/netins_udp/netins_udp_client.c`
 - 查询示例：`api/examples/netins_udp_snapshot_example.c`
 - 独立建连示例：`api/examples/netins_udp_connect_example.c`
-- 内部接口：`src/netins_udp/netins_udp_internal.h`
+- observer 内部接口：`src/netins_udp/netins_udp_observer_internal.h`
 - 单元测试：`tests/netins_udp/test_netins_udp.c`
 - 真实连接日志检查：`tests/netins_udp/verify_real_connection.py`
 
@@ -997,7 +997,7 @@ target_include_directories(your_host_component PRIVATE
 )
 ```
 
-不要让插件再静态链接一份独立 `netins_udp.c` 或 `libxquic-static.a`，否则插件会得到
+不要让插件再静态链接一份独立 `netins_udp_observer.c` 或 `libxquic-static.a`，否则插件会得到
 另一份空注册表，无法看到宿主的真实连接。
 
 ### 3. 安装
@@ -1035,7 +1035,7 @@ ctest --output-on-failure -R netins_udp_unit_test
 确认以下行为：
 
 1. `netins_udp_get_api_version()` 返回 `1`。
-2. 没有连接时，`netins_udp_list_connections()` 返回数量 0。
+2. 没有连接时，`netins_udp_observer_list_connections()` 返回数量 0。
 3. 建立真实 QUIC 连接后，能够枚举到非无效 `connection_id`。
 4. 握手完成后，`connection_state=CONNECTED` 且 `handshake_finished=1`。
 5. 双路径运行时，`path_count >= 2`，并能看到两条路径的地址和计数器变化。
@@ -1095,7 +1095,7 @@ NetIns UDP 注册表只存在于创建连接的当前进程中。独立 API 客�
 - 控制 mini_client/mini_server 已有连接
 - 手工冻结或切换某一条路径
 
-`netins_udp_close()` 只释放查询句柄，不关闭传输连接。
+`netins_udp_observer_close()` 只释放查询句柄，不关闭传输连接。
 `netins_udp_client_close()` 则会关闭由该客户端对象创建的真实连接。
 
 ### 3. 线程安全
@@ -1113,11 +1113,11 @@ mini 宿主和独立客户端当前都约每 500 ms 刷新一次状态。建议�
 
 ### 5. 资源管理
 
-- `netins_udp_open()` 成功后必须调用 `netins_udp_close()`。
+- `netins_udp_observer_open()` 成功后必须调用 `netins_udp_observer_close()`。
 - `netins_udp_client_create()` 成功后必须调用 `netins_udp_client_close()`。
 - 不要重复关闭同一个句柄。
 - 关闭后不要继续使用原指针。
-- `netins_udp_get_snapshot_by_id()` 不要求调用方持有句柄，更适合简单轮询。
+- `netins_udp_observer_get_snapshot_by_id()` 不要求调用方持有句柄，更适合简单轮询。
 
 ### 6. 结构体兼容性
 
@@ -1142,7 +1142,7 @@ mini 宿主和独立客户端当前都约每 500 ms 刷新一次状态。建议�
 
 ### 9. 故障隔离
 
-mini 程序中的状态适配器分配、绑定或刷新定时器失败时，只会禁用状态查询，不会
+mini 程序中的状态观察器分配、绑定或刷新定时器失败时，只会禁用状态查询，不会
 主动终止 mini 的 QUIC 数据传输。独立客户端的 socket、engine 或状态绑定失败时，
 `netins_udp_client_connect()` 会返回错误，因为这些资源属于该客户端自己的连接。
 

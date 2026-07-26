@@ -13,7 +13,7 @@ void
 third_party_poll_udp_connections(void)
 {
     size_t count = 0;
-    if (netins_udp_list_connections(NULL, 0, &count) != NETINS_UDP_OK
+    if (netins_udp_observer_list_connections(NULL, 0, &count) != NETINS_UDP_OK
         || count == 0)
     {
         return;
@@ -25,7 +25,7 @@ third_party_poll_udp_connections(void)
     }
 
     size_t listed = count;
-    int result = netins_udp_list_connections(ids, count, &listed);
+    int result = netins_udp_observer_list_connections(ids, count, &listed);
     if (result != NETINS_UDP_OK) {
         free(ids);
         return;
@@ -33,7 +33,7 @@ third_party_poll_udp_connections(void)
 
     for (size_t i = 0; i < listed; ++i) {
         netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
-        if (netins_udp_get_snapshot_by_id(ids[i], &snapshot)
+        if (netins_udp_observer_get_snapshot_by_id(ids[i], &snapshot)
             != NETINS_UDP_OK)
         {
             continue;
