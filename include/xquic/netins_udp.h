@@ -359,7 +359,10 @@ typedef struct netins_udp_statis_s {
     uint64_t bytes_retransmitted;
     /** 收到的携带 STREAM/DATAGRAM 的已编码包字节，可能包含重复数据。 */
     uint64_t bytes_recv;
-    /** 接收端真正接受的非重复 STREAM 载荷字节，不等于精确文件正文。 */
+    /**
+     * xqc_stream_recv() 向上层移动的、按 stream offset 去重后的 STREAM
+     * payload；不等于精确文件正文。
+     */
     uint64_t bytes_recv_effective;
     /** bytes_sent 中属于多路径重注入副本的字节子集。 */
     uint64_t bytes_sent_reinject;
@@ -442,7 +445,7 @@ typedef struct netins_udp_path_statis_s {
     uint64_t bytes_recv;
     /** 本路径接收字节中属于重注入副本包的子集。 */
     uint64_t bytes_recv_reinject;
-    /** 本路径真正接受的非重复 STREAM 载荷字节。 */
+    /** 本路径向上层移动的、按 stream offset 去重后的 STREAM payload。 */
     uint64_t bytes_recv_effective;
     /** 本路径有效接收字节中由重注入副本成功交付的子集。 */
     uint64_t bytes_recv_effective_reinject;

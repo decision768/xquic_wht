@@ -1370,6 +1370,27 @@ xqc_destroy_crypto_stream(xqc_connection_t *conn, xqc_stream_t *stream)
     /* TODO: pfree is needed */
 }
 
+static void
+xqc_stream_record_unique_payload_recv(xqc_stream_t *stream,
+    const xqc_stream_frame_t *stream_frame, size_t bytes)
+{
+    if (bytes == 0) {
+        return;
+    }
+
+    xqc_path_ctx_t *recv_path = xqc_conn_find_path_by_path_id(
+        stream->stream_conn, stream_frame->recv_path_id);
+    if (recv_path == NULL || recv_path->path_send_ctl == NULL) {
+        return;
+    }
+
+    recv_path->path_send_ctl->ctl_app_payload_bytes_recv_unique += bytes;
+    if (stream_frame->recv_reinjected) {
+        recv_path->path_send_ctl
+            ->ctl_app_payload_bytes_recv_unique_reinject += bytes;
+    }
+}
+
 ssize_t 
 xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_size, uint8_t *fin)
 {
@@ -1426,15 +1447,20 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_s
             stream->stream_data_in.next_read_offset += frame_left;
             stream_frame->next_read_offset = stream_frame->data_length;
             read += frame_left;
+            xqc_stream_record_unique_payload_recv(stream, stream_frame,
+                frame_left);
             /* free frame */
             xqc_list_del_init(&stream_frame->sf_list);
             xqc_free(stream_frame->data);
             xqc_free(stream_frame);
 
         } else {
-            memcpy(recv_buf + read, stream_frame->data + stream_frame->next_read_offset, recv_buf_size - read);
-            stream_frame->next_read_offset += recv_buf_size - read;
-            stream->stream_data_in.next_read_offset += recv_buf_size - read;
+            size_t copy_size = recv_buf_size - read;
+            memcpy(recv_buf + read, stream_frame->data + stream_frame->next_read_offset, copy_size);
+            stream_frame->next_read_offset += copy_size;
+            stream->stream_data_in.next_read_offset += copy_size;
+            xqc_stream_record_unique_payload_recv(stream, stream_frame,
+                copy_size);
             read = recv_buf_size;
             break;
         }

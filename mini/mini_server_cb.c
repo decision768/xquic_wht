@@ -6,6 +6,7 @@
  */
 
 #include "mini_server_cb.h"
+#include "netins_udp_backend.h"
 #include "netins_udp_observer_internal.h"
 #include <errno.h>
 #include <string.h>
@@ -1284,7 +1285,8 @@ xqc_mini_svr_path_created_notify(xqc_connection_t *conn, const xqc_cid_t *scid,
     (void)scid;
     xqc_mini_svr_user_conn_t *user_conn = (xqc_mini_svr_user_conn_t *)conn_user_data;
     if (user_conn != NULL && user_conn->netins_udp_observer != NULL) {
-        (void)netins_udp_observer_refresh(user_conn->netins_udp_observer);
+        (void)netins_udp_backend_connection_refresh(
+            user_conn->netins_udp_observer);
         xqc_mini_svr_netins_udp_observer_update_path(user_conn->netins_udp_observer, conn,
             path_id);
     }
@@ -1300,7 +1302,8 @@ xqc_mini_svr_path_removed_notify(const xqc_cid_t *scid, uint64_t path_id,
     (void)scid;
     xqc_mini_svr_user_conn_t *user_conn = (xqc_mini_svr_user_conn_t *)conn_user_data;
     if (user_conn != NULL && user_conn->netins_udp_observer != NULL) {
-        (void)netins_udp_observer_refresh(user_conn->netins_udp_observer);
+        (void)netins_udp_backend_connection_refresh(
+            user_conn->netins_udp_observer);
     }
     printf("[diag_server_path_event] removed path_id=%" PRIu64 "\n", path_id);
     xqc_mini_svr_log_mp_active_state_force(user_conn, "path_removed");
@@ -1348,7 +1351,8 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     if (user_conn->netins_udp_observer == NULL) {
         printf("[netins_udp][server] disabled: observer allocation failed\n");
 
-    } else if (netins_udp_observer_bind(user_conn->netins_udp_observer,
+    } else if (netins_udp_backend_connection_bind(
+        user_conn->netins_udp_observer,
         user_conn->ctx->engine, cid, NETINS_UDP_ROLE_SERVER)
         != NETINS_UDP_OK)
     {
@@ -1357,7 +1361,8 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
         user_conn->netins_udp_observer = NULL;
 
     } else {
-        (void)netins_udp_observer_set_path_metadata(user_conn->netins_udp_observer, 0, NULL,
+        (void)netins_udp_backend_set_path_metadata(
+            user_conn->netins_udp_observer, 0, NULL,
             (const struct sockaddr *)user_conn->local_addr,
             user_conn->local_addrlen,
             (const struct sockaddr *)user_conn->peer_addr,
@@ -1376,9 +1381,11 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
                 event_free(user_conn->ev_netins_udp_observer_refresh);
                 user_conn->ev_netins_udp_observer_refresh = NULL;
             }
-            (void)netins_udp_observer_mark_error(user_conn->netins_udp_observer, EIO,
+            (void)netins_udp_backend_connection_error(
+                user_conn->netins_udp_observer, EIO,
                 "failed to start server netins UDP refresh timer");
-            (void)netins_udp_observer_mark_closed(user_conn->netins_udp_observer, EIO);
+            (void)netins_udp_backend_connection_closed(
+                user_conn->netins_udp_observer, EIO);
             netins_udp_observer_close(user_conn->netins_udp_observer);
             user_conn->netins_udp_observer = NULL;
         }
@@ -1430,7 +1437,8 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
         }
         if (user_conn->netins_udp_observer != NULL) {
             xqc_mini_svr_netins_udp_observer_refresh(user_conn);
-            (void)netins_udp_observer_mark_closed(user_conn->netins_udp_observer,
+            (void)netins_udp_backend_connection_closed(
+                user_conn->netins_udp_observer,
                 xqc_h3_conn_get_errno(h3_conn));
             netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
             if (netins_udp_observer_get_snapshot(user_conn->netins_udp_observer, &snapshot)
@@ -1470,7 +1478,8 @@ xqc_mini_svr_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_
     (void)h3_conn;
     printf("[diag_server_conn] handshake_finished\n");
     if (user_conn != NULL && user_conn->netins_udp_observer != NULL) {
-        (void)netins_udp_observer_mark_handshake_finished(user_conn->netins_udp_observer);
+        (void)netins_udp_backend_connection_handshake_finished(
+            user_conn->netins_udp_observer);
         netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
         if (netins_udp_observer_get_snapshot(user_conn->netins_udp_observer, &snapshot)
             == NETINS_UDP_OK)
@@ -2099,34 +2108,7 @@ static void
 xqc_mini_svr_netins_udp_observer_update_path(netins_udp_observer_t *observer,
     xqc_connection_t *conn, uint64_t path_id)
 {
-    if (observer == NULL || conn == NULL) {
-        return;
-    }
-
-    struct sockaddr_storage local_addr;
-    struct sockaddr_storage peer_addr;
-    socklen_t local_addr_len = 0;
-    socklen_t peer_addr_len = 0;
-    memset(&local_addr, 0, sizeof(local_addr));
-    memset(&peer_addr, 0, sizeof(peer_addr));
-
-    const struct sockaddr *local = NULL;
-    const struct sockaddr *peer = NULL;
-    if (xqc_path_get_local_addr(conn, path_id,
-        (struct sockaddr *)&local_addr, sizeof(local_addr),
-        &local_addr_len) == XQC_OK)
-    {
-        local = (const struct sockaddr *)&local_addr;
-    }
-    if (xqc_path_get_peer_addr(conn, path_id,
-        (struct sockaddr *)&peer_addr, sizeof(peer_addr),
-        &peer_addr_len) == XQC_OK)
-    {
-        peer = (const struct sockaddr *)&peer_addr;
-    }
-
-    (void)netins_udp_observer_set_path_metadata(observer, path_id, NULL,
-        local, local_addr_len, peer, peer_addr_len);
+    (void)netins_udp_backend_sync_xquic_path(observer, conn, path_id, NULL);
 }
 
 static void
@@ -2138,7 +2120,9 @@ xqc_mini_svr_netins_udp_observer_refresh(xqc_mini_svr_user_conn_t *user_conn)
         return;
     }
 
-    if (netins_udp_observer_refresh(user_conn->netins_udp_observer) != NETINS_UDP_OK) {
+    if (netins_udp_backend_connection_refresh(
+            user_conn->netins_udp_observer) != NETINS_UDP_OK)
+    {
         return;
     }
 

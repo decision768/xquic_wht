@@ -974,6 +974,19 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_
     if (packet_out->po_frame_types & (XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_DATAGRAM)) {
         send_ctl->ctl_app_bytes_send += packet_out->po_enc_size;
     }
+    if (packet_out->po_origin == NULL
+        && !(packet_out->po_flag & XQC_POF_APP_PAYLOAD_COUNTED))
+    {
+        for (unsigned int i = 0; i < packet_out->po_stream_frames_idx; ++i) {
+            const xqc_po_stream_frame_t *stream_frame =
+                &packet_out->po_stream_frames[i];
+            if (stream_frame->ps_is_used && !stream_frame->ps_is_reset) {
+                send_ctl->ctl_app_payload_bytes_send_unique +=
+                    stream_frame->ps_length;
+            }
+        }
+        packet_out->po_flag |= XQC_POF_APP_PAYLOAD_COUNTED;
+    }
 
     if (packet_out->po_largest_ack > 0) {
         xqc_ack_sent_record_add(&pn_ctl->ack_sent_record[pns], packet_out, send_ctl->ctl_srtt, now);

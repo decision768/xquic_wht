@@ -8,6 +8,10 @@
 当前正式构建仍使用 V1 头文件 `include/xquic/netins_udp.h`。V2 草案暂不参与
 编译、安装或符号导出，避免在观察器重命名和 V2 实现完成之前破坏当前分支。
 
+阶段 3.5 已恢复 XQUIC 原公共 ABI，并把扩展统计、连接生命周期、路径元数据和
+RX 公平预算隔离到 NetIns 内部 backend。本文以下规则是正式 V2 对象实现必须
+遵守的冻结契约。
+
 V2 是一次明确的 ABI 断代，不保证与尚未发布的 V1 API 二进制兼容。阶段三完成
 后，草案头文件才会替换正式公共头文件，并同步更新动态库导出符号和 SONAME。
 
@@ -157,8 +161,15 @@ netins_udp_get_path_count(conn, &count);
 - `multipath_requested` 表示创建意图。
 - `multipath_mode` 表示 XQUIC 协商结果。
 - `multipath_active` 只有在当前至少两条路径可用于传输时为 1。
-- `path_count` 是快照中可查询的路径数量。
+- `path_count` 是本连接生命周期内已分配且可查询的稳定路径槽数量，只增不减。
 - `active_path_count` 是当前 ACTIVE 路径数量。
+- `path_index` 在某个 `path_id` 第一次被观察到时分配，在连接关闭前不改变、
+  不复用；路径移除后仍保留该槽，并报告 `CLOSED` 或 `FAILED`。
+- XQUIC `path_id` 与 `path_index` 没有数值对应关系，调用方不得互换使用。
+- 一个连接生命周期内出现超过 `NETINS_UDP_MAX_PATHS` 条不同路径时，已有槽位
+  继续有效，新路径不进入公共路径表，`path_table_truncated` 置 1。
+- `netins_udp_get_path_count()`、`info.path_count` 和 `snapshot.path_count`
+  返回同一个稳定路径槽数量。
 
 ## 6. 应用协议与数据语义
 
@@ -312,27 +323,34 @@ netins_udp_cleanup();
 
 ## 8. 选项
 
-| 选项 | 值类型 | 可设置阶段 |
-|---|---|---|
-| `NONBLOCK` | `int` | 任意非 CLOSED 状态 |
-| `CONNECT_TIMEOUT_MS` | `uint32_t` | NEW |
-| `ACCEPT_TIMEOUT_MS` | `uint32_t` | NEW/LISTENING |
-| `SEND_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 |
-| `RECV_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 |
-| `CLOSE_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 |
-| `IDLE_TIMEOUT_MS` | `uint32_t` | NEW |
-| `KERNEL_SNDBUF` | `int` | NEW |
-| `KERNEL_RCVBUF` | `int` | NEW |
-| `INTERFACES` | `netins_udp_interfaces_t` | NEW |
-| `APP_PROTOCOL` | `int` | NEW |
-| `TLS` | `netins_udp_tls_config_t` | NEW |
-| `INITIAL_CWND_PACKETS` | `uint32_t` | NEW |
-| `SCHEDULER` | `int` | NEW |
-| `CONGESTION_CONTROL` | `int` | NEW |
-| `SOCKOPT` | `netins_udp_sockopt_t` | NEW 或底层支持的运行期 |
+| 选项 | 值类型 | 可设置阶段 | 可读取 |
+|---|---|---|---|
+| `NONBLOCK` | `int` | 任意非 CLOSED 状态 | 是 |
+| `CONNECT_TIMEOUT_MS` | `uint32_t` | NEW | 是 |
+| `ACCEPT_TIMEOUT_MS` | `uint32_t` | NEW/LISTENING | 是 |
+| `SEND_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 | 是 |
+| `RECV_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 | 是 |
+| `CLOSE_TIMEOUT_MS` | `uint32_t` | 任意非 CLOSED 状态 | 是 |
+| `IDLE_TIMEOUT_MS` | `uint32_t` | NEW | 是 |
+| `KERNEL_SNDBUF` | `int` | NEW | 是 |
+| `KERNEL_RCVBUF` | `int` | NEW | 是 |
+| `INTERFACES` | `netins_udp_interfaces_t` | NEW | 是 |
+| `APP_PROTOCOL` | `int` | NEW | 是 |
+| `TLS` | `netins_udp_tls_config_t` | NEW | 是 |
+| `INITIAL_CWND_PACKETS` | `uint32_t` | NEW | 是 |
+| `SCHEDULER` | `int` | NEW | 是 |
+| `CONGESTION_CONTROL` | `int` | NEW | 是 |
+| `SOCKOPT` | `netins_udp_sockopt_t` | NEW 或底层支持的运行期 | 否 |
 
 不可变选项在 connect/listen 开始后返回 `EBUSY`。编译时未启用的拥塞控制器或
 调度器返回 `ENOTSUP`，不静默替换为其他算法。
+
+`set_opt()` 对标量要求 `value_len` 与表中类型大小完全相同；对版本化结构要求
+`struct_size/api_version` 有效，API 在返回前复制所需数据，不保留调用方指针。
+`get_opt()` 的 `value_len` 是输入/输出参数：调用方可用 `value=NULL` 查询所需
+大小；缓冲区不足时返回 `ENOBUFS`，同时写回所需大小。`SOCKOPT` 是仅设置选项，
+读取返回 `EOPNOTSUPP`。`netins_udp_sockopt_t.interface_index` 指配置的网卡槽，
+与运行时统计的 `path_index` 无关；`-1` 表示当前和未来所有路径 socket。
 
 接口列表为空时使用系统默认路由。MPQUIC 配置少于两块网卡时允许建立连接，但
 最终 `multipath_active` 通常为 0。
@@ -378,7 +396,15 @@ V2 公共结构内部使用固定宽度整数、固定大小字符数组和预�
 
 统计字段定义：
 
-- `bytes_sent/received` 是去重后的应用数据字节，不包含 QUIC/H3 framing。
+- 连接/路径 `bytes_sent/received` 是去重后的 QUIC STREAM payload：不包含
+  QUIC 包头或 STREAM frame 头，不重复计算重传/重注入副本；HTTP/3 模式下包含
+  H3/QPACK/control stream payload。
+- 发送侧唯一字节在原始 STREAM payload 第一次实际发出时计数，并归属该次发送
+  使用的路径；重传和重注入不再次增加。
+- 接收侧唯一字节只在此前未交付的 stream offset 被 `xqc_stream_recv()` 向上层
+  移动时计数，并归属实际提供这些字节的接收路径；完全或部分重叠均不重复增加。
+- RAW child stream 和 H3 request info 中的 `bytes_sent/received` 是各公共对象
+  接受/交付的正文数据；H3 request 的计数不包含 H3/QPACK framing 与头部。
 - `bytes_wire_sent/received` 是包含控制包、重传和重注入的 UDP payload 字节。
 - `bytes_acked` 是被 ACK 确认的已发送 wire 字节。
 - `bytes_inflight` 是快照时尚未确认的 wire 字节。
@@ -399,6 +425,12 @@ V2 公共结构内部使用固定宽度整数、固定大小字符数组和预�
 - 纯 getter 和 error getter 不清除 last error。
 - last error 是句柄级兼容信息，不是线程局部存储；并发调用时应优先使用失败
   调用所在工作线程的 `errno`。
+- stream/request 操作失败时更新对应子句柄的 last error，不覆盖父连接的
+  last error；异步连接级故障会同时使子句柄进入终止状态。
+- stream/request 分别提供自己的 `get_last_error_code/msg()`；info 内的
+  `last_error_code` 是同一值的原子快照。
+- error message 只用于诊断，不承诺文本稳定，程序逻辑只能依赖 errno 风格
+  数值、状态枚举和 close reason 字段。
 
 连接关闭原因与 API 调用错误分离：
 
@@ -423,11 +455,22 @@ int netins_udp_get_fd(netins_udp_t *netins);
 
 - 可用于 epoll/select/poll。
 - 调用方不得直接 read/write/close。
-- fd 可读后调用 `netins_udp_get_events()` 获取并确认事件。
-- 每个 listener/connection 都有独立通知 fd。
+- fd 可读后调用对应的 `get_events()` 获取并确认事件。
+- 每个 listener/connection、额外 raw stream 和 H3 request 都有独立通知 fd。
 - 关闭句柄后 fd 失效。
-- `READABLE/WRITABLE` 表示默认 stream 或当前 HTTP/3 对象可能推进；
-  `STREAM_ACCEPTABLE` 和 `H3_REQUEST_ACCEPTABLE` 分别表示对应接受队列非空。
+- 通知采用“边沿事件锁存 + 就绪条件电平”的组合语义。`CONNECTED`、
+  `PATH_CHANGED`、`CLOSED`、`ERROR` 锁存到下一次 `get_events()`；
+  `ACCEPTABLE`、`READABLE`、`WRITABLE`、`STREAM_ACCEPTABLE` 和
+  `H3_REQUEST_ACCEPTABLE` 只要对应条件仍成立就继续报告。
+- `get_events()` 原子清除通知计数、返回锁存事件和当前电平条件；若条件在返回
+  时仍成立，库必须先重新置为可读，避免 ET epoll 丢失唤醒。
+- connection 的 `READABLE/WRITABLE` 只表示 RAW_STREAM 默认 stream；
+  HTTP/3 connection 不报告这两个事件。
+- `STREAM_ACCEPTABLE` 和 `H3_REQUEST_ACCEPTABLE` 分别表示连接的对应接受队列
+  非空。已取得的额外 stream/request 使用子句柄自己的 fd，其适用事件仅为
+  `READABLE`、`WRITABLE`、`CLOSED` 和 `ERROR`。
+- 父连接关闭后尚未由调用方 close 的子句柄保持可查询，并收到
+  `CLOSED`，异常中止时同时收到 `ERROR`；其 fd 到子句柄 close 后才失效。
 
 该设计避免第三方读取 UDP 包并与 API engine 发生双接收。
 
@@ -467,15 +510,12 @@ V2 目标是公共 API 线程安全：
 V1 观察器注册表可保留为内部诊断能力，阶段三使用
 `netins_udp_observer_*` 命名，不能继续占用统一连接 API 名称。
 
-## 14. 阶段二不实现的内容
+## 14. 阶段 3.5 边界
 
-本阶段不做以下工作：
+阶段 3.5 完成公共 ABI 恢复、NetIns 内部扩展统计、应用字节去重语义、稳定路径
+槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
+也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-- 不替换正式 `include/xquic/netins_udp.h`。
-- 不修改当前 mini_client/mini_server 调用。
-- 不实现 server engine、accept 队列或默认 stream。
-- 不改变拥塞控制、调度器和 RX 线程行为。
-- 不新增正式导出符号。
-
-阶段三首先完成观察器重命名和内部模块拆分，并保证现有 V1 功能仍可编译；之后
-才将统一连接对象逐步接入正式实现。
+正式 `include/xquic/netins_udp.h`、server engine、accept 队列、默认 RAW stream、
+子对象通知 fd 和上述 V2 导出符号将在下一阶段按本契约实现；完成实现和 ABI
+检查前，`api/draft/netins_udp_v2.h` 仍不参与安装或正式编译。

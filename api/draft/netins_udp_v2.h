@@ -155,7 +155,12 @@ typedef enum netins_udp_msg_flag_e {
     NETINS_UDP_MSG_FIN = 1U << 2   /* send only */
 } netins_udp_msg_flag_t;
 
-/* Events reported by the notification descriptor returned by get_fd(). */
+/*
+ * Events reported by connection and child notification descriptors.
+ * CONNECTED/PATH_CHANGED/CLOSED/ERROR are latched transition events.
+ * ACCEPTABLE/READABLE/WRITABLE, STREAM_ACCEPTABLE and
+ * H3_REQUEST_ACCEPTABLE are level conditions.
+ */
 typedef enum netins_udp_event_e {
     NETINS_UDP_EVENT_NONE = 0,
     NETINS_UDP_EVENT_CONNECTED = 1U << 0,
@@ -225,14 +230,15 @@ typedef struct netins_udp_tls_config_s {
     { sizeof(netins_udp_tls_config_t), NETINS_UDP_API_VERSION, 1, 0 }
 
 /*
- * Raw UDP socket option. path_index=-1 applies to every current and future
- * path socket. A non-negative index addresses the configured path slot.
+ * Raw UDP socket option. interface_index=-1 applies to every current and
+ * future path socket. A non-negative value addresses interface_names[] and is
+ * unrelated to the stable path_index returned by path statistics.
  * optval is consumed synchronously and is not retained after set_opt().
  */
 typedef struct netins_udp_sockopt_s {
     uint32_t struct_size;
     uint32_t api_version;
-    int path_index;
+    int interface_index;
     int level;
     int optname;
     const void *optval;
@@ -260,7 +266,8 @@ typedef struct netins_udp_info_s {
     uint32_t path_count;
     uint32_t active_path_count;
     uint32_t validating_path_count;
-    uint32_t reserved32;
+    /* Nonzero when more than NETINS_UDP_MAX_PATHS existed over this lifetime. */
+    uint32_t path_table_truncated;
     char alpn[NETINS_UDP_ALPN_LEN];
     char local_address[NETINS_UDP_ADDRESS_LEN];
     char peer_address[NETINS_UDP_ADDRESS_LEN];
@@ -276,6 +283,12 @@ typedef struct netins_udp_statis_s {
     uint32_t api_version;
     uint64_t snapshot_time_us;
     uint64_t sample_interval_us;
+    /*
+     * Unique QUIC STREAM payload bytes.  They exclude QUIC packet/frame
+     * overhead, retransmissions and reinjection duplicates.  In HTTP/3 mode
+     * they include H3/QPACK/control-stream payload; per-request body counters
+     * below exclude protocol framing.
+     */
     uint64_t bytes_sent;
     uint64_t bytes_received;
     uint64_t bytes_wire_sent;
@@ -297,6 +310,10 @@ typedef struct netins_udp_path_statis_s {
     uint32_t struct_size;
     uint32_t api_version;
     uint64_t path_id;
+    /*
+     * Stable slot assigned when path_id is first observed.  It never changes
+     * or gets reused before the owning connection is closed.
+     */
     uint32_t path_index;
     int path_state;           /* netins_udp_path_state_t */
     int app_status;           /* netins_udp_app_path_status_t */
@@ -365,6 +382,7 @@ typedef struct netins_udp_stream_info_s {
     int receive_finished;
     int last_error_code;
     uint32_t reserved32;
+    /* Body bytes accepted/delivered by this public stream API object. */
     uint64_t bytes_sent;
     uint64_t bytes_received;
     uint64_t reserved[4];
@@ -428,6 +446,7 @@ typedef struct netins_udp_h3_request_info_s {
     char response_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     uint64_t request_content_length;
     uint64_t response_content_length;
+    /* HTTP body bytes only; H3/QPACK framing and headers are excluded. */
     uint64_t bytes_sent;
     uint64_t bytes_received;
     netins_udp_h3_header_t peer_headers[NETINS_UDP_MAX_H3_HEADERS];
@@ -465,8 +484,12 @@ NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);
 
 /*
  * Options may be set in NEW state. Runtime options are limited to NONBLOCK,
- * send/receive timeouts and compatible socket options. Immutable options fail
- * with EBUSY after connect/listen begins.
+ * accept/send/receive/close timeouts and compatible socket options. Immutable
+ * options fail with EBUSY after connect/listen begins.
+ *
+ * get_opt uses value_len as an in/out byte count. value may be NULL to query
+ * the required size. A short buffer fails with ENOBUFS after storing the
+ * required size. SOCKOPT is set-only and get_opt fails with EOPNOTSUPP.
  */
 NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *netins,
     int option, const void *value, size_t value_len);
@@ -530,6 +553,14 @@ NETINS_UDP_PUBLIC ssize_t netins_udp_stream_recv(
     netins_udp_stream_t *stream, void *data, size_t length, int flags);
 NETINS_UDP_PUBLIC int netins_udp_stream_get_info(
     netins_udp_stream_t *stream, netins_udp_stream_info_t *out);
+NETINS_UDP_PUBLIC int netins_udp_stream_get_last_error_code(
+    netins_udp_stream_t *stream);
+NETINS_UDP_PUBLIC int netins_udp_stream_get_last_error_msg(
+    netins_udp_stream_t *stream, char *buffer, size_t buffer_len);
+NETINS_UDP_PUBLIC int netins_udp_stream_get_fd(
+    netins_udp_stream_t *stream);
+NETINS_UDP_PUBLIC int netins_udp_stream_get_events(
+    netins_udp_stream_t *stream, uint32_t *out_events);
 NETINS_UDP_PUBLIC int netins_udp_stream_shutdown(
     netins_udp_stream_t *stream, uint64_t application_error);
 NETINS_UDP_PUBLIC void netins_udp_stream_close(
@@ -574,6 +605,14 @@ NETINS_UDP_PUBLIC ssize_t netins_udp_h3_request_recv(
 NETINS_UDP_PUBLIC int netins_udp_h3_request_get_info(
     netins_udp_h3_request_t *request,
     netins_udp_h3_request_info_t *out);
+NETINS_UDP_PUBLIC int netins_udp_h3_request_get_last_error_code(
+    netins_udp_h3_request_t *request);
+NETINS_UDP_PUBLIC int netins_udp_h3_request_get_last_error_msg(
+    netins_udp_h3_request_t *request, char *buffer, size_t buffer_len);
+NETINS_UDP_PUBLIC int netins_udp_h3_request_get_fd(
+    netins_udp_h3_request_t *request);
+NETINS_UDP_PUBLIC int netins_udp_h3_request_get_events(
+    netins_udp_h3_request_t *request, uint32_t *out_events);
 NETINS_UDP_PUBLIC void netins_udp_h3_request_close(
     netins_udp_h3_request_t *request);
 
@@ -603,7 +642,12 @@ NETINS_UDP_PUBLIC int netins_udp_get_last_error_msg(
  * socket. Accepted connections have independent notification descriptors even
  * when their transport socket/engine is shared with a listener. The caller
  * must not read/close the descriptor directly; call get_events to acknowledge
- * pending notifications.
+ * pending notifications. get_events atomically drains the notification,
+ * returns latched transitions plus current level conditions, then rearms the
+ * descriptor before returning if any level condition is still true.
+ *
+ * On a connection, READABLE/WRITABLE refer only to the default RAW_STREAM.
+ * Additional raw streams and H3 requests use their child get_fd/get_events.
  */
 NETINS_UDP_PUBLIC int netins_udp_get_fd(netins_udp_t *netins);
 NETINS_UDP_PUBLIC int netins_udp_get_events(netins_udp_t *netins,

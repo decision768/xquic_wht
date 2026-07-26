@@ -149,9 +149,13 @@ typedef struct xqc_send_ctl_s {
     uint64_t                    ctl_app_bytes_send;
     uint64_t                    ctl_app_bytes_recv;
     uint64_t                    ctl_reinjected_bytes_recv;
-    /* Stream payload bytes attributed to this receive path. */
-    uint64_t                    ctl_app_bytes_recv_effective;
-    uint64_t                    ctl_app_bytes_recv_effective_reinject;
+    /*
+     * De-duplicated STREAM payload diagnostics.  These counters are private
+     * transport data consumed by the NetIns adapter, not public XQUIC stats.
+     */
+    uint64_t                    ctl_app_payload_bytes_send_unique;
+    uint64_t                    ctl_app_payload_bytes_recv_unique;
+    uint64_t                    ctl_app_payload_bytes_recv_unique_reinject;
 
     const
     xqc_cong_ctrl_callback_t    *ctl_cong_callback;

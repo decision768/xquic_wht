@@ -679,7 +679,7 @@ netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 | `bytes_delivered` | 字节 | 发送端通过 ACK 交付统计确认的累计字节 |
 | `bytes_retransmitted` | 字节 | 重传包字节，是总发送量的子集 |
 | `bytes_recv` | 字节 | 收到的携带 STREAM/DATAGRAM 的已编码包字节，可能含重复数据 |
-| `bytes_recv_effective` | 字节 | 接收端接受的非重复 STREAM 载荷字节 |
+| `bytes_recv_effective` | 字节 | `xqc_stream_recv()` 向上层移动且按 stream offset 去重的 STREAM payload |
 | `bytes_sent_reinject` | 字节 | 多路径重注入发送字节，是 `bytes_sent` 的子集 |
 | `bytes_recv_reinject` | 字节 | 收到的重注入副本包字节，是 `bytes_recv` 的子集 |
 | `bytes_recv_effective_reinject` | 字节 | 由重注入副本有效交付的 STREAM 载荷字节 |
@@ -703,7 +703,8 @@ netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 - `loss_rate=0.01` 表示约 1%，不是 0.01%。
 - `*_reinject` 和 `bytes_retransmitted` 已包含在相应总量中，不能再次相加。
 - 第一次快照没有前一个采样点，区间速率为 0 是正常现象。
-- `bytes_recv_effective` 是所有流上已接受的 STREAM 载荷，不保证精确等于文件正文，
+- `bytes_recv_effective` 是所有流上已经向上层移动、按 stream offset 去重的
+  STREAM payload，不保证精确等于文件正文，
   其中可能包含 HTTP/3 帧头或其他流数据。
 - 连接级 `srtt_us` 和 `min_rtt_us` 当前取初始路径；比较两条路径时应读取每路径
   `srtt_us`。
@@ -725,7 +726,7 @@ netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 | `bytes_sent_retransmitted` | 本路径重传发送字节子集 |
 | `bytes_recv` | 本路径接收的已编码数据包字节 |
 | `bytes_recv_reinject` | 本路径接收重注入副本字节子集 |
-| `bytes_recv_effective` | 本路径接受的非重复 STREAM 载荷字节 |
+| `bytes_recv_effective` | 本路径向上层移动且按 stream offset 去重的 STREAM payload |
 | `bytes_recv_effective_reinject` | 本路径由重注入副本有效交付的字节 |
 | `srtt_us` | 本路径平滑 RTT，单位微秒 |
 | `send_mbps` | 本路径数据发送区间速率 |
@@ -734,9 +735,10 @@ netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 | `recv_mbps` | 本路径数据接收区间速率 |
 | `effective_recv_mbps` | 本路径有效接收区间速率 |
 
-`paths[]` 可能同时包含 `INIT`、`VALIDATING`、`ACTIVE` 或 `CLOSING` 路径。判断
-当前可用路径时，不能只检查 `path_count`，还应检查 `transport_state` 和
-`app_status`。
+`paths[]` 的数组下标在连接生命周期内保持稳定：路径移除后槽位不移动，并保留为
+`CLOSED`。数组可能同时包含 `INIT`、`VALIDATING`、`ACTIVE`、`CLOSING` 或
+`CLOSED` 路径。判断当前可用路径时，不能只检查 `path_count`，还应检查
+`transport_state` 和 `app_status`。
 
 ### 5. 常用指标选择
 

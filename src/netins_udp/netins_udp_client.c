@@ -3,6 +3,7 @@
 #endif
 #define _POSIX_C_SOURCE 200809L
 
+#include "netins_udp_backend.h"
 #include "netins_udp_observer_internal.h"
 
 #include <arpa/inet.h>
@@ -24,7 +25,6 @@
 #define NETINS_UDP_CLIENT_DEFAULT_TIMEOUT_MS 20000U
 #define NETINS_UDP_CLIENT_DEFAULT_SOCKET_BUF (16 * 1024 * 1024)
 #define NETINS_UDP_CLIENT_DEFAULT_CWND       100U
-#define NETINS_UDP_CLIENT_RX_BATCH           64
 #define NETINS_UDP_CLIENT_REFRESH_US         500000ULL
 #define NETINS_UDP_CLIENT_PATH_RETRY_US      200000ULL
 #define NETINS_UDP_CLIENT_CLOSE_WAIT_MS      500U
@@ -116,6 +116,8 @@ struct netins_udp_client_s {
 
     netins_udp_client_path_t paths[NETINS_UDP_MAX_PATHS];
     uint32_t path_count;
+    size_t rx_next_path_start;
+    netins_udp_backend_rx_policy_t rx_policy;
     int path_creation_ready;
     uint64_t next_wake_us;
     uint64_t last_refresh_us;
@@ -364,7 +366,8 @@ netins_udp_client_fail_runtime(netins_udp_client_t *client, int error_code,
     pthread_mutex_unlock(&client->lock);
 
     if (client->observer != NULL) {
-        (void)netins_udp_observer_mark_error(client->observer, error_code, message);
+        (void)netins_udp_backend_connection_error(client->observer,
+            error_code, message);
     }
 }
 
@@ -609,7 +612,7 @@ netins_udp_client_update_path_metadata(netins_udp_client_t *client,
     if (client->observer == NULL || path == NULL || !path->active) {
         return;
     }
-    (void)netins_udp_observer_set_path_metadata(client->observer, path->path_id,
+    (void)netins_udp_backend_set_path_metadata(client->observer, path->path_id,
         path->interface_name[0] != '\0' ? path->interface_name : NULL,
         (const struct sockaddr *)&path->local_addr, path->local_addrlen,
         (const struct sockaddr *)&path->peer_addr, path->peer_addrlen);
@@ -710,7 +713,8 @@ netins_udp_client_update_cid(xqc_connection_t *conn,
     client->cid_valid = 1;
     pthread_mutex_unlock(&client->lock);
     if (client->observer != NULL) {
-        (void)netins_udp_observer_update_cid(client->observer, new_cid);
+        (void)netins_udp_backend_connection_update_cid(client->observer,
+            new_cid);
     }
 }
 
@@ -777,8 +781,9 @@ netins_udp_client_h3_conn_close(xqc_h3_conn_t *h3_conn,
     pthread_mutex_unlock(&client->lock);
 
     if (client->observer != NULL) {
-        (void)netins_udp_observer_refresh(client->observer);
-        (void)netins_udp_observer_mark_closed(client->observer, conn_error);
+        (void)netins_udp_backend_connection_refresh(client->observer);
+        (void)netins_udp_backend_connection_closed(client->observer,
+            conn_error);
     }
     return XQC_OK;
 }
@@ -797,8 +802,9 @@ netins_udp_client_h3_handshake_finished(xqc_h3_conn_t *h3_conn,
     pthread_mutex_unlock(&client->lock);
 
     if (client->observer != NULL) {
-        (void)netins_udp_observer_mark_handshake_finished(client->observer);
-        (void)netins_udp_observer_refresh(client->observer);
+        (void)netins_udp_backend_connection_handshake_finished(
+            client->observer);
+        (void)netins_udp_backend_connection_refresh(client->observer);
     }
 }
 
@@ -1114,7 +1120,8 @@ netins_udp_client_start_connection(netins_udp_client_t *client)
 static int
 netins_udp_client_bind_observer(netins_udp_client_t *client)
 {
-    if (netins_udp_observer_bind(client->observer, client->engine, &client->cid,
+    if (netins_udp_backend_connection_bind(client->observer, client->engine,
+            &client->cid,
             NETINS_UDP_ROLE_CLIENT) != NETINS_UDP_OK)
     {
         netins_udp_client_set_error(client, EIO,
@@ -1122,7 +1129,7 @@ netins_udp_client_bind_observer(netins_udp_client_t *client)
         return NETINS_UDP_ERROR;
     }
     netins_udp_client_update_path_metadata(client, &client->paths[0]);
-    (void)netins_udp_observer_refresh(client->observer);
+    (void)netins_udp_backend_connection_refresh(client->observer);
     return NETINS_UDP_OK;
 }
 
@@ -1196,7 +1203,9 @@ netins_udp_client_recv_path(netins_udp_client_t *client,
 {
     unsigned char packet[65536];
     int processed = 0;
-    for (int i = 0; i < NETINS_UDP_CLIENT_RX_BATCH; ++i) {
+    uint32_t packet_limit = netins_udp_backend_rx_packet_limit(
+        &client->rx_policy, client->path_count);
+    for (int i = 0; i < (int)packet_limit; ++i) {
         struct sockaddr_storage peer_addr;
         socklen_t peer_addrlen = sizeof(peer_addr);
         ssize_t size = recvfrom(path->fd, packet, sizeof(packet), 0,
@@ -1575,7 +1584,7 @@ netins_udp_client_drive_close(netins_udp_client_t *client)
 
     if (should_close && client->engine != NULL && client->cid_valid) {
         if (client->observer != NULL) {
-            (void)netins_udp_observer_mark_closing(client->observer);
+            (void)netins_udp_backend_connection_closing(client->observer);
         }
         (void)xqc_h3_conn_close(client->engine, &client->cid);
         xqc_engine_main_logic(client->engine);
@@ -1609,7 +1618,7 @@ netins_udp_client_refresh_observer(netins_udp_client_t *client, uint64_t now_us)
     for (uint32_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
         netins_udp_client_update_path_metadata(client, &client->paths[i]);
     }
-    (void)netins_udp_observer_refresh(client->observer);
+    (void)netins_udp_backend_connection_refresh(client->observer);
     client->last_refresh_us = now_us;
 }
 
@@ -1639,7 +1648,10 @@ netins_udp_client_thread_main(void *argument)
         poll_fds[poll_count].revents = 0;
         path_indexes[poll_count] = -1;
         poll_count++;
-        for (uint32_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
+        size_t poll_path_start = client->rx_next_path_start;
+        for (uint32_t offset = 0; offset < NETINS_UDP_MAX_PATHS; ++offset) {
+            uint32_t i = (uint32_t)((poll_path_start + offset)
+                % NETINS_UDP_MAX_PATHS);
             netins_udp_client_path_t *path = &client->paths[i];
             if (!path->active || path->fd < 0) {
                 continue;
@@ -1711,6 +1723,8 @@ netins_udp_client_thread_main(void *argument)
         if (received_packets > 0) {
             xqc_engine_finish_recv(client->engine);
         }
+        client->rx_next_path_start = netins_udp_backend_next_path_start(
+            poll_path_start, NETINS_UDP_MAX_PATHS);
         if (continue_send && client->cid_valid) {
             (void)xqc_conn_continue_send(client->engine, &client->cid);
         }
@@ -2312,6 +2326,7 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
 
     client->wake_pipe[0] = -1;
     client->wake_pipe[1] = -1;
+    netins_udp_backend_rx_policy_init(&client->rx_policy);
     client->state = NETINS_UDP_STATE_NEW;
     snprintf(client->ciphers, sizeof(client->ciphers), "%s", XQC_TLS_CIPHERS);
     snprintf(client->groups, sizeof(client->groups), "%s", XQC_TLS_GROUPS);
@@ -2557,8 +2572,8 @@ netins_udp_client_close(netins_udp_client_t *client)
     }
 
     if (client->observer != NULL) {
-        (void)netins_udp_observer_refresh(client->observer);
-        (void)netins_udp_observer_mark_closed(client->observer,
+        (void)netins_udp_backend_connection_refresh(client->observer);
+        (void)netins_udp_backend_connection_closed(client->observer,
             client->last_error_code);
     }
     if (client->engine != NULL) {

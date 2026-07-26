@@ -416,7 +416,9 @@ endif()
 set (
     XQC_SOURCE
     ${XQC_SOURCE}
+    "src/netins_udp/netins_udp_backend.c"
     "src/netins_udp/netins_udp_observer.c"
+    "src/netins_udp/netins_udp_transport_metrics.c"
     "src/netins_udp/netins_udp_client.c"
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}

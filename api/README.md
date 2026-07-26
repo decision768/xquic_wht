@@ -183,7 +183,8 @@ Use `--allow-single-path` only for an intentional single-interface test.
 - `bytes_sent`: encoded bytes of packets carrying application data.
 - `bytes_delivered`: transport bytes acknowledged on the sending side.
 - `bytes_recv`: encoded bytes of received packets carrying stream/datagram data.
-- `bytes_recv_effective`: non-duplicate stream payload accepted on the path.
+- `bytes_recv_effective`: STREAM payload moved upward by `xqc_stream_recv()`,
+  de-duplicated by stream offset and attributed to the path that supplied it.
 - `*_reinject` and `bytes_sent_retransmitted`: reinjection/retransmission
   subsets; they must not be added again to totals.
 

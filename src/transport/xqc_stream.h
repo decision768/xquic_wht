@@ -79,6 +79,8 @@ typedef struct xqc_stream_frame_s {
     unsigned                data_length;
     uint64_t                data_offset;
     uint64_t                next_read_offset;   /* next offset in frame */
+    uint64_t                recv_path_id;       /* path that supplied this copy */
+    unsigned char           recv_reinjected;
     unsigned char           fin;
 } xqc_stream_frame_t;
 
@@ -297,4 +299,3 @@ void xqc_stream_closing(xqc_stream_t *stream, xqc_int_t err);
 void xqc_stream_close_discarded_stream(xqc_stream_t *stream);
 
 #endif /* _XQC_STREAM_H_INCLUDED_ */
-

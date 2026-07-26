@@ -11,62 +11,69 @@
 #include <arpa/inet.h>
 
 #include "netins_udp_observer_internal.h"
+#include "netins_udp_transport_metrics.h"
 
-static xqc_conn_stats_t g_mock_stats;
+static netins_udp_transport_metrics_t g_mock_metrics;
 
-xqc_conn_stats_t
-xqc_conn_get_stats(xqc_engine_t *engine, const xqc_cid_t *cid)
+int
+netins_udp_transport_metrics_collect(xqc_engine_t *engine,
+    const xqc_cid_t *cid, netins_udp_transport_metrics_t *metrics)
 {
     (void)engine;
     (void)cid;
-    return g_mock_stats;
+    *metrics = g_mock_metrics;
+    return 0;
 }
 
 static void
 prepare_mock_stats(void)
 {
-    memset(&g_mock_stats, 0, sizeof(g_mock_stats));
+    memset(&g_mock_metrics, 0, sizeof(g_mock_metrics));
     for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
-        g_mock_stats.paths_info[i].path_id = UINT64_MAX;
+        g_mock_metrics.legacy.paths_info[i].path_id = UINT64_MAX;
+        g_mock_metrics.paths[i].path_id = UINT64_MAX;
     }
 
-    snprintf(g_mock_stats.alpn, sizeof(g_mock_stats.alpn), "h3");
-    snprintf(g_mock_stats.conn_info, sizeof(g_mock_stats.conn_info),
+    snprintf(g_mock_metrics.legacy.alpn, sizeof(g_mock_metrics.legacy.alpn),
+        "h3");
+    snprintf(g_mock_metrics.legacy.conn_info,
+        sizeof(g_mock_metrics.legacy.conn_info),
         "mock live connection");
-    g_mock_stats.enable_multipath = 1;
-    g_mock_stats.mp_state = 2;
-    g_mock_stats.send_count = 120;
-    g_mock_stats.recv_count = 140;
-    g_mock_stats.lost_count = 2;
-    g_mock_stats.srtt = 32000;
-    g_mock_stats.min_rtt = 21000;
-    g_mock_stats.inflight_bytes = 64000;
+    g_mock_metrics.legacy.enable_multipath = 1;
+    g_mock_metrics.legacy.mp_state = 2;
+    g_mock_metrics.legacy.send_count = 120;
+    g_mock_metrics.legacy.recv_count = 140;
+    g_mock_metrics.legacy.lost_count = 2;
+    g_mock_metrics.legacy.srtt = 32000;
+    g_mock_metrics.legacy.min_rtt = 21000;
+    g_mock_metrics.legacy.inflight_bytes = 64000;
+    g_mock_metrics.path_count = 2;
 
-    xqc_path_metrics_t *path0 = &g_mock_stats.paths_info[0];
+    netins_udp_transport_path_metrics_t *path0 = &g_mock_metrics.paths[0];
     path0->path_id = 0;
     path0->path_state = NETINS_UDP_PATH_ACTIVE;
-    path0->path_app_status = NETINS_UDP_APP_PATH_AVAILABLE;
-    path0->path_pkt_send_count = 80;
-    path0->path_pkt_recv_count = 90;
-    path0->path_wire_send_bytes = 80000;
-    path0->path_send_bytes = 70000;
-    path0->path_delivered_bytes = 65000;
-    path0->path_recv_bytes = 90000;
-    path0->path_recv_effective_bytes = 85000;
-    path0->path_srtt = 30000;
+    path0->app_path_status = NETINS_UDP_APP_PATH_AVAILABLE;
+    path0->packets_sent = 80;
+    path0->packets_recv = 90;
+    path0->wire_bytes_sent = 80000;
+    path0->app_packet_bytes_sent = 70000;
+    path0->delivered_bytes = 65000;
+    path0->app_packet_bytes_recv = 90000;
+    path0->stream_payload_bytes_recv_unique = 85000;
+    path0->srtt_us = 30000;
 
-    xqc_path_metrics_t *path1 = &g_mock_stats.paths_info[1];
+    netins_udp_transport_path_metrics_t *path1 = &g_mock_metrics.paths[1];
     path1->path_id = 1;
     path1->path_state = NETINS_UDP_PATH_VALIDATING;
-    path1->path_app_status = NETINS_UDP_APP_PATH_NONE;
-    path1->path_pkt_send_count = 40;
-    path1->path_pkt_recv_count = 50;
-    path1->path_wire_send_bytes = 40000;
-    path1->path_send_bytes = 30000;
-    path1->path_delivered_bytes = 25000;
-    path1->path_recv_bytes = 50000;
-    path1->path_recv_effective_bytes = 45000;
-    path1->path_srtt = 45000;
+    path1->app_path_status = NETINS_UDP_APP_PATH_NONE;
+    path1->packets_sent = 40;
+    path1->packets_recv = 50;
+    path1->wire_bytes_sent = 40000;
+    path1->app_packet_bytes_sent = 30000;
+    path1->delivered_bytes = 25000;
+    path1->app_packet_bytes_recv = 50000;
+    path1->stream_payload_bytes_recv_unique = 45000;
+    path1->srtt_us = 45000;
 }
 
 typedef struct reader_context_s {
@@ -155,6 +162,28 @@ main(void)
     assert(strcmp(by_id.paths[0].local_address, "10.0.0.2:41000") == 0);
     assert(by_id.statis.bytes_wire_sent == 120000);
     assert(by_id.statis.bytes_recv_effective == 130000);
+
+    /* Collector order changes must not change the public path indexes. */
+    netins_udp_transport_path_metrics_t swap = g_mock_metrics.paths[0];
+    g_mock_metrics.paths[0] = g_mock_metrics.paths[1];
+    g_mock_metrics.paths[1] = swap;
+    assert(netins_udp_observer_refresh(host) == NETINS_UDP_OK);
+    netins_udp_snapshot_t reordered = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    assert(netins_udp_observer_get_snapshot(host, &reordered)
+        == NETINS_UDP_OK);
+    assert(reordered.paths[0].path_id == 0);
+    assert(reordered.paths[1].path_id == 1);
+
+    /* Removed paths retain their slots and transition to CLOSED. */
+    g_mock_metrics.path_count = 1;
+    assert(netins_udp_observer_refresh(host) == NETINS_UDP_OK);
+    netins_udp_snapshot_t removed = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    assert(netins_udp_observer_get_snapshot(host, &removed) == NETINS_UDP_OK);
+    assert(removed.path_count == 2);
+    assert(removed.paths[0].path_id == 0);
+    assert(removed.paths[0].transport_state == NETINS_UDP_PATH_CLOSED);
+    assert(removed.paths[1].path_id == 1);
+    assert(removed.info.available_path_count == 0);
 
     assert(netins_udp_observer_mark_handshake_finished(host) == NETINS_UDP_OK);
     netins_udp_observer_t *third_party = netins_udp_observer_open(connection_id);

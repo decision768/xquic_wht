@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "netins_udp_observer_internal.h"
+#include "netins_udp_transport_metrics.h"
 
 #include <errno.h>
 #include <netdb.h>
@@ -219,20 +220,6 @@ netins_udp_observer_find_metadata(const netins_udp_observer_path_metadata_t *met
         }
     }
     return NULL;
-}
-
-static int
-netins_udp_observer_raw_stats_valid(const xqc_conn_stats_t *stats)
-{
-    if (stats->alpn[0] != '\0' || stats->conn_info[0] != '\0') {
-        return 1;
-    }
-    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
-        if (stats->paths_info[i].path_id != UINT64_MAX) {
-            return 1;
-        }
-    }
-    return 0;
 }
 
 static void
@@ -498,12 +485,13 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
     memcpy(metadata, netins->path_metadata, sizeof(metadata));
     pthread_mutex_unlock(&netins->lock);
 
-    xqc_conn_stats_t raw = xqc_conn_get_stats(engine, &cid);
-    if (!netins_udp_observer_raw_stats_valid(&raw)) {
+    netins_udp_transport_metrics_t transport;
+    if (netins_udp_transport_metrics_collect(engine, &cid, &transport) != 0) {
         netins_udp_observer_set_error(netins, ENOENT,
             "XQUIC connection not found for bound CID");
         return NETINS_UDP_NOT_FOUND;
     }
+    const xqc_conn_stats_t *raw = &transport.legacy;
 
     netins_udp_snapshot_t next;
     netins_udp_observer_init_snapshot(&next);
@@ -511,16 +499,16 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
     next.info.role = previous.info.role;
     next.info.connection_state = previous.info.connection_state;
     next.info.handshake_finished = previous.info.handshake_finished;
-    next.info.multipath_mode = raw.enable_multipath;
-    next.info.mp_state = raw.mp_state;
-    next.info.conn_error = raw.conn_err;
-    netins_udp_observer_copy_string(next.info.alpn, sizeof(next.info.alpn), raw.alpn,
-        sizeof(raw.alpn));
+    next.info.multipath_mode = raw->enable_multipath;
+    next.info.mp_state = raw->mp_state;
+    next.info.conn_error = raw->conn_err;
+    netins_udp_observer_copy_string(next.info.alpn, sizeof(next.info.alpn), raw->alpn,
+        sizeof(raw->alpn));
     netins_udp_observer_copy_string(next.info.conn_info, sizeof(next.info.conn_info),
-        raw.conn_info, sizeof(raw.conn_info));
+        raw->conn_info, sizeof(raw->conn_info));
     netins_udp_observer_copy_string(next.info.extern_conn_info,
-        sizeof(next.info.extern_conn_info), raw.extern_conn_info,
-        sizeof(raw.extern_conn_info));
+        sizeof(next.info.extern_conn_info), raw->extern_conn_info,
+        sizeof(raw->extern_conn_info));
 
     next.statis.snapshot_time_us = netins_udp_observer_now_us();
     if (previous.statis.snapshot_time_us > 0
@@ -529,42 +517,66 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         next.statis.sample_interval_us = next.statis.snapshot_time_us
             - previous.statis.snapshot_time_us;
     }
-    next.statis.packets_sent = raw.send_count;
-    next.statis.packets_recv = raw.recv_count;
-    next.statis.packets_lost = raw.lost_count;
-    next.statis.packets_spurious_lost = raw.spurious_loss_count;
-    next.statis.datagrams_lost = raw.lost_dgram_count;
-    next.statis.srtt_us = raw.srtt;
-    next.statis.min_rtt_us = raw.min_rtt;
-    next.statis.inflight_bytes = raw.inflight_bytes;
-    next.statis.loss_rate = raw.send_count > 0
-        ? (double)raw.lost_count / (double)raw.send_count : 0.0;
+    next.statis.packets_sent = raw->send_count;
+    next.statis.packets_recv = raw->recv_count;
+    next.statis.packets_lost = raw->lost_count;
+    next.statis.packets_spurious_lost = raw->spurious_loss_count;
+    next.statis.datagrams_lost = raw->lost_dgram_count;
+    next.statis.srtt_us = raw->srtt;
+    next.statis.min_rtt_us = raw->min_rtt;
+    next.statis.inflight_bytes = raw->inflight_bytes;
+    next.statis.loss_rate = raw->send_count > 0
+        ? (double)raw->lost_count / (double)raw->send_count : 0.0;
 
-    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
-        const xqc_path_metrics_t *src = &raw.paths_info[i];
-        if (src->path_id == UINT64_MAX
-            || next.path_count >= NETINS_UDP_MAX_PATHS)
-        {
-            continue;
+    /*
+     * A path's array slot is its NetIns path_index for the life of this
+     * connection.  Retain disappeared paths as CLOSED so later removals never
+     * shift the indexes already observed by callers.
+     */
+    next.path_count = previous.path_count;
+    for (size_t i = 0; i < next.path_count; ++i) {
+        memcpy(&next.paths[i], &previous.paths[i], sizeof(next.paths[i]));
+        next.paths[i].transport_state = NETINS_UDP_PATH_CLOSED;
+        next.paths[i].send_mbps = 0.0;
+        next.paths[i].wire_send_mbps = 0.0;
+        next.paths[i].delivery_mbps = 0.0;
+        next.paths[i].recv_mbps = 0.0;
+        next.paths[i].effective_recv_mbps = 0.0;
+    }
+
+    for (size_t i = 0; i < transport.path_count; ++i) {
+        const netins_udp_transport_path_metrics_t *src = &transport.paths[i];
+        netins_udp_path_statis_t *dst = NULL;
+        for (size_t slot = 0; slot < next.path_count; ++slot) {
+            if (next.paths[slot].path_id == src->path_id) {
+                dst = &next.paths[slot];
+                break;
+            }
+        }
+        if (dst == NULL) {
+            if (next.path_count >= NETINS_UDP_MAX_PATHS) {
+                continue;
+            }
+            dst = &next.paths[next.path_count++];
+            netins_udp_observer_init_path_statis(dst);
         }
 
-        netins_udp_path_statis_t *dst = &next.paths[next.path_count++];
         dst->path_id = src->path_id;
         dst->transport_state = src->path_state;
-        dst->app_status = src->path_app_status;
-        dst->packets_sent = src->path_pkt_send_count;
-        dst->packets_recv = src->path_pkt_recv_count;
-        dst->bytes_sent = src->path_send_bytes;
-        dst->bytes_wire_sent = src->path_wire_send_bytes;
-        dst->bytes_delivered = src->path_delivered_bytes;
-        dst->bytes_sent_reinject = src->path_send_reinject_bytes;
-        dst->bytes_sent_retransmitted = src->path_send_retrans_bytes;
-        dst->bytes_recv = src->path_recv_bytes;
-        dst->bytes_recv_reinject = src->path_recv_reinject_bytes;
-        dst->bytes_recv_effective = src->path_recv_effective_bytes;
+        dst->app_status = src->app_path_status;
+        dst->packets_sent = src->packets_sent;
+        dst->packets_recv = src->packets_recv;
+        dst->bytes_sent = src->app_packet_bytes_sent;
+        dst->bytes_wire_sent = src->wire_bytes_sent;
+        dst->bytes_delivered = src->delivered_bytes;
+        dst->bytes_sent_reinject = src->reinjected_bytes_sent;
+        dst->bytes_sent_retransmitted = src->retransmitted_bytes_sent;
+        dst->bytes_recv = src->app_packet_bytes_recv;
+        dst->bytes_recv_reinject = src->reinjected_bytes_recv;
+        dst->bytes_recv_effective = src->stream_payload_bytes_recv_unique;
         dst->bytes_recv_effective_reinject =
-            src->path_recv_effective_reinject_bytes;
-        dst->srtt_us = src->path_srtt;
+            src->stream_payload_bytes_recv_unique_reinject;
+        dst->srtt_us = src->srtt_us;
 
         const netins_udp_observer_path_metadata_t *path_metadata =
             netins_udp_observer_find_metadata(metadata, dst->path_id);
@@ -611,6 +623,10 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
                 next.statis.sample_interval_us);
         }
 
+    }
+
+    for (size_t i = 0; i < next.path_count; ++i) {
+        const netins_udp_path_statis_t *dst = &next.paths[i];
         next.statis.bytes_sent += dst->bytes_sent;
         next.statis.bytes_wire_sent += dst->bytes_wire_sent;
         next.statis.bytes_delivered += dst->bytes_delivered;
@@ -627,12 +643,14 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         } else if (dst->transport_state == NETINS_UDP_PATH_VALIDATING) {
             next.info.validating_path_count++;
         }
-        if (dst->app_status == NETINS_UDP_APP_PATH_AVAILABLE) {
-            next.info.available_path_count++;
-        } else if (dst->app_status == NETINS_UDP_APP_PATH_STANDBY) {
-            next.info.standby_path_count++;
-        } else if (dst->app_status == NETINS_UDP_APP_PATH_FROZEN) {
-            next.info.frozen_path_count++;
+        if (dst->transport_state != NETINS_UDP_PATH_CLOSED) {
+            if (dst->app_status == NETINS_UDP_APP_PATH_AVAILABLE) {
+                next.info.available_path_count++;
+            } else if (dst->app_status == NETINS_UDP_APP_PATH_STANDBY) {
+                next.info.standby_path_count++;
+            } else if (dst->app_status == NETINS_UDP_APP_PATH_FROZEN) {
+                next.info.frozen_path_count++;
+            }
         }
     }
 
