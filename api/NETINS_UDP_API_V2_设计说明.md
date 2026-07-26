@@ -232,8 +232,9 @@ content-length 和 content-type。mini 使用的 `x-stream-index`、
 对端未发送 Content-Length 时，request info 的 `response_content_length`
 同样返回 `NETINS_UDP_CONTENT_LENGTH_UNKNOWN`，与明确声明的零长度区分。
 
-当前 mini 的 GET/POST、多 stream 分片和文件偏移元数据将在阶段七迁入 H3
-扩展；这些元数据不进入普通 QUIC stream API。
+阶段七已经提供服务端通用 H3 request 接收与响应数据面；现有 mini 的 GET/POST、
+多 stream 分片和文件偏移处理仍保持原实现，后续 mini 接入 API 时再迁移。
+这些元数据不进入普通 QUIC stream API。
 
 客户端 H3 调用顺序：
 
@@ -264,6 +265,16 @@ netins_udp_h3_request_send(request, response_data, response_length,
     NETINS_UDP_MSG_FIN);
 netins_udp_h3_request_close(request);
 ```
+
+`request_accept()` 的阻塞行为继承 accepted connection 的 `NONBLOCK` 和
+`RECV_TIMEOUT_MS`。请求正文接收队列上限为 16 MiB，响应正文发送队列上限为
+4 MiB；达到上限时通过背压返回或等待，不允许无界增长。服务端应用线程只复制
+数据和修改请求状态，所有 `xqc_h3_request_*()` 操作均由共享 server engine
+线程串行执行。`set_response()` 只能成功一次，当前只接受 200 到 599 的最终
+响应状态码。
+服务端 `request_close()` 会继续冲刷已经完整提交（含 FIN）的响应队列；如果响应
+尚未配置或正文只提交了一部分，则按取消处理。连接 shutdown、断网和协议错误
+仍会立即中止 request。
 
 ### 6.3 send/recv
 
@@ -524,8 +535,8 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
 也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-客户端生命周期、阶段五 HTTP/3 数据对象和阶段六服务端连接生命周期已实现并
-编译以下增量 V2 符号：
+客户端生命周期、阶段五客户端 HTTP/3 数据对象、阶段六服务端连接生命周期和
+阶段七服务端 HTTP/3 request 数据面已实现并编译以下增量 V2 符号：
 
 - `netins_udp_init()` / `netins_udp_cleanup()`；
 - `netins_udp_new()` / `netins_udp_close()`；
@@ -536,6 +547,7 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 - 连接句柄错误查询和 TLS 配置初始化。
 - H3 request/response 配置初始化和扩展头添加；
 - 客户端 `netins_udp_h3_request_open/send/recv/get_info/close`；
+- 服务端 `netins_udp_h3_request_accept/set_response/send/recv/get_info/close`；
 - H3 request 错误查询。
 
 这些函数通过私有 transport bridge 复用现有 standalone H3 client。V1 的
@@ -556,13 +568,20 @@ connection。accepted close 只请求关闭对应的 QUIC connection，最后一
 线程执行，应用线程只设置关闭请求。现有 mini_server 的 Libevent、UDP 收包和
 engine 调度路径没有修改。
 
+阶段七在阶段六的独立 server backend 内增加 request 接收队列和有界正文队列。
+XQUIC request create/read/write/close 回调仍只运行在原 server engine 线程；
+公开 API 线程不会直接调用 XQUIC。每个 request 独立持有连接引用，accepted
+connection 或 listener 先关闭时，尚未由调用方 close 的 request 仍可查询并
+安全释放。每连接最多保留 256 个 request 对象和 256 个待 accept request，
+超过限制时关闭新 request，避免异常客户端导致无界内存增长。
+
 调用 connect/listen 前仍必须设置 `APP_PROTOCOL=HTTP3`，listener 还必须配置服务端
 证书和私钥。当前 XQUIC TLS server backend 尚不支持强制客户端证书校验，因此
 `require_client_certificate` 或 listener `ca_file` 返回 `EOPNOTSUPP`。
 连接级 `netins_udp_send/recv`
 属于 RAW_STREAM，在当前实现中明确返回 `EOPNOTSUPP`。默认 RAW_STREAM、普通
-stream、服务端 H3 request 数据对象、request/connection 通知 fd、SOCKOPT 和
-自定义客户端证书/CA 文件仍待后续阶段实现。
+stream、request/connection 通知 fd、SOCKOPT、自定义客户端证书/CA 文件以及
+现有 mini 到 V2 API 的迁移仍待后续阶段实现。
 
 为避免中途版本破坏，正式 `include/xquic/netins_udp.h` 和现有
 `netins_udp_get_api_version()==1` 暂不切换。`api/draft/netins_udp_v2.h` 已用于

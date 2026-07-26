@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -27,8 +28,70 @@
 
 #define NETINS_UDP_SERVER_RX_BATCH_PACKETS 256U
 #define NETINS_UDP_SERVER_ACCEPT_QUEUE_MAX 256U
+#define NETINS_UDP_SERVER_REQUEST_MAX      256U
+#define NETINS_UDP_SERVER_REQUEST_SEND_MAX (4U * 1024U * 1024U)
+#define NETINS_UDP_SERVER_REQUEST_RECV_MAX (16U * 1024U * 1024U)
+#define NETINS_UDP_SERVER_REQUEST_RECV_CHUNK (64U * 1024U)
 #define NETINS_UDP_SERVER_REFRESH_US       500000ULL
 #define NETINS_UDP_SERVER_POLL_MAX_MS      500
+
+typedef struct netins_udp_server_buffer_s {
+    struct netins_udp_server_buffer_s *next;
+    size_t length;
+    size_t offset;
+    unsigned char data[];
+} netins_udp_server_buffer_t;
+
+struct netins_udp_server_request_s {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    unsigned int references;
+
+    struct netins_udp_server_connection_s *connection;
+    xqc_h3_request_t *xqc_request;
+    uint64_t stream_id;
+    int xqc_reference;
+    int connection_reference;
+    int queued;
+    int public_reference;
+    int headers_ready;
+    int response_configured;
+    int response_headers_sent;
+    int send_fin_requested;
+    int send_finished;
+    int recv_finished;
+    int public_close_requested;
+    int close_requested;
+    int close_sent;
+    int close_notified;
+    int read_pending;
+    int stream_error;
+
+    char method[NETINS_UDP_V2_TRANSPORT_METHOD_LEN];
+    char path[NETINS_UDP_V2_TRANSPORT_REQUEST_PATH_LEN];
+    char authority[NETINS_UDP_V2_TRANSPORT_SERVER_NAME_LEN];
+    char request_content_type[NETINS_UDP_V2_TRANSPORT_CONTENT_TYPE_LEN];
+    int request_content_length_known;
+    uint64_t request_content_length;
+    netins_udp_v2_transport_h3_response_config_t response;
+    uint32_t peer_header_count;
+    netins_udp_v2_transport_h3_header_t
+        peer_headers[NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS];
+
+    uint64_t bytes_accepted;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t bytes_delivered;
+    size_t send_queue_bytes;
+    size_t recv_queue_bytes;
+    netins_udp_server_buffer_t *send_head;
+    netins_udp_server_buffer_t *send_tail;
+    netins_udp_server_buffer_t *recv_head;
+    netins_udp_server_buffer_t *recv_tail;
+
+    struct netins_udp_server_request_s *all_next;
+    struct netins_udp_server_request_s *accept_next;
+};
 
 struct netins_udp_server_connection_s {
     pthread_mutex_t lock;
@@ -53,6 +116,12 @@ struct netins_udp_server_connection_s {
     int close_requested;
     int close_sent;
     uint64_t application_error;
+
+    netins_udp_v2_transport_server_request_t *requests;
+    netins_udp_v2_transport_server_request_t *request_accept_head;
+    netins_udp_v2_transport_server_request_t *request_accept_tail;
+    size_t request_count;
+    size_t request_accept_count;
 
     struct netins_udp_server_connection_s *all_next;
     struct netins_udp_server_connection_s *accept_next;
@@ -216,6 +285,72 @@ netins_udp_server_connection_release(
     free(connection);
 }
 
+static void
+netins_udp_server_request_free_buffers(netins_udp_server_buffer_t *head)
+{
+    while (head != NULL) {
+        netins_udp_server_buffer_t *next = head->next;
+        free(head);
+        head = next;
+    }
+}
+
+static netins_udp_server_buffer_t *
+netins_udp_server_request_copy_buffer(const void *data, size_t length)
+{
+    if (length > SIZE_MAX - sizeof(netins_udp_server_buffer_t)) {
+        return NULL;
+    }
+    netins_udp_server_buffer_t *buffer =
+        malloc(sizeof(*buffer) + length);
+    if (buffer == NULL) {
+        return NULL;
+    }
+    buffer->next = NULL;
+    buffer->length = length;
+    buffer->offset = 0;
+    if (length > 0 && data != NULL) {
+        memcpy(buffer->data, data, length);
+    }
+    return buffer;
+}
+
+static void
+netins_udp_server_request_destroy(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    netins_udp_server_request_free_buffers(request->send_head);
+    netins_udp_server_request_free_buffers(request->recv_head);
+    pthread_cond_destroy(&request->cond);
+    pthread_mutex_destroy(&request->lock);
+    free(request);
+}
+
+static void
+netins_udp_server_request_retain(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    pthread_mutex_lock(&request->lock);
+    request->references++;
+    pthread_mutex_unlock(&request->lock);
+}
+
+static void
+netins_udp_server_request_release(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    int destroy = 0;
+    pthread_mutex_lock(&request->lock);
+    if (request->references > 0) {
+        request->references--;
+        destroy = request->references == 0;
+    }
+    pthread_mutex_unlock(&request->lock);
+    if (destroy) {
+        netins_udp_server_request_destroy(request);
+    }
+}
+
 static void netins_udp_server_release(
     netins_udp_v2_transport_server_t *server);
 
@@ -258,6 +393,57 @@ netins_udp_server_remove_queued_locked(
             item->queued = 0;
             if (server->accept_count > 0) {
                 server->accept_count--;
+            }
+            return 1;
+        }
+        previous = item;
+        item = item->accept_next;
+    }
+    return 0;
+}
+
+static void
+netins_udp_server_remove_request_locked(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_server_request_t *request)
+{
+    netins_udp_v2_transport_server_request_t **cursor =
+        &connection->requests;
+    while (*cursor != NULL) {
+        if (*cursor == request) {
+            *cursor = request->all_next;
+            request->all_next = NULL;
+            if (connection->request_count > 0) {
+                connection->request_count--;
+            }
+            return;
+        }
+        cursor = &(*cursor)->all_next;
+    }
+}
+
+static int
+netins_udp_server_remove_request_queued_locked(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_server_request_t *request)
+{
+    netins_udp_v2_transport_server_request_t *previous = NULL;
+    netins_udp_v2_transport_server_request_t *item =
+        connection->request_accept_head;
+    while (item != NULL) {
+        if (item == request) {
+            if (previous == NULL) {
+                connection->request_accept_head = item->accept_next;
+            } else {
+                previous->accept_next = item->accept_next;
+            }
+            if (connection->request_accept_tail == item) {
+                connection->request_accept_tail = previous;
+            }
+            item->accept_next = NULL;
+            item->queued = 0;
+            if (connection->request_accept_count > 0) {
+                connection->request_accept_count--;
             }
             return 1;
         }
@@ -707,29 +893,832 @@ netins_udp_server_h3_connection_close(xqc_h3_conn_t *h3_connection,
     return 0;
 }
 
-/*
- * Stage 6 owns only the connection lifecycle. Incoming H3 requests remain
- * XQUIC-owned and are intentionally left for the server request-object stage.
- * The callbacks are nevertheless present so an early request cannot call a
- * missing application callback.
- */
 static int
-netins_udp_server_h3_request_noop(xqc_h3_request_t *request,
-    void *request_user_data)
+netins_udp_server_h3_header_name_equals(const xqc_http_header_t *header,
+    const char *name)
 {
-    (void)request;
-    (void)request_user_data;
+    size_t name_len = strlen(name);
+    return header->name.iov_len == name_len
+        && strncasecmp((const char *)header->name.iov_base, name,
+            name_len) == 0;
+}
+
+static int
+netins_udp_server_h3_copy_header_value(char *destination,
+    size_t destination_size, const xqc_http_header_t *header)
+{
+    if (destination == NULL || destination_size == 0 || header == NULL
+        || header->value.iov_len >= destination_size)
+    {
+        return -1;
+    }
+    memcpy(destination, header->value.iov_base, header->value.iov_len);
+    destination[header->value.iov_len] = '\0';
     return 0;
 }
 
 static int
-netins_udp_server_h3_request_read_noop(xqc_h3_request_t *request,
-    xqc_request_notify_flag_t flags, void *request_user_data)
+netins_udp_server_h3_parse_content_length(
+    const xqc_http_header_t *header, uint64_t *out)
 {
-    (void)request;
-    (void)flags;
-    (void)request_user_data;
+    char value[32];
+    if (netins_udp_server_h3_copy_header_value(value, sizeof(value),
+            header) != 0
+        || value[0] == '\0')
+    {
+        return -1;
+    }
+    uint64_t parsed = 0;
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0'; ++cursor)
+    {
+        if (*cursor < '0' || *cursor > '9'
+            || parsed > (UINT64_MAX - (uint64_t)(*cursor - '0')) / 10U)
+        {
+            return -1;
+        }
+        parsed = parsed * 10U + (uint64_t)(*cursor - '0');
+    }
+    *out = parsed;
     return 0;
+}
+
+static void
+netins_udp_server_request_mark_error(
+    netins_udp_v2_transport_server_request_t *request, int error_code)
+{
+    pthread_mutex_lock(&request->lock);
+    if (request->stream_error == 0) {
+        request->stream_error = error_code != 0 ? error_code : EIO;
+    }
+    request->close_requested = 1;
+    netins_udp_v2_transport_server_connection_t *connection =
+        request->connection;
+    if (connection != NULL) {
+        netins_udp_server_wake(connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+}
+
+static int
+netins_udp_server_h3_parse_request_headers(
+    netins_udp_v2_transport_server_request_t *request,
+    const xqc_http_headers_t *headers)
+{
+    int parse_error = 0;
+    pthread_mutex_lock(&request->lock);
+    request->peer_header_count = 0;
+    for (size_t i = 0; i < headers->count; ++i) {
+        const xqc_http_header_t *header = &headers->headers[i];
+        if (netins_udp_server_h3_header_name_equals(header, ":method")) {
+            parse_error |= netins_udp_server_h3_copy_header_value(
+                request->method, sizeof(request->method), header) != 0;
+
+        } else if (netins_udp_server_h3_header_name_equals(header,
+                       ":path"))
+        {
+            parse_error |= netins_udp_server_h3_copy_header_value(
+                request->path, sizeof(request->path), header) != 0;
+
+        } else if (netins_udp_server_h3_header_name_equals(header,
+                       ":authority")
+            || netins_udp_server_h3_header_name_equals(header, "host"))
+        {
+            parse_error |= netins_udp_server_h3_copy_header_value(
+                request->authority, sizeof(request->authority), header) != 0;
+
+        } else if (netins_udp_server_h3_header_name_equals(header,
+                       "content-type"))
+        {
+            parse_error |= netins_udp_server_h3_copy_header_value(
+                request->request_content_type,
+                sizeof(request->request_content_type), header) != 0;
+
+        } else if (netins_udp_server_h3_header_name_equals(header,
+                       "content-length"))
+        {
+            uint64_t content_length = 0;
+            if (request->request_content_length_known
+                || netins_udp_server_h3_parse_content_length(header,
+                    &content_length) != 0)
+            {
+                parse_error = 1;
+            } else {
+                request->request_content_length_known = 1;
+                request->request_content_length = content_length;
+            }
+
+        } else if (header->name.iov_len > 0
+            && ((const unsigned char *)header->name.iov_base)[0] != ':'
+            && request->peer_header_count
+                < NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS)
+        {
+            netins_udp_v2_transport_h3_header_t *destination =
+                &request->peer_headers[request->peer_header_count];
+            if (header->name.iov_len < sizeof(destination->name)
+                && header->value.iov_len < sizeof(destination->value))
+            {
+                memcpy(destination->name, header->name.iov_base,
+                    header->name.iov_len);
+                destination->name[header->name.iov_len] = '\0';
+                memcpy(destination->value, header->value.iov_base,
+                    header->value.iov_len);
+                destination->value[header->value.iov_len] = '\0';
+                request->peer_header_count++;
+            }
+        }
+    }
+    if (request->method[0] == '\0' || request->path[0] == '\0') {
+        parse_error = 1;
+    }
+    if (request->request_content_type[0] == '\0') {
+        snprintf(request->request_content_type,
+            sizeof(request->request_content_type),
+            "application/octet-stream");
+    }
+    if (parse_error && request->stream_error == 0) {
+        request->stream_error = EPROTO;
+        request->close_requested = 1;
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    return parse_error ? -1 : 0;
+}
+
+static void
+netins_udp_server_queue_request(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    netins_udp_v2_transport_server_connection_t *connection =
+        request->connection;
+    if (connection == NULL) {
+        return;
+    }
+
+    int queued = 0;
+    pthread_mutex_lock(&connection->lock);
+    pthread_mutex_lock(&request->lock);
+    if (connection->state == NETINS_UDP_V2_TRANSPORT_CONNECTED
+        && !connection->close_requested
+        && !request->queued && !request->public_reference
+        && !request->close_requested
+        && connection->request_accept_count
+            < NETINS_UDP_SERVER_REQUEST_MAX)
+    {
+        request->queued = 1;
+        request->references++;
+        if (connection->request_accept_tail == NULL) {
+            connection->request_accept_head = request;
+        } else {
+            connection->request_accept_tail->accept_next = request;
+        }
+        connection->request_accept_tail = request;
+        connection->request_accept_count++;
+        queued = 1;
+    } else {
+        request->close_requested = 1;
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_cond_broadcast(&connection->state_cond);
+    pthread_mutex_unlock(&request->lock);
+    pthread_mutex_unlock(&connection->lock);
+    if (!queued) {
+        netins_udp_server_wake(connection->server);
+    }
+}
+
+static void
+netins_udp_server_request_drain_body(
+    netins_udp_v2_transport_server_request_t *request,
+    xqc_h3_request_t *xqc_request)
+{
+    for (;;) {
+        pthread_mutex_lock(&request->lock);
+        size_t available = NETINS_UDP_SERVER_REQUEST_RECV_MAX
+            - request->recv_queue_bytes;
+        if (available == 0 || request->recv_finished
+            || request->close_requested)
+        {
+            request->read_pending =
+                available == 0 && !request->recv_finished;
+            pthread_mutex_unlock(&request->lock);
+            return;
+        }
+        size_t capacity = available < NETINS_UDP_SERVER_REQUEST_RECV_CHUNK
+            ? available : NETINS_UDP_SERVER_REQUEST_RECV_CHUNK;
+        pthread_mutex_unlock(&request->lock);
+
+        netins_udp_server_buffer_t *buffer =
+            netins_udp_server_request_copy_buffer(NULL, capacity);
+        if (buffer == NULL) {
+            netins_udp_server_request_mark_error(request, ENOMEM);
+            return;
+        }
+        uint8_t fin = 0;
+        ssize_t received = xqc_h3_request_recv_body(xqc_request,
+            buffer->data, capacity, &fin);
+        if (received == -XQC_EAGAIN) {
+            free(buffer);
+            pthread_mutex_lock(&request->lock);
+            request->read_pending = 0;
+            pthread_mutex_unlock(&request->lock);
+            return;
+        }
+        if (received < 0) {
+            free(buffer);
+            netins_udp_server_request_mark_error(request, (int)-received);
+            return;
+        }
+
+        pthread_mutex_lock(&request->lock);
+        if (received > 0) {
+            buffer->length = (size_t)received;
+            if (request->recv_tail == NULL) {
+                request->recv_head = buffer;
+            } else {
+                request->recv_tail->next = buffer;
+            }
+            request->recv_tail = buffer;
+            request->recv_queue_bytes += (size_t)received;
+            request->bytes_received += (uint64_t)received;
+            if (request->request_content_length_known
+                && request->bytes_received
+                    > request->request_content_length)
+            {
+                request->stream_error = EPROTO;
+                request->close_requested = 1;
+            }
+        } else {
+            free(buffer);
+        }
+        if (fin) {
+            request->recv_finished = 1;
+            request->read_pending = 0;
+            if (request->request_content_length_known
+                && request->bytes_received
+                    != request->request_content_length)
+            {
+                request->stream_error = EPROTO;
+                request->close_requested = 1;
+            }
+        }
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+        if (fin || received == 0) {
+            return;
+        }
+    }
+}
+
+static int
+netins_udp_server_h3_request_create(xqc_h3_request_t *xqc_request,
+    void *request_user_data)
+{
+    (void)request_user_data;
+    netins_udp_v2_transport_server_connection_t *connection =
+        xqc_h3_get_conn_user_data_by_request(xqc_request);
+    if (connection == NULL) {
+        return XQC_ERROR;
+    }
+
+    netins_udp_v2_transport_server_request_t *request =
+        calloc(1, sizeof(*request));
+    if (request == NULL) {
+        (void)xqc_h3_request_close(xqc_request);
+        return XQC_OK;
+    }
+    int init_error = pthread_mutex_init(&request->lock, NULL);
+    if (init_error == 0) {
+        init_error = pthread_cond_init(&request->cond, NULL);
+        if (init_error != 0) {
+            pthread_mutex_destroy(&request->lock);
+        }
+    }
+    if (init_error != 0) {
+        free(request);
+        (void)xqc_h3_request_close(xqc_request);
+        return XQC_OK;
+    }
+
+    request->references = 1;
+    request->xqc_reference = 1;
+    request->connection_reference = 1;
+    request->connection = connection;
+    request->xqc_request = xqc_request;
+    request->stream_id = (uint64_t)xqc_h3_stream_id(xqc_request);
+    netins_udp_server_connection_retain(connection);
+
+    pthread_mutex_lock(&connection->lock);
+    if (connection->close_requested
+        || connection->state == NETINS_UDP_V2_TRANSPORT_CLOSING
+        || connection->state == NETINS_UDP_V2_TRANSPORT_CLOSED
+        || connection->state == NETINS_UDP_V2_TRANSPORT_ERROR
+        || connection->request_count >= NETINS_UDP_SERVER_REQUEST_MAX)
+    {
+        pthread_mutex_unlock(&connection->lock);
+        request->connection_reference = 0;
+        netins_udp_server_connection_release(connection);
+        netins_udp_server_request_release(request);
+        (void)xqc_h3_request_close(xqc_request);
+        return XQC_OK;
+    }
+    request->all_next = connection->requests;
+    connection->requests = request;
+    connection->request_count++;
+    pthread_mutex_unlock(&connection->lock);
+
+    xqc_h3_request_set_user_data(xqc_request, request);
+    return XQC_OK;
+}
+
+static int
+netins_udp_server_h3_request_read(xqc_h3_request_t *xqc_request,
+    xqc_request_notify_flag_t flags, void *user_data)
+{
+    netins_udp_v2_transport_server_request_t *request = user_data;
+    if (request == NULL) {
+        return XQC_ERROR;
+    }
+
+    if (flags & XQC_REQ_NOTIFY_READ_HEADER) {
+        uint8_t fin = 0;
+        xqc_http_headers_t *headers =
+            xqc_h3_request_recv_headers(xqc_request, &fin);
+        if (headers == NULL
+            || netins_udp_server_h3_parse_request_headers(request,
+                headers) != 0)
+        {
+            netins_udp_server_request_mark_error(request, EPROTO);
+            return XQC_OK;
+        }
+        pthread_mutex_lock(&request->lock);
+        request->headers_ready = 1;
+        if (fin) {
+            request->recv_finished = 1;
+            if (request->request_content_length_known
+                && request->request_content_length != 0)
+            {
+                request->stream_error = EPROTO;
+                request->close_requested = 1;
+            }
+        }
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+        netins_udp_server_queue_request(request);
+    }
+
+    if (flags & XQC_REQ_NOTIFY_READ_TRAILER) {
+        uint8_t fin = 0;
+        if (xqc_h3_request_recv_headers(xqc_request, &fin) == NULL) {
+            netins_udp_server_request_mark_error(request, EPROTO);
+            return XQC_OK;
+        }
+        if (fin) {
+            pthread_mutex_lock(&request->lock);
+            request->recv_finished = 1;
+            if (request->request_content_length_known
+                && request->bytes_received
+                    != request->request_content_length)
+            {
+                request->stream_error = EPROTO;
+                request->close_requested = 1;
+            }
+            pthread_cond_broadcast(&request->cond);
+            pthread_mutex_unlock(&request->lock);
+        }
+    }
+
+    if (flags & XQC_REQ_NOTIFY_READ_BODY) {
+        netins_udp_server_request_drain_body(request, xqc_request);
+    }
+    if (flags & XQC_REQ_NOTIFY_READ_EMPTY_FIN) {
+        pthread_mutex_lock(&request->lock);
+        request->recv_finished = 1;
+        if (request->request_content_length_known
+            && request->bytes_received
+                != request->request_content_length)
+        {
+            request->stream_error = EPROTO;
+            request->close_requested = 1;
+        }
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+    }
+    return XQC_OK;
+}
+
+static int
+netins_udp_server_h3_request_write(xqc_h3_request_t *xqc_request,
+    void *user_data)
+{
+    (void)xqc_request;
+    netins_udp_v2_transport_server_request_t *request = user_data;
+    if (request == NULL) {
+        return XQC_ERROR;
+    }
+    pthread_mutex_lock(&request->lock);
+    netins_udp_v2_transport_server_connection_t *connection =
+        request->connection;
+    if (connection != NULL) {
+        netins_udp_server_wake(connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    return XQC_OK;
+}
+
+static void
+netins_udp_server_h3_request_closing(xqc_h3_request_t *xqc_request,
+    xqc_int_t error, void *user_data)
+{
+    (void)xqc_request;
+    netins_udp_v2_transport_server_request_t *request = user_data;
+    if (request == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&request->lock);
+    if (error != 0 && request->stream_error == 0) {
+        request->stream_error = (int)error;
+    }
+    request->close_requested = 1;
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+}
+
+static int
+netins_udp_server_h3_request_close(xqc_h3_request_t *xqc_request,
+    void *user_data)
+{
+    (void)xqc_request;
+    netins_udp_v2_transport_server_request_t *request = user_data;
+    if (request == NULL) {
+        return XQC_OK;
+    }
+
+    pthread_mutex_lock(&request->lock);
+    netins_udp_v2_transport_server_connection_t *connection =
+        request->connection;
+    pthread_mutex_unlock(&request->lock);
+
+    int release_queue = 0;
+    if (connection != NULL) {
+        pthread_mutex_lock(&connection->lock);
+        release_queue = netins_udp_server_remove_request_queued_locked(
+            connection, request);
+        netins_udp_server_remove_request_locked(connection, request);
+        pthread_mutex_lock(&request->lock);
+        request->connection = NULL;
+        pthread_cond_broadcast(&connection->state_cond);
+        pthread_mutex_unlock(&request->lock);
+        pthread_mutex_unlock(&connection->lock);
+    }
+
+    pthread_mutex_lock(&request->lock);
+    int release_xqc = request->xqc_reference;
+    int release_connection = request->connection_reference;
+    request->xqc_reference = 0;
+    request->connection_reference = 0;
+    request->xqc_request = NULL;
+    request->close_notified = 1;
+    request->close_requested = 1;
+    if (request->stream_error == 0 && !request->recv_finished) {
+        request->stream_error = ECANCELED;
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+
+    if (release_queue) {
+        netins_udp_server_request_release(request);
+    }
+    if (release_xqc) {
+        netins_udp_server_request_release(request);
+    }
+    if (release_connection && connection != NULL) {
+        netins_udp_server_connection_release(connection);
+    }
+    return XQC_OK;
+}
+
+static void
+netins_udp_server_h3_set_header(xqc_http_header_t *header,
+    const char *name, const char *value)
+{
+    memset(header, 0, sizeof(*header));
+    header->name.iov_base = (void *)name;
+    header->name.iov_len = strlen(name);
+    header->value.iov_base = (void *)value;
+    header->value.iov_len = strlen(value);
+}
+
+static int
+netins_udp_server_request_send_headers(
+    netins_udp_v2_transport_server_request_t *request,
+    xqc_h3_request_t *xqc_request)
+{
+    pthread_mutex_lock(&request->lock);
+    netins_udp_v2_transport_h3_response_config_t response =
+        request->response;
+    pthread_mutex_unlock(&request->lock);
+
+    xqc_http_header_t fields[
+        3 + NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS];
+    size_t count = 0;
+    char status[4];
+    char content_length[32];
+    snprintf(status, sizeof(status), "%d", response.status);
+    netins_udp_server_h3_set_header(&fields[count++], ":status", status);
+    netins_udp_server_h3_set_header(&fields[count++], "content-type",
+        response.content_type);
+    if (!response.content_length_unknown) {
+        snprintf(content_length, sizeof(content_length), "%llu",
+            (unsigned long long)response.content_length);
+        netins_udp_server_h3_set_header(&fields[count++],
+            "content-length", content_length);
+    }
+    for (uint32_t i = 0; i < response.header_count; ++i) {
+        netins_udp_server_h3_set_header(&fields[count++],
+            response.headers[i].name, response.headers[i].value);
+    }
+
+    xqc_http_headers_t headers;
+    memset(&headers, 0, sizeof(headers));
+    headers.headers = fields;
+    headers.count = count;
+    headers.capacity = count;
+    uint8_t fin = !response.content_length_unknown
+        && response.content_length == 0;
+    ssize_t sent = xqc_h3_request_send_headers(xqc_request, &headers, fin);
+    if (sent == -XQC_EAGAIN) {
+        return 0;
+    }
+    if (sent < 0) {
+        netins_udp_server_request_mark_error(request, (int)-sent);
+        return -1;
+    }
+
+    pthread_mutex_lock(&request->lock);
+    request->response_headers_sent = 1;
+    if (fin) {
+        request->send_fin_requested = 1;
+        request->send_finished = 1;
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    return 1;
+}
+
+static int
+netins_udp_server_request_drive_send(
+    netins_udp_v2_transport_server_request_t *request,
+    xqc_h3_request_t *xqc_request)
+{
+    int activity = 0;
+    for (;;) {
+        pthread_mutex_lock(&request->lock);
+        if (request->send_finished || request->close_requested
+            || !request->response_headers_sent)
+        {
+            pthread_mutex_unlock(&request->lock);
+            return activity;
+        }
+        netins_udp_server_buffer_t *buffer = request->send_head;
+        int finish_only =
+            buffer == NULL && request->send_fin_requested;
+        if (buffer == NULL && !finish_only) {
+            pthread_mutex_unlock(&request->lock);
+            return activity;
+        }
+        size_t remaining = buffer != NULL
+            ? buffer->length - buffer->offset : 0;
+        int fin = buffer != NULL && request->send_fin_requested
+            && buffer == request->send_tail;
+        unsigned char *data = buffer != NULL
+            ? buffer->data + buffer->offset : NULL;
+        pthread_mutex_unlock(&request->lock);
+
+        ssize_t sent = finish_only
+            ? xqc_h3_request_finish(xqc_request)
+            : xqc_h3_request_send_body(xqc_request, data, remaining,
+                (uint8_t)fin);
+        if (sent == -XQC_EAGAIN) {
+            return activity;
+        }
+        if (sent < 0) {
+            netins_udp_server_request_mark_error(request, (int)-sent);
+            return activity;
+        }
+
+        pthread_mutex_lock(&request->lock);
+        if (finish_only) {
+            request->send_finished = 1;
+
+        } else if (sent > 0) {
+            buffer->offset += (size_t)sent;
+            request->send_queue_bytes -= (size_t)sent;
+            request->bytes_sent += (uint64_t)sent;
+            if (buffer->offset == buffer->length) {
+                request->send_head = buffer->next;
+                if (request->send_head == NULL) {
+                    request->send_tail = NULL;
+                }
+                free(buffer);
+            }
+            if (fin && request->send_head == NULL) {
+                request->send_finished = 1;
+            }
+
+        } else {
+            request->send_finished = 1;
+        }
+        int finished = request->send_finished;
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+        activity = 1;
+        if (finish_only || sent == 0 || (fin && finished)) {
+            return activity;
+        }
+    }
+}
+
+static int
+netins_udp_server_request_should_close_locked(
+    const netins_udp_v2_transport_server_request_t *request)
+{
+    if (request->close_requested) {
+        return 1;
+    }
+    if (!request->public_close_requested) {
+        return 0;
+    }
+    int response_complete_queued = request->response_configured
+        && (request->response.content_length_unknown
+            ? request->send_fin_requested
+            : request->bytes_accepted
+                == request->response.content_length);
+    /*
+     * xqc_h3_request_close() actively resets the QUIC stream. Once a complete
+     * response is queued, leave the stream to finish naturally so the queued
+     * FIN/data are not replaced by RESET_STREAM.
+     */
+    return !response_complete_queued || request->stream_error != 0;
+}
+
+static int
+netins_udp_server_process_request(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    pthread_mutex_lock(&request->lock);
+    xqc_h3_request_t *xqc_request = request->xqc_request;
+    int terminal = request->close_notified || xqc_request == NULL;
+    int close_requested =
+        netins_udp_server_request_should_close_locked(request);
+    int close_sent = request->close_sent;
+    int response_configured = request->response_configured;
+    int response_headers_sent = request->response_headers_sent;
+    int read_pending = request->read_pending;
+    int public_close_requested = request->public_close_requested;
+    pthread_mutex_unlock(&request->lock);
+    if (terminal) {
+        return 0;
+    }
+
+    if (close_requested && !close_sent) {
+        pthread_mutex_lock(&request->lock);
+        request->close_sent = 1;
+        pthread_mutex_unlock(&request->lock);
+        int result = xqc_h3_request_close(xqc_request);
+        if (result != XQC_OK) {
+            netins_udp_server_request_mark_error(request,
+                result < 0 ? -result : result);
+        }
+        return 1;
+    }
+
+    int activity = 0;
+    if (read_pending && !public_close_requested) {
+        netins_udp_server_request_drain_body(request, xqc_request);
+        pthread_mutex_lock(&request->lock);
+        close_requested =
+            netins_udp_server_request_should_close_locked(request);
+        close_sent = request->close_sent;
+        pthread_mutex_unlock(&request->lock);
+        if (close_requested && !close_sent) {
+            pthread_mutex_lock(&request->lock);
+            request->close_sent = 1;
+            pthread_mutex_unlock(&request->lock);
+            int result = xqc_h3_request_close(xqc_request);
+            if (result != XQC_OK) {
+                netins_udp_server_request_mark_error(request,
+                    result < 0 ? -result : result);
+            }
+            return 1;
+        }
+    }
+    if (response_configured && !response_headers_sent) {
+        int header_result =
+            netins_udp_server_request_send_headers(request, xqc_request);
+        if (header_result < 0) {
+            return 1;
+        }
+        if (header_result == 0) {
+            return activity;
+        }
+        activity = 1;
+    }
+    if (response_configured) {
+        activity |= netins_udp_server_request_drive_send(request,
+            xqc_request);
+    }
+
+    pthread_mutex_lock(&request->lock);
+    close_requested =
+        netins_udp_server_request_should_close_locked(request);
+    close_sent = request->close_sent;
+    pthread_mutex_unlock(&request->lock);
+    if (close_requested && !close_sent) {
+        pthread_mutex_lock(&request->lock);
+        request->close_sent = 1;
+        pthread_mutex_unlock(&request->lock);
+        int result = xqc_h3_request_close(xqc_request);
+        if (result != XQC_OK) {
+            netins_udp_server_request_mark_error(request,
+                result < 0 ? -result : result);
+        }
+        activity = 1;
+    }
+    return activity;
+}
+
+static void
+netins_udp_server_release_request_snapshot(
+    netins_udp_v2_transport_server_request_t **requests, size_t count)
+{
+    if (requests == NULL) {
+        return;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        netins_udp_server_request_release(requests[i]);
+    }
+    free(requests);
+}
+
+static netins_udp_v2_transport_server_request_t **
+netins_udp_server_request_snapshot(
+    netins_udp_v2_transport_server_t *server, size_t *out_count)
+{
+    *out_count = 0;
+    pthread_mutex_lock(&server->lock);
+    size_t capacity = 0;
+    for (netins_udp_v2_transport_server_connection_t *connection =
+             server->connections;
+         connection != NULL; connection = connection->all_next)
+    {
+        pthread_mutex_lock(&connection->lock);
+        capacity += connection->request_count;
+        pthread_mutex_unlock(&connection->lock);
+    }
+    netins_udp_v2_transport_server_request_t **requests =
+        capacity > 0 ? calloc(capacity, sizeof(*requests)) : NULL;
+    if (capacity > 0 && requests == NULL) {
+        pthread_mutex_unlock(&server->lock);
+        return NULL;
+    }
+    for (netins_udp_v2_transport_server_connection_t *connection =
+             server->connections;
+         connection != NULL && *out_count < capacity;
+         connection = connection->all_next)
+    {
+        pthread_mutex_lock(&connection->lock);
+        for (netins_udp_v2_transport_server_request_t *request =
+                 connection->requests;
+             request != NULL && *out_count < capacity;
+             request = request->all_next)
+        {
+            netins_udp_server_request_retain(request);
+            requests[(*out_count)++] = request;
+        }
+        pthread_mutex_unlock(&connection->lock);
+    }
+    pthread_mutex_unlock(&server->lock);
+    return requests;
+}
+
+static void
+netins_udp_server_process_requests(
+    netins_udp_v2_transport_server_t *server)
+{
+    size_t count = 0;
+    netins_udp_v2_transport_server_request_t **requests =
+        netins_udp_server_request_snapshot(server, &count);
+    int activity = 0;
+    for (size_t i = 0; i < count; ++i) {
+        activity |= netins_udp_server_process_request(requests[i]);
+    }
+    netins_udp_server_release_request_snapshot(requests, count);
+    if (activity) {
+        xqc_engine_main_logic(server->engine);
+    }
 }
 
 static int
@@ -900,13 +1889,15 @@ netins_udp_server_create_engine(netins_udp_v2_transport_server_t *server)
     h3_callbacks.h3c_cbs.h3_conn_handshake_finished =
         netins_udp_server_h3_handshake_finished;
     h3_callbacks.h3r_cbs.h3_request_create_notify =
-        netins_udp_server_h3_request_noop;
+        netins_udp_server_h3_request_create;
     h3_callbacks.h3r_cbs.h3_request_close_notify =
-        netins_udp_server_h3_request_noop;
+        netins_udp_server_h3_request_close;
     h3_callbacks.h3r_cbs.h3_request_read_notify =
-        netins_udp_server_h3_request_read_noop;
+        netins_udp_server_h3_request_read;
     h3_callbacks.h3r_cbs.h3_request_write_notify =
-        netins_udp_server_h3_request_noop;
+        netins_udp_server_h3_request_write;
+    h3_callbacks.h3r_cbs.h3_request_closing_notify =
+        netins_udp_server_h3_request_closing;
     if (xqc_h3_ctx_init(server->engine, &h3_callbacks) != XQC_OK) {
         xqc_engine_destroy(server->engine);
         server->engine = NULL;
@@ -935,6 +1926,18 @@ netins_udp_server_fail_runtime(netins_udp_v2_transport_server_t *server,
         connection->state = NETINS_UDP_V2_TRANSPORT_ERROR;
         netins_udp_server_connection_set_error_locked(connection, error_code,
             message);
+        for (netins_udp_v2_transport_server_request_t *request =
+                 connection->requests;
+             request != NULL; request = request->all_next)
+        {
+            pthread_mutex_lock(&request->lock);
+            if (request->stream_error == 0) {
+                request->stream_error = error_code;
+            }
+            request->close_requested = 1;
+            pthread_cond_broadcast(&request->cond);
+            pthread_mutex_unlock(&request->lock);
+        }
         pthread_cond_broadcast(&connection->state_cond);
         pthread_mutex_unlock(&connection->lock);
         if (connection->observer != NULL) {
@@ -1173,6 +2176,7 @@ netins_udp_server_thread_main(void *argument)
         }
 
         netins_udp_server_drive_connection_closes(server);
+        netins_udp_server_process_requests(server);
         uint64_t now_us = netins_udp_server_monotonic_us();
         int timeout_ms = netins_udp_server_poll_timeout_ms(server, now_us);
         struct pollfd descriptors[2] = {
@@ -1234,6 +2238,57 @@ netins_udp_server_thread_main(void *argument)
 }
 
 static void
+netins_udp_server_force_detach_requests(
+    netins_udp_v2_transport_server_connection_t *connection)
+{
+    pthread_mutex_lock(&connection->lock);
+    netins_udp_v2_transport_server_request_t *request =
+        connection->requests;
+    connection->requests = NULL;
+    connection->request_accept_head = NULL;
+    connection->request_accept_tail = NULL;
+    connection->request_count = 0;
+    connection->request_accept_count = 0;
+    pthread_cond_broadcast(&connection->state_cond);
+    pthread_mutex_unlock(&connection->lock);
+
+    while (request != NULL) {
+        netins_udp_v2_transport_server_request_t *next =
+            request->all_next;
+        pthread_mutex_lock(&request->lock);
+        int release_queue = request->queued;
+        int release_xqc = request->xqc_reference;
+        int release_connection = request->connection_reference;
+        request->queued = 0;
+        request->xqc_reference = 0;
+        request->connection_reference = 0;
+        request->all_next = NULL;
+        request->accept_next = NULL;
+        request->connection = NULL;
+        request->xqc_request = NULL;
+        request->close_requested = 1;
+        request->close_notified = 1;
+        if (request->stream_error == 0
+            && (!request->send_finished || !request->recv_finished))
+        {
+            request->stream_error = ECANCELED;
+        }
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+        if (release_queue) {
+            netins_udp_server_request_release(request);
+        }
+        if (release_xqc) {
+            netins_udp_server_request_release(request);
+        }
+        if (release_connection) {
+            netins_udp_server_connection_release(connection);
+        }
+        request = next;
+    }
+}
+
+static void
 netins_udp_server_destroy(netins_udp_v2_transport_server_t *server)
 {
     pthread_mutex_lock(&server->lock);
@@ -1253,9 +2308,9 @@ netins_udp_server_destroy(netins_udp_v2_transport_server_t *server)
 
     /*
      * Engine destruction normally runs every H3/refuse callback. Keep a
-     * defensive sweep for a connection that never reached an ALPN callback.
-     * No public accepted handle can remain when the server reference reaches
-     * zero, so only the XQUIC and optional accept-queue references exist here.
+     * defensive sweep for objects that never reached an XQUIC close callback.
+     * Public request handles may outlive their accepted connection handle, so
+     * detach them before the shared engine/server is released.
      */
     netins_udp_v2_transport_server_connection_t *connection =
         server->connections;
@@ -1267,6 +2322,7 @@ netins_udp_server_destroy(netins_udp_v2_transport_server_t *server)
         netins_udp_v2_transport_server_connection_t *next =
             connection->all_next;
         connection->all_next = NULL;
+        netins_udp_server_force_detach_requests(connection);
         pthread_mutex_lock(&connection->lock);
         int release_queue = connection->queued;
         connection->queued = 0;
@@ -1505,7 +2561,7 @@ netins_udp_v2_transport_server_accept(
 }
 
 void
-netins_udp_v2_transport_server_request_close(
+netins_udp_v2_transport_server_begin_close(
     netins_udp_v2_transport_server_t *server)
 {
     if (server == NULL) {
@@ -1540,7 +2596,7 @@ netins_udp_v2_transport_server_close(
     if (server == NULL) {
         return;
     }
-    netins_udp_v2_transport_server_request_close(server);
+    netins_udp_v2_transport_server_begin_close(server);
     netins_udp_server_release(server);
 }
 
@@ -1618,6 +2674,16 @@ netins_udp_v2_transport_server_connection_request_shutdown(
         }
         connection->close_requested = 1;
     }
+    for (netins_udp_v2_transport_server_request_t *request =
+             connection->requests;
+         request != NULL; request = request->all_next)
+    {
+        pthread_mutex_lock(&request->lock);
+        request->close_requested = 1;
+        pthread_cond_broadcast(&request->cond);
+        pthread_mutex_unlock(&request->lock);
+    }
+    pthread_cond_broadcast(&connection->state_cond);
     pthread_mutex_unlock(&connection->lock);
     netins_udp_server_wake(connection->server);
 }
@@ -1652,4 +2718,506 @@ netins_udp_v2_transport_server_connection_close(
 
     netins_udp_server_connection_release(connection);
     netins_udp_server_release(server);
+}
+
+int
+netins_udp_v2_transport_server_request_accept(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms, int wait_forever,
+    netins_udp_v2_transport_server_request_t **out_request)
+{
+    if (connection == NULL || out_request == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *out_request = NULL;
+    struct timespec deadline;
+    if (!wait_forever && timeout_ms > 0
+        && netins_udp_server_make_deadline(timeout_ms, &deadline) != 0)
+    {
+        return -1;
+    }
+
+    pthread_mutex_lock(&connection->lock);
+    int wait_result = 0;
+    while (connection->request_accept_head == NULL
+        && connection->state == NETINS_UDP_V2_TRANSPORT_CONNECTED
+        && !connection->close_requested)
+    {
+        if (!wait_forever && timeout_ms == 0) {
+            break;
+        }
+        wait_result = wait_forever
+            ? pthread_cond_wait(&connection->state_cond, &connection->lock)
+            : pthread_cond_timedwait(&connection->state_cond,
+                &connection->lock, &deadline);
+        if (wait_result != 0) {
+            break;
+        }
+    }
+
+    netins_udp_v2_transport_server_request_t *request =
+        connection->state == NETINS_UDP_V2_TRANSPORT_CONNECTED
+            && !connection->close_requested
+        ? connection->request_accept_head : NULL;
+    if (request != NULL) {
+        connection->request_accept_head = request->accept_next;
+        if (connection->request_accept_head == NULL) {
+            connection->request_accept_tail = NULL;
+        }
+        request->accept_next = NULL;
+        if (connection->request_accept_count > 0) {
+            connection->request_accept_count--;
+        }
+        pthread_mutex_lock(&request->lock);
+        request->queued = 0;
+        request->public_reference = 1;
+        pthread_mutex_unlock(&request->lock);
+        pthread_mutex_unlock(&connection->lock);
+        *out_request = request; /* Queue reference becomes public ref. */
+        return 0;
+    }
+
+    int error_code;
+    if (connection->state == NETINS_UDP_V2_TRANSPORT_ERROR) {
+        error_code = connection->last_error_code != 0
+            ? connection->last_error_code : EIO;
+    } else if (connection->state == NETINS_UDP_V2_TRANSPORT_CLOSING
+        || connection->state == NETINS_UDP_V2_TRANSPORT_CLOSED
+        || connection->close_requested)
+    {
+        error_code = ECANCELED;
+    } else if (wait_result == ETIMEDOUT) {
+        error_code = ETIMEDOUT;
+    } else if (wait_result != 0) {
+        error_code = wait_result;
+    } else if (timeout_ms > 0) {
+        error_code = ETIMEDOUT;
+    } else {
+        error_code = EAGAIN;
+    }
+    pthread_mutex_unlock(&connection->lock);
+    errno = error_code;
+    return -1;
+}
+
+int
+netins_udp_v2_transport_server_request_set_response(
+    netins_udp_v2_transport_server_request_t *request,
+    const netins_udp_v2_transport_h3_response_config_t *config)
+{
+    if (request == NULL || config == NULL
+        || config->status < 200 || config->status > 599
+        || config->header_count > NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS
+        || memchr(config->content_type, '\0',
+            sizeof(config->content_type)) == NULL
+        || config->content_type[0] == '\0')
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    for (uint32_t i = 0; i < config->header_count; ++i) {
+        if (memchr(config->headers[i].name, '\0',
+                sizeof(config->headers[i].name)) == NULL
+            || config->headers[i].name[0] == '\0'
+            || memchr(config->headers[i].value, '\0',
+                sizeof(config->headers[i].value)) == NULL)
+        {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    pthread_mutex_lock(&request->lock);
+    int error_code = 0;
+    if (request->response_configured) {
+        error_code = EALREADY;
+    } else if (request->public_close_requested
+        || request->close_requested || request->close_notified
+        || request->xqc_request == NULL || request->connection == NULL)
+    {
+        error_code = ECANCELED;
+    } else {
+        request->response = *config;
+        request->response_configured = 1;
+    }
+    if (error_code == 0 && request->connection != NULL) {
+        netins_udp_server_wake(request->connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    if (error_code != 0) {
+        errno = error_code;
+        return -1;
+    }
+    return 0;
+}
+
+int64_t
+netins_udp_v2_transport_server_request_send(
+    netins_udp_v2_transport_server_request_t *request,
+    const void *data, size_t length, int fin, uint32_t timeout_ms,
+    int wait_forever)
+{
+    if (request == NULL || (length > 0 && data == NULL)
+        || (fin != 0 && fin != 1))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    struct timespec deadline;
+    if (!wait_forever && timeout_ms > 0
+        && netins_udp_server_make_deadline(timeout_ms, &deadline) != 0)
+    {
+        return -1;
+    }
+
+    pthread_mutex_lock(&request->lock);
+    int error_code = 0;
+    if (!request->response_configured) {
+        error_code = EINVAL;
+    } else if (request->send_fin_requested || request->send_finished) {
+        error_code = EPIPE;
+    } else if (request->public_close_requested
+        || request->close_requested || request->close_notified
+        || request->xqc_request == NULL || request->connection == NULL)
+    {
+        error_code = ECANCELED;
+    } else if (request->stream_error != 0) {
+        error_code = EIO;
+    }
+    if (error_code != 0) {
+        pthread_mutex_unlock(&request->lock);
+        errno = error_code;
+        return -1;
+    }
+
+    int length_unknown = request->response.content_length_unknown;
+    if (length_unknown) {
+        if ((uint64_t)length > UINT64_MAX - request->bytes_accepted) {
+            pthread_mutex_unlock(&request->lock);
+            errno = EOVERFLOW;
+            return -1;
+        }
+    } else {
+        if (request->bytes_accepted > request->response.content_length) {
+            pthread_mutex_unlock(&request->lock);
+            errno = EIO;
+            return -1;
+        }
+        uint64_t remaining = request->response.content_length
+            - request->bytes_accepted;
+        if ((uint64_t)length > remaining
+            || (fin && (uint64_t)length != remaining)
+            || (!fin && remaining != 0
+                && (uint64_t)length == remaining))
+        {
+            pthread_mutex_unlock(&request->lock);
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    int wait_result = 0;
+    while (length > 0
+        && request->send_queue_bytes >= NETINS_UDP_SERVER_REQUEST_SEND_MAX
+        && request->stream_error == 0
+        && !request->public_close_requested
+        && !request->close_requested && !request->close_notified)
+    {
+        if (!wait_forever && timeout_ms == 0) {
+            break;
+        }
+        wait_result = wait_forever
+            ? pthread_cond_wait(&request->cond, &request->lock)
+            : pthread_cond_timedwait(&request->cond, &request->lock,
+                &deadline);
+        if (wait_result != 0) {
+            break;
+        }
+    }
+    if (request->stream_error != 0) {
+        error_code = EIO;
+    } else if (request->public_close_requested
+        || request->close_requested || request->close_notified
+        || request->xqc_request == NULL || request->connection == NULL)
+    {
+        error_code = ECANCELED;
+    } else if (wait_result == ETIMEDOUT) {
+        error_code = ETIMEDOUT;
+    } else if (wait_result != 0) {
+        error_code = wait_result;
+    } else if (length > 0
+        && request->send_queue_bytes >= NETINS_UDP_SERVER_REQUEST_SEND_MAX)
+    {
+        error_code = timeout_ms > 0 ? ETIMEDOUT : EAGAIN;
+    }
+    if (error_code != 0) {
+        pthread_mutex_unlock(&request->lock);
+        errno = error_code;
+        return -1;
+    }
+
+    size_t available = NETINS_UDP_SERVER_REQUEST_SEND_MAX
+        - request->send_queue_bytes;
+    size_t accepted = length < available ? length : available;
+    if (accepted > 0) {
+        netins_udp_server_buffer_t *buffer =
+            netins_udp_server_request_copy_buffer(data, accepted);
+        if (buffer == NULL) {
+            pthread_mutex_unlock(&request->lock);
+            errno = ENOMEM;
+            return -1;
+        }
+        if (request->send_tail == NULL) {
+            request->send_head = buffer;
+        } else {
+            request->send_tail->next = buffer;
+        }
+        request->send_tail = buffer;
+        request->send_queue_bytes += accepted;
+        request->bytes_accepted += (uint64_t)accepted;
+    }
+    if (length_unknown) {
+        if (fin && accepted == length) {
+            request->send_fin_requested = 1;
+        }
+    } else if (request->bytes_accepted
+        == request->response.content_length)
+    {
+        request->send_fin_requested = 1;
+    }
+    if (request->connection != NULL) {
+        netins_udp_server_wake(request->connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    return (int64_t)accepted;
+}
+
+int64_t
+netins_udp_v2_transport_server_request_recv(
+    netins_udp_v2_transport_server_request_t *request,
+    void *data, size_t length, int *fin, int peek,
+    uint32_t timeout_ms, int wait_forever)
+{
+    if (request == NULL || fin == NULL
+        || (length > 0 && data == NULL))
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    *fin = 0;
+    struct timespec deadline;
+    if (!wait_forever && timeout_ms > 0
+        && netins_udp_server_make_deadline(timeout_ms, &deadline) != 0)
+    {
+        return -1;
+    }
+
+    pthread_mutex_lock(&request->lock);
+    int wait_result = 0;
+    while (request->recv_head == NULL && !request->recv_finished
+        && request->stream_error == 0
+        && !request->public_close_requested && !request->close_requested
+        && !request->close_notified)
+    {
+        if (!wait_forever && timeout_ms == 0) {
+            break;
+        }
+        wait_result = wait_forever
+            ? pthread_cond_wait(&request->cond, &request->lock)
+            : pthread_cond_timedwait(&request->cond, &request->lock,
+                &deadline);
+        if (wait_result != 0) {
+            break;
+        }
+    }
+
+    if (request->recv_head == NULL) {
+        if (request->recv_finished) {
+            *fin = 1;
+            pthread_mutex_unlock(&request->lock);
+            return 0;
+        }
+        int error_code;
+        if (request->stream_error != 0) {
+            error_code = EIO;
+        } else if (request->public_close_requested
+            || request->close_requested || request->close_notified)
+        {
+            error_code = ECANCELED;
+        } else if (wait_result == ETIMEDOUT) {
+            error_code = ETIMEDOUT;
+        } else if (wait_result != 0) {
+            error_code = wait_result;
+        } else {
+            error_code = timeout_ms > 0 ? ETIMEDOUT : EAGAIN;
+        }
+        pthread_mutex_unlock(&request->lock);
+        errno = error_code;
+        return -1;
+    }
+    if (length == 0) {
+        pthread_mutex_unlock(&request->lock);
+        errno = ENOBUFS;
+        return -1;
+    }
+
+    if (peek) {
+        size_t copied = 0;
+        netins_udp_server_buffer_t *item = request->recv_head;
+        size_t item_offset = item->offset;
+        while (copied < length && item != NULL) {
+            size_t available = item->length - item_offset;
+            size_t amount = available < length - copied
+                ? available : length - copied;
+            memcpy((unsigned char *)data + copied,
+                item->data + item_offset, amount);
+            copied += amount;
+            item_offset += amount;
+            if (item_offset == item->length) {
+                item = item->next;
+                if (item != NULL) {
+                    item_offset = item->offset;
+                }
+            }
+        }
+        *fin = item == NULL && request->recv_finished;
+        pthread_mutex_unlock(&request->lock);
+        return (int64_t)copied;
+    }
+
+    size_t copied = 0;
+    while (copied < length && request->recv_head != NULL) {
+        netins_udp_server_buffer_t *item = request->recv_head;
+        size_t available = item->length - item->offset;
+        size_t amount = available < length - copied
+            ? available : length - copied;
+        memcpy((unsigned char *)data + copied,
+            item->data + item->offset, amount);
+        item->offset += amount;
+        copied += amount;
+        request->recv_queue_bytes -= amount;
+        request->bytes_delivered += (uint64_t)amount;
+        if (item->offset == item->length) {
+            request->recv_head = item->next;
+            if (request->recv_head == NULL) {
+                request->recv_tail = NULL;
+            }
+            free(item);
+        }
+    }
+    *fin = request->recv_head == NULL && request->recv_finished;
+    request->read_pending = !request->recv_finished;
+    if (request->connection != NULL) {
+        netins_udp_server_wake(request->connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+    return (int64_t)copied;
+}
+
+int
+netins_udp_v2_transport_server_request_get_info(
+    netins_udp_v2_transport_server_request_t *request,
+    netins_udp_v2_transport_h3_info_t *out)
+{
+    if (request == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    pthread_mutex_lock(&request->lock);
+    memset(out, 0, sizeof(*out));
+    out->stream_id = request->stream_id;
+    out->response_status = request->response_configured
+        ? request->response.status : 0;
+    out->request_headers_ready = request->headers_ready;
+    out->response_headers_ready = request->response_headers_sent;
+    out->send_finished = request->send_finished;
+    out->receive_finished = request->recv_finished;
+    out->stream_error = request->stream_error;
+    out->bytes_accepted = request->bytes_accepted;
+    out->bytes_delivered = request->bytes_delivered;
+    snprintf(out->request_method, sizeof(out->request_method), "%s",
+        request->method);
+    snprintf(out->request_path, sizeof(out->request_path), "%s",
+        request->path);
+    snprintf(out->request_authority, sizeof(out->request_authority), "%s",
+        request->authority);
+    snprintf(out->request_content_type,
+        sizeof(out->request_content_type), "%s",
+        request->request_content_type);
+    out->request_content_length_known =
+        request->request_content_length_known;
+    out->request_content_length = request->request_content_length;
+    if (request->response_configured) {
+        out->response_content_length_known =
+            !request->response.content_length_unknown;
+        out->response_content_length = request->response.content_length;
+        snprintf(out->response_content_type,
+            sizeof(out->response_content_type), "%s",
+            request->response.content_type);
+    }
+    out->peer_header_count = request->peer_header_count;
+    memcpy(out->peer_headers, request->peer_headers,
+        sizeof(out->peer_headers));
+    pthread_mutex_unlock(&request->lock);
+    return 0;
+}
+
+void
+netins_udp_v2_transport_server_request_close_async(
+    netins_udp_v2_transport_server_request_t *request)
+{
+    if (request == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&request->lock);
+    request->public_close_requested = 1;
+    if (request->connection != NULL) {
+        netins_udp_server_wake(request->connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+}
+
+void
+netins_udp_v2_transport_server_request_close(
+    netins_udp_v2_transport_server_request_t *request,
+    uint32_t timeout_ms)
+{
+    if (request == NULL) {
+        return;
+    }
+    struct timespec deadline;
+    int have_deadline = timeout_ms > 0
+        && netins_udp_server_make_deadline(timeout_ms, &deadline) == 0;
+
+    pthread_mutex_lock(&request->lock);
+    request->public_close_requested = 1;
+    if (request->connection != NULL) {
+        netins_udp_server_wake(request->connection->server);
+    }
+    pthread_cond_broadcast(&request->cond);
+    pthread_mutex_unlock(&request->lock);
+
+    if (have_deadline) {
+        pthread_mutex_lock(&request->lock);
+        while (!request->close_notified && request->connection != NULL) {
+            int wait_result = pthread_cond_timedwait(&request->cond,
+                &request->lock, &deadline);
+            if (wait_result != 0) {
+                break;
+            }
+        }
+        pthread_mutex_unlock(&request->lock);
+    }
+
+    pthread_mutex_lock(&request->lock);
+    int release_public = request->public_reference;
+    request->public_reference = 0;
+    pthread_mutex_unlock(&request->lock);
+    if (release_public) {
+        netins_udp_server_request_release(request);
+    }
 }

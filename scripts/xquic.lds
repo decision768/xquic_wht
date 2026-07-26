@@ -170,6 +170,9 @@ XQUIC_VERS_1.0 {
         netins_udp_get_opt;
         netins_udp_tls_config_init;
         netins_udp_connect;
+        netins_udp_listen;
+        netins_udp_accept;
+        netins_udp_shutdown;
         netins_udp_send;
         netins_udp_recv;
         netins_udp_get_state;
@@ -180,6 +183,8 @@ XQUIC_VERS_1.0 {
         netins_udp_h3_response_config_init;
         netins_udp_h3_response_config_add_header;
         netins_udp_h3_request_open;
+        netins_udp_h3_request_accept;
+        netins_udp_h3_request_set_response;
         netins_udp_h3_request_send;
         netins_udp_h3_request_recv;
         netins_udp_h3_request_get_info;

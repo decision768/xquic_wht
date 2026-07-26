@@ -42,7 +42,11 @@ struct netins_udp_h3_request_s {
     int closing;
 
     netins_udp_v2_transport_request_t *transport;
+    netins_udp_v2_transport_server_request_t *server_transport;
+    int server_side;
     netins_udp_h3_request_config_t config;
+    netins_udp_h3_response_config_t response;
+    int response_set;
     int nonblock;
     uint32_t send_timeout_ms;
     uint32_t recv_timeout_ms;
@@ -217,6 +221,39 @@ netins_udp_v2_h3_request_config_error(
 }
 
 static int
+netins_udp_v2_h3_response_config_error(
+    const netins_udp_h3_response_config_t *config,
+    const char **message)
+{
+    if (config == NULL) {
+        *message = "H3 response configuration must not be NULL";
+        return EINVAL;
+    }
+    if (config->struct_size != sizeof(*config)
+        || config->api_version != NETINS_UDP_API_VERSION)
+    {
+        *message = "H3 response configuration version is invalid";
+        return EPROTO;
+    }
+    if (config->status < 200 || config->status > 599
+        || !netins_udp_v2_h3_fixed_string_valid(config->content_type,
+            sizeof(config->content_type))
+        || config->content_type[0] == '\0'
+        || config->header_count > NETINS_UDP_MAX_H3_HEADERS)
+    {
+        *message = "H3 response configuration fields are invalid";
+        return EINVAL;
+    }
+    for (uint32_t i = 0; i < config->header_count; ++i) {
+        if (!netins_udp_v2_h3_header_valid(&config->headers[i])) {
+            *message = "an H3 response header is invalid or managed";
+            return EINVAL;
+        }
+    }
+    return 0;
+}
+
+static int
 netins_udp_v2_h3_config_add_header(
     uint32_t struct_size, uint32_t api_version,
     uint32_t *header_count, netins_udp_h3_header_t *headers,
@@ -271,8 +308,12 @@ netins_udp_v2_h3_sync_transport_error(
     netins_udp_h3_request_t *request)
 {
     netins_udp_v2_transport_h3_info_t info;
-    if (netins_udp_v2_transport_h3_request_get_info(
-            request->transport, &info) == 0
+    int result = request->server_side
+        ? netins_udp_v2_transport_server_request_get_info(
+            request->server_transport, &info)
+        : netins_udp_v2_transport_h3_request_get_info(
+            request->transport, &info);
+    if (result == 0
         && info.stream_error != 0)
     {
         pthread_mutex_lock(&request->lock);
@@ -280,6 +321,73 @@ netins_udp_v2_h3_sync_transport_error(
             "underlying HTTP/3 request failed");
         pthread_mutex_unlock(&request->lock);
     }
+}
+
+static netins_udp_h3_request_t *
+netins_udp_v2_h3_request_allocate(int nonblock,
+    uint32_t send_timeout_ms, uint32_t recv_timeout_ms,
+    uint32_t close_timeout_ms, int *out_error)
+{
+    netins_udp_h3_request_t *request = calloc(1, sizeof(*request));
+    if (request == NULL) {
+        *out_error = ENOMEM;
+        return NULL;
+    }
+    int init_error = pthread_mutex_init(&request->lock, NULL);
+    if (init_error == 0) {
+        init_error = pthread_mutex_init(&request->send_lock, NULL);
+        if (init_error != 0) {
+            pthread_mutex_destroy(&request->lock);
+        }
+    }
+    if (init_error == 0) {
+        init_error = pthread_mutex_init(&request->recv_lock, NULL);
+        if (init_error != 0) {
+            pthread_mutex_destroy(&request->send_lock);
+            pthread_mutex_destroy(&request->lock);
+        }
+    }
+    if (init_error == 0) {
+        init_error = pthread_cond_init(&request->idle_cond, NULL);
+        if (init_error != 0) {
+            pthread_mutex_destroy(&request->recv_lock);
+            pthread_mutex_destroy(&request->send_lock);
+            pthread_mutex_destroy(&request->lock);
+        }
+    }
+    if (init_error != 0) {
+        free(request);
+        *out_error = init_error;
+        return NULL;
+    }
+    if (netins_udp_v2_child_handle_acquire() != NETINS_UDP_OK) {
+        int error_code = errno != 0 ? errno : EOVERFLOW;
+        pthread_cond_destroy(&request->idle_cond);
+        pthread_mutex_destroy(&request->recv_lock);
+        pthread_mutex_destroy(&request->send_lock);
+        pthread_mutex_destroy(&request->lock);
+        free(request);
+        *out_error = error_code;
+        return NULL;
+    }
+    request->nonblock = nonblock;
+    request->send_timeout_ms = send_timeout_ms;
+    request->recv_timeout_ms = recv_timeout_ms;
+    request->close_timeout_ms = close_timeout_ms;
+    *out_error = 0;
+    return request;
+}
+
+static void
+netins_udp_v2_h3_request_free_handle(
+    netins_udp_h3_request_t *request)
+{
+    pthread_cond_destroy(&request->idle_cond);
+    pthread_mutex_destroy(&request->recv_lock);
+    pthread_mutex_destroy(&request->send_lock);
+    pthread_mutex_destroy(&request->lock);
+    free(request);
+    netins_udp_v2_child_handle_release();
 }
 
 void
@@ -381,61 +489,17 @@ netins_udp_h3_request_open(netins_udp_t *netins,
     }
 
     netins_udp_h3_request_t *request =
-        calloc(1, sizeof(*request));
+        netins_udp_v2_h3_request_allocate(parent.nonblock,
+            parent.send_timeout_ms, parent.recv_timeout_ms,
+            parent.close_timeout_ms, &error_code);
     if (request == NULL) {
-        netins_udp_v2_connection_set_error(netins, ENOMEM,
-            "failed to allocate an HTTP/3 request handle");
-        netins_udp_v2_connection_release(netins);
-        return NETINS_UDP_ERROR;
-    }
-    int init_error = pthread_mutex_init(&request->lock, NULL);
-    if (init_error == 0) {
-        init_error = pthread_mutex_init(&request->send_lock, NULL);
-        if (init_error != 0) {
-            pthread_mutex_destroy(&request->lock);
-        }
-    }
-    if (init_error == 0) {
-        init_error = pthread_mutex_init(&request->recv_lock, NULL);
-        if (init_error != 0) {
-            pthread_mutex_destroy(&request->send_lock);
-            pthread_mutex_destroy(&request->lock);
-        }
-    }
-    if (init_error == 0) {
-        init_error = pthread_cond_init(&request->idle_cond, NULL);
-        if (init_error != 0) {
-            pthread_mutex_destroy(&request->recv_lock);
-            pthread_mutex_destroy(&request->send_lock);
-            pthread_mutex_destroy(&request->lock);
-        }
-    }
-    if (init_error != 0) {
-        free(request);
-        netins_udp_v2_connection_set_error(netins, init_error,
-            "failed to initialize an HTTP/3 request handle");
+        netins_udp_v2_connection_set_error(netins, error_code,
+            "failed to allocate or initialize an HTTP/3 request handle");
         netins_udp_v2_connection_release(netins);
         return NETINS_UDP_ERROR;
     }
 
     request->config = *config;
-    request->nonblock = parent.nonblock;
-    request->send_timeout_ms = parent.send_timeout_ms;
-    request->recv_timeout_ms = parent.recv_timeout_ms;
-    request->close_timeout_ms = parent.close_timeout_ms;
-
-    if (netins_udp_v2_child_handle_acquire() != NETINS_UDP_OK) {
-        error_code = errno != 0 ? errno : EOVERFLOW;
-        pthread_cond_destroy(&request->idle_cond);
-        pthread_mutex_destroy(&request->recv_lock);
-        pthread_mutex_destroy(&request->send_lock);
-        pthread_mutex_destroy(&request->lock);
-        free(request);
-        netins_udp_v2_connection_set_error(netins, error_code,
-            "failed to account for an HTTP/3 request handle");
-        netins_udp_v2_connection_release(netins);
-        return NETINS_UDP_ERROR;
-    }
 
     netins_udp_v2_transport_h3_config_t transport_config;
     memset(&transport_config, 0, sizeof(transport_config));
@@ -465,12 +529,7 @@ netins_udp_h3_request_open(netins_udp_t *netins,
             &transport_config, &request->transport) != 0)
     {
         error_code = errno != 0 ? errno : EIO;
-        netins_udp_v2_child_handle_release();
-        pthread_cond_destroy(&request->idle_cond);
-        pthread_mutex_destroy(&request->recv_lock);
-        pthread_mutex_destroy(&request->send_lock);
-        pthread_mutex_destroy(&request->lock);
-        free(request);
+        netins_udp_v2_h3_request_free_handle(request);
         netins_udp_v2_connection_set_error(netins, error_code,
             "failed to open the underlying HTTP/3 request");
         netins_udp_v2_connection_release(netins);
@@ -480,6 +539,173 @@ netins_udp_h3_request_open(netins_udp_t *netins,
     netins_udp_v2_connection_set_error(netins, 0, NULL);
     *out_request = request;
     netins_udp_v2_connection_release(netins);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_h3_request_accept(netins_udp_t *netins,
+    netins_udp_h3_request_t **out_request)
+{
+    if (out_request == NULL) {
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+    *out_request = NULL;
+
+    netins_udp_v2_h3_server_parent_snapshot_t parent;
+    if (netins_udp_v2_connection_acquire_h3_server(netins, &parent)
+        != NETINS_UDP_OK)
+    {
+        return NETINS_UDP_ERROR;
+    }
+
+    int dontwait = parent.nonblock;
+    int wait_forever = !dontwait && parent.recv_timeout_ms == 0;
+    uint32_t timeout_ms = dontwait ? 0 : parent.recv_timeout_ms;
+    netins_udp_v2_transport_server_request_t *server_transport = NULL;
+    if (netins_udp_v2_transport_server_request_accept(parent.transport,
+            timeout_ms, wait_forever, &server_transport) != 0)
+    {
+        int error_code = errno != 0 ? errno : EIO;
+        netins_udp_v2_connection_set_error(netins, error_code,
+            error_code == EAGAIN
+                ? "HTTP/3 request accept would block"
+                : (error_code == ETIMEDOUT
+                    ? "HTTP/3 request accept timed out"
+                    : (error_code == ECANCELED
+                        ? "HTTP/3 request accept was canceled"
+                        : "HTTP/3 request accept failed")));
+        netins_udp_v2_connection_release(netins);
+        return NETINS_UDP_ERROR;
+    }
+
+    int error_code = 0;
+    netins_udp_h3_request_t *request =
+        netins_udp_v2_h3_request_allocate(parent.nonblock,
+            parent.send_timeout_ms, parent.recv_timeout_ms,
+            parent.close_timeout_ms, &error_code);
+    if (request == NULL) {
+        netins_udp_v2_transport_server_request_close_async(
+            server_transport);
+        netins_udp_v2_transport_server_request_close(server_transport,
+            parent.close_timeout_ms);
+        netins_udp_v2_connection_set_error(netins, error_code,
+            "failed to allocate or initialize an HTTP/3 request handle");
+        netins_udp_v2_connection_release(netins);
+        return NETINS_UDP_ERROR;
+    }
+    request->server_side = 1;
+    request->server_transport = server_transport;
+    netins_udp_h3_request_config_init(&request->config);
+
+    netins_udp_v2_transport_h3_info_t info;
+    if (netins_udp_v2_transport_server_request_get_info(server_transport,
+            &info) != 0)
+    {
+        error_code = errno != 0 ? errno : EIO;
+        netins_udp_v2_transport_server_request_close_async(
+            server_transport);
+        netins_udp_v2_transport_server_request_close(server_transport,
+            parent.close_timeout_ms);
+        request->server_transport = NULL;
+        netins_udp_v2_h3_request_free_handle(request);
+        netins_udp_v2_connection_set_error(netins, error_code,
+            "failed to read the accepted HTTP/3 request");
+        netins_udp_v2_connection_release(netins);
+        return NETINS_UDP_ERROR;
+    }
+    snprintf(request->config.method, sizeof(request->config.method), "%s",
+        info.request_method);
+    snprintf(request->config.path, sizeof(request->config.path), "%s",
+        info.request_path);
+    snprintf(request->config.authority,
+        sizeof(request->config.authority), "%s",
+        info.request_authority);
+    snprintf(request->config.content_type,
+        sizeof(request->config.content_type), "%s",
+        info.request_content_type);
+    request->config.content_length = info.request_content_length_known
+        ? info.request_content_length
+        : NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+
+    netins_udp_v2_connection_set_error(netins, 0, NULL);
+    *out_request = request;
+    netins_udp_v2_connection_release(netins);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_h3_request_set_response(
+    netins_udp_h3_request_t *request,
+    const netins_udp_h3_response_config_t *config)
+{
+    if (netins_udp_v2_h3_begin_call(request) != NETINS_UDP_OK) {
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&request->send_lock);
+
+    const char *message = NULL;
+    int error_code =
+        netins_udp_v2_h3_response_config_error(config, &message);
+    if (error_code == 0 && !request->server_side) {
+        error_code = EOPNOTSUPP;
+        message = "set_response is valid only on a server request";
+    } else if (error_code == 0 && request->response_set) {
+        error_code = EALREADY;
+        message = "HTTP/3 response was already configured";
+    } else if (error_code == 0
+        && netins_udp_v2_h3_request_is_closing(request))
+    {
+        error_code = ECANCELED;
+        message = "HTTP/3 request was canceled";
+    }
+    if (error_code != 0) {
+        int result = netins_udp_v2_h3_fail(request, error_code, message);
+        pthread_mutex_unlock(&request->send_lock);
+        netins_udp_v2_h3_end_call(request);
+        return result;
+    }
+
+    netins_udp_v2_transport_h3_response_config_t transport_config;
+    memset(&transport_config, 0, sizeof(transport_config));
+    transport_config.status = config->status;
+    snprintf(transport_config.content_type,
+        sizeof(transport_config.content_type), "%s",
+        config->content_type);
+    transport_config.content_length = config->content_length;
+    transport_config.content_length_unknown =
+        config->content_length == NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+    transport_config.header_count = config->header_count;
+    for (uint32_t i = 0; i < config->header_count; ++i) {
+        snprintf(transport_config.headers[i].name,
+            sizeof(transport_config.headers[i].name), "%s",
+            config->headers[i].name);
+        snprintf(transport_config.headers[i].value,
+            sizeof(transport_config.headers[i].value), "%s",
+            config->headers[i].value);
+    }
+    if (netins_udp_v2_transport_server_request_set_response(
+            request->server_transport, &transport_config) != 0)
+    {
+        error_code = errno != 0 ? errno : EIO;
+        int result = netins_udp_v2_h3_fail(request, error_code,
+            error_code == EALREADY
+                ? "HTTP/3 response was already configured"
+                : (error_code == ECANCELED
+                    ? "HTTP/3 request was canceled"
+                    : "failed to configure the HTTP/3 response"));
+        pthread_mutex_unlock(&request->send_lock);
+        netins_udp_v2_h3_end_call(request);
+        return result;
+    }
+
+    request->response = *config;
+    request->response_set = 1;
+    pthread_mutex_lock(&request->lock);
+    netins_udp_v2_h3_set_error_locked(request, 0, NULL);
+    pthread_mutex_unlock(&request->lock);
+    pthread_mutex_unlock(&request->send_lock);
+    netins_udp_v2_h3_end_call(request);
     return NETINS_UDP_OK;
 }
 
@@ -516,18 +742,28 @@ netins_udp_h3_request_send(netins_udp_h3_request_t *request,
         netins_udp_v2_h3_end_call(request);
         return -1;
     }
-    if (strcmp(request->config.method, "POST") != 0) {
+    if (!request->server_side
+        && strcmp(request->config.method, "POST") != 0)
+    {
         (void)netins_udp_v2_h3_fail(request, EOPNOTSUPP,
             "request body send is valid only for POST");
         pthread_mutex_unlock(&request->send_lock);
         netins_udp_v2_h3_end_call(request);
         return -1;
     }
+    if (request->server_side && !request->response_set) {
+        (void)netins_udp_v2_h3_fail(request, EINVAL,
+            "configure the HTTP/3 response before sending its body");
+        pthread_mutex_unlock(&request->send_lock);
+        netins_udp_v2_h3_end_call(request);
+        return -1;
+    }
 
     int fin = (flags & NETINS_UDP_MSG_FIN) != 0;
+    uint64_t content_length = request->server_side
+        ? request->response.content_length : request->config.content_length;
     int content_length_unknown =
-        request->config.content_length
-            == NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+        content_length == NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
     if (request->send_fin_accepted) {
         (void)netins_udp_v2_h3_fail(request, EPIPE,
             "request body FIN was already accepted");
@@ -536,22 +772,21 @@ netins_udp_h3_request_send(netins_udp_h3_request_t *request,
         return -1;
     }
     if (!content_length_unknown) {
-        if (request->bytes_sent > request->config.content_length) {
+        if (request->bytes_sent > content_length) {
             (void)netins_udp_v2_h3_fail(request, EIO,
-                "request body accounting exceeded Content-Length");
+                "HTTP/3 body accounting exceeded Content-Length");
             pthread_mutex_unlock(&request->send_lock);
             netins_udp_v2_h3_end_call(request);
             return -1;
         }
-        uint64_t remaining = request->config.content_length
-            - request->bytes_sent;
+        uint64_t remaining = content_length - request->bytes_sent;
         if ((uint64_t)length > remaining
             || (fin && (uint64_t)length != remaining)
             || (!fin && remaining != 0
                 && (uint64_t)length == remaining))
         {
             (void)netins_udp_v2_h3_fail(request, EINVAL,
-                "known-length request body must end exactly with FIN");
+                "known-length HTTP/3 body must end exactly with FIN");
             pthread_mutex_unlock(&request->send_lock);
             netins_udp_v2_h3_end_call(request);
             return -1;
@@ -578,9 +813,13 @@ netins_udp_h3_request_send(netins_udp_h3_request_t *request,
         || (flags & NETINS_UDP_MSG_DONTWAIT) != 0;
     int wait_forever = !dontwait && request->send_timeout_ms == 0;
     uint32_t timeout_ms = dontwait ? 0 : request->send_timeout_ms;
-    int64_t sent = netins_udp_v2_transport_h3_request_send(
-        request->transport, data, length, fin, timeout_ms,
-        wait_forever);
+    int64_t sent = request->server_side
+        ? netins_udp_v2_transport_server_request_send(
+            request->server_transport, data, length, fin, timeout_ms,
+            wait_forever)
+        : netins_udp_v2_transport_h3_request_send(
+            request->transport, data, length, fin, timeout_ms,
+            wait_forever);
     if (sent < 0) {
         int error_code = errno != 0 ? errno : EIO;
         netins_udp_v2_h3_sync_transport_error(request);
@@ -657,9 +896,13 @@ netins_udp_h3_request_recv(netins_udp_h3_request_t *request,
     uint32_t timeout_ms = dontwait ? 0 : request->recv_timeout_ms;
     int fin = 0;
     int peek = (flags & NETINS_UDP_MSG_PEEK) != 0;
-    int64_t received = netins_udp_v2_transport_h3_request_recv(
-        request->transport, data, length, &fin, peek, timeout_ms,
-        wait_forever);
+    int64_t received = request->server_side
+        ? netins_udp_v2_transport_server_request_recv(
+            request->server_transport, data, length, &fin, peek,
+            timeout_ms, wait_forever)
+        : netins_udp_v2_transport_h3_request_recv(
+            request->transport, data, length, &fin, peek, timeout_ms,
+            wait_forever);
     (void)fin;
     if (received < 0) {
         int error_code = errno != 0 ? errno : EIO;
@@ -706,8 +949,12 @@ netins_udp_h3_request_get_info(netins_udp_h3_request_t *request,
     }
 
     netins_udp_v2_transport_h3_info_t transport_info;
-    if (netins_udp_v2_transport_h3_request_get_info(
-            request->transport, &transport_info) != 0)
+    int transport_result = request->server_side
+        ? netins_udp_v2_transport_server_request_get_info(
+            request->server_transport, &transport_info)
+        : netins_udp_v2_transport_h3_request_get_info(
+            request->transport, &transport_info);
+    if (transport_result != 0)
     {
         int error_code = errno != 0 ? errno : EIO;
         int result = netins_udp_v2_h3_fail(request, error_code,
@@ -737,18 +984,27 @@ netins_udp_h3_request_get_info(netins_udp_h3_request_t *request,
     pthread_mutex_unlock(&request->lock);
     info.peer_header_count = transport_info.peer_header_count;
     snprintf(info.method, sizeof(info.method), "%s",
-        request->config.method);
+        transport_info.request_method[0] != '\0'
+            ? transport_info.request_method : request->config.method);
     snprintf(info.path, sizeof(info.path), "%s",
-        request->config.path);
+        transport_info.request_path[0] != '\0'
+            ? transport_info.request_path : request->config.path);
     snprintf(info.authority, sizeof(info.authority), "%s",
         transport_info.request_authority);
     snprintf(info.request_content_type,
         sizeof(info.request_content_type), "%s",
-        request->config.content_type);
+        transport_info.request_content_type[0] != '\0'
+            ? transport_info.request_content_type
+            : request->config.content_type);
     snprintf(info.response_content_type,
         sizeof(info.response_content_type), "%s",
         transport_info.response_content_type);
-    info.request_content_length = request->config.content_length;
+    info.request_content_length =
+        transport_info.request_content_length_known
+            ? transport_info.request_content_length
+            : (request->server_side
+                ? NETINS_UDP_CONTENT_LENGTH_UNKNOWN
+                : request->config.content_length);
     info.response_content_length =
         transport_info.response_content_length_known
             ? transport_info.response_content_length
@@ -815,9 +1071,14 @@ netins_udp_h3_request_close(netins_udp_h3_request_t *request)
     pthread_mutex_lock(&request->lock);
     request->closing = 1;
     netins_udp_v2_transport_request_t *transport = request->transport;
+    netins_udp_v2_transport_server_request_t *server_transport =
+        request->server_transport;
     pthread_mutex_unlock(&request->lock);
 
-    if (transport != NULL) {
+    if (server_transport != NULL) {
+        netins_udp_v2_transport_server_request_close_async(
+            server_transport);
+    } else if (transport != NULL) {
         netins_udp_v2_transport_h3_request_close_async(transport);
     }
 
@@ -826,18 +1087,18 @@ netins_udp_h3_request_close(netins_udp_h3_request_t *request)
         pthread_cond_wait(&request->idle_cond, &request->lock);
     }
     transport = request->transport;
+    server_transport = request->server_transport;
     request->transport = NULL;
+    request->server_transport = NULL;
     uint32_t close_timeout_ms = request->close_timeout_ms;
     pthread_mutex_unlock(&request->lock);
 
-    if (transport != NULL) {
+    if (server_transport != NULL) {
+        netins_udp_v2_transport_server_request_close(server_transport,
+            close_timeout_ms);
+    } else if (transport != NULL) {
         netins_udp_v2_transport_h3_request_close(transport,
             close_timeout_ms);
     }
-    pthread_cond_destroy(&request->idle_cond);
-    pthread_mutex_destroy(&request->recv_lock);
-    pthread_mutex_destroy(&request->send_lock);
-    pthread_mutex_destroy(&request->lock);
-    free(request);
-    netins_udp_v2_child_handle_release();
+    netins_udp_v2_h3_request_free_handle(request);
 }

@@ -13,7 +13,7 @@ The installed API is still V1. The unified client/listener/accepted-
 connection contract for V2 is documented in
 [`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
 non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
-The V2 client lifecycle, client HTTP/3 request symbols, and server
+The V2 client lifecycle, client and server HTTP/3 request symbols, and server
 listener/accepted-connection lifecycle are now compiled internally and tested
 against that draft header, but the header and API version are not
 installed/switched until the remaining V2 objects are implemented.
@@ -26,16 +26,24 @@ close lifecycles. Closing the listener wakes blocked accepts and does not close
 already returned connections. Existing `mini_server` Libevent and UDP receive
 logic is unchanged.
 
+Accepted HTTP/3 requests are delivered through a bounded per-connection
+accept queue. Request bodies use a bounded receive queue and responses use a
+bounded send queue; application threads never call XQUIC directly. A request
+keeps its own backend reference and therefore remains safe to inspect and
+close after its accepted connection handle starts closing.
+
 Before `netins_udp_connect()` or `netins_udp_listen()`, set
 `NETINS_UDP_OPT_APP_PROTOCOL` to `NETINS_UDP_APP_HTTP3`; listeners also require
 a certificate and private key. Client GET/POST request objects support partial
 send/receive, FIN, DONTWAIT, PEEK, extension headers, request info and
-independent close. RAW_STREAM, server HTTP/3 request objects, notification
-descriptors, custom CA/client-certificate verification, and generic SOCKOPT
-handling remain later V2 stages.
+independent close. Server request objects additionally support accept,
+request-body receive, single-shot response configuration, response-body send,
+request info and independent close. RAW_STREAM, notification descriptors,
+custom CA/client-certificate verification, generic SOCKOPT handling, and mini
+program migration remain later V2 stages.
 
-See `examples/netins_udp_v2_server_lifecycle_example.c` for the stage-six
-listener/accept/shutdown/close sequence.
+See `examples/netins_udp_v2_server_lifecycle_example.c` for the
+listener/accept/request/response/shutdown/close sequence.
 
 ## Independent client connection
 

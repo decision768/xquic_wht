@@ -11,6 +11,7 @@ netins_udp_v2_server_lifecycle_example(const char *bind_host, int port,
     int result = NETINS_UDP_ERROR;
     netins_udp_t *listener = NULL;
     netins_udp_t *connection = NULL;
+    netins_udp_h3_request_t *request = NULL;
 
     if (certificate_file == NULL || private_key_file == NULL) {
         errno = EINVAL;
@@ -53,13 +54,57 @@ netins_udp_v2_server_lifecycle_example(const char *bind_host, int port,
         goto done;
     }
 
-    /*
-     * Stage 6 proves listener/accepted-connection ownership. Stage 7 adds
-     * netins_udp_h3_request_accept() for actual server request bodies.
-     */
+    if (netins_udp_h3_request_accept(connection, &request)
+        != NETINS_UDP_OK)
+    {
+        goto done;
+    }
+
+    unsigned char request_body[4096];
+    for (;;) {
+        ssize_t received = netins_udp_h3_request_recv(request,
+            request_body, sizeof(request_body), 0);
+        if (received < 0) {
+            goto done;
+        }
+        if (received == 0) {
+            break;
+        }
+        /* Consume or persist this request-body chunk here. */
+    }
+
+    static const char response_body[] = "OK";
+    netins_udp_h3_response_config_t response;
+    netins_udp_h3_response_config_init(&response);
+    response.status = 200;
+    response.content_length = sizeof(response_body) - 1;
+    snprintf(response.content_type, sizeof(response.content_type),
+        "text/plain");
+    if (netins_udp_h3_request_set_response(request, &response)
+        != NETINS_UDP_OK)
+    {
+        goto done;
+    }
+
+    size_t offset = 0;
+    while (offset < sizeof(response_body) - 1) {
+        ssize_t sent = netins_udp_h3_request_send(request,
+            response_body + offset, sizeof(response_body) - 1 - offset,
+            NETINS_UDP_MSG_FIN);
+        if (sent <= 0) {
+            if (sent == 0) {
+                errno = EIO;
+            }
+            goto done;
+        }
+        offset += (size_t)sent;
+    }
+    netins_udp_h3_request_close(request);
+    request = NULL;
     result = netins_udp_shutdown(connection, 0);
 
 done:
+    netins_udp_h3_request_close(request);
     netins_udp_close(connection);
     netins_udp_close(listener);
     if (netins_udp_cleanup() != NETINS_UDP_OK) {

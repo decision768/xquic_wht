@@ -277,7 +277,7 @@ netins_udp_v2_transport_server_accept(
 }
 
 void
-netins_udp_v2_transport_server_request_close(
+netins_udp_v2_transport_server_begin_close(
     netins_udp_v2_transport_server_t *server)
 {
     pthread_mutex_lock(&server->lock);
@@ -291,7 +291,7 @@ void
 netins_udp_v2_transport_server_close(
     netins_udp_v2_transport_server_t *server)
 {
-    netins_udp_v2_transport_server_request_close(server);
+    netins_udp_v2_transport_server_begin_close(server);
     if (g_last_server == server) {
         g_last_server = NULL;
     }

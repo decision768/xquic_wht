@@ -1030,7 +1030,7 @@ netins_udp_listen(netins_udp_t *netins, const char *host, int port)
     pthread_cond_broadcast(&netins->idle_cond);
     pthread_mutex_unlock(&netins->lock);
     if (closing) {
-        netins_udp_v2_transport_server_request_close(transport);
+        netins_udp_v2_transport_server_begin_close(transport);
         (void)netins_udp_v2_fail(netins, ECANCELED,
             "listen was canceled by close");
         netins_udp_v2_end_call(netins);
@@ -1441,6 +1441,60 @@ netins_udp_v2_connection_acquire_h3(
     return NETINS_UDP_OK;
 }
 
+int
+netins_udp_v2_connection_acquire_h3_server(
+    netins_udp_t *netins,
+    netins_udp_v2_h3_server_parent_snapshot_t *out)
+{
+    if (out == NULL) {
+        if (netins != NULL) {
+            return netins_udp_v2_fail(netins, EINVAL,
+                "server H3 parent snapshot must not be NULL");
+        }
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+    memset(out, 0, sizeof(*out));
+    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->lock);
+    int error_code = 0;
+    const char *message = NULL;
+    if (netins->role != NETINS_UDP_ROLE_ACCEPTED) {
+        error_code = EOPNOTSUPP;
+        message = "request_accept is valid only on an accepted connection";
+
+    } else if (netins->state != NETINS_UDP_STATE_CONNECTED
+        || netins->accepted_transport == NULL)
+    {
+        error_code = ENOTCONN;
+        message = "request_accept requires a connected server handle";
+
+    } else if (netins->app_protocol != NETINS_UDP_APP_HTTP3) {
+        error_code = EOPNOTSUPP;
+        message = "HTTP/3 request APIs require APP_PROTOCOL=HTTP3";
+    }
+    if (error_code == 0) {
+        out->transport = netins->accepted_transport;
+        out->nonblock = netins->nonblock;
+        out->send_timeout_ms = netins->send_timeout_ms;
+        out->recv_timeout_ms = netins->recv_timeout_ms;
+        out->close_timeout_ms = netins->close_timeout_ms;
+    } else {
+        netins_udp_v2_set_error_locked(netins, error_code, message);
+    }
+    pthread_mutex_unlock(&netins->lock);
+
+    if (error_code != 0) {
+        errno = error_code;
+        netins_udp_v2_end_call(netins);
+        return NETINS_UDP_ERROR;
+    }
+    return NETINS_UDP_OK;
+}
+
 void
 netins_udp_v2_connection_release(netins_udp_t *netins)
 {
@@ -1520,7 +1574,7 @@ netins_udp_close(netins_udp_t *netins)
         netins_udp_v2_transport_client_request_close(client_transport);
     }
     if (listener_transport != NULL) {
-        netins_udp_v2_transport_server_request_close(listener_transport);
+        netins_udp_v2_transport_server_begin_close(listener_transport);
     }
     if (accepted_transport != NULL) {
         netins_udp_v2_transport_server_connection_request_shutdown(

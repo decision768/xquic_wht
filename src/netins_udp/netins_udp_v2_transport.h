@@ -23,6 +23,8 @@ typedef struct netins_udp_stream_s netins_udp_v2_transport_request_t;
 typedef struct netins_udp_server_s netins_udp_v2_transport_server_t;
 typedef struct netins_udp_server_connection_s
     netins_udp_v2_transport_server_connection_t;
+typedef struct netins_udp_server_request_s
+    netins_udp_v2_transport_server_request_t;
 
 typedef enum netins_udp_v2_transport_state_e {
     NETINS_UDP_V2_TRANSPORT_NEW = 0,
@@ -89,6 +91,16 @@ typedef struct netins_udp_v2_transport_h3_config_s {
         headers[NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS];
 } netins_udp_v2_transport_h3_config_t;
 
+typedef struct netins_udp_v2_transport_h3_response_config_s {
+    int status;
+    char content_type[NETINS_UDP_V2_TRANSPORT_CONTENT_TYPE_LEN];
+    uint64_t content_length;
+    int content_length_unknown;
+    uint32_t header_count;
+    netins_udp_v2_transport_h3_header_t
+        headers[NETINS_UDP_V2_TRANSPORT_MAX_H3_HEADERS];
+} netins_udp_v2_transport_h3_response_config_t;
+
 typedef struct netins_udp_v2_transport_h3_info_s {
     uint64_t stream_id;
     int response_status;
@@ -99,8 +111,14 @@ typedef struct netins_udp_v2_transport_h3_info_s {
     int stream_error;
     uint64_t bytes_accepted;
     uint64_t bytes_delivered;
+    char request_method[NETINS_UDP_V2_TRANSPORT_METHOD_LEN];
+    char request_path[NETINS_UDP_V2_TRANSPORT_REQUEST_PATH_LEN];
     char request_authority[
         NETINS_UDP_V2_TRANSPORT_SERVER_NAME_LEN];
+    char request_content_type[
+        NETINS_UDP_V2_TRANSPORT_CONTENT_TYPE_LEN];
+    int request_content_length_known;
+    uint64_t request_content_length;
     int response_content_length_known;
     uint64_t response_content_length;
     char response_content_type[
@@ -147,7 +165,7 @@ int netins_udp_v2_transport_server_accept(
     netins_udp_v2_transport_server_t *server,
     uint32_t timeout_ms, int wait_forever,
     netins_udp_v2_transport_server_connection_t **out_connection);
-void netins_udp_v2_transport_server_request_close(
+void netins_udp_v2_transport_server_begin_close(
     netins_udp_v2_transport_server_t *server);
 void netins_udp_v2_transport_server_close(
     netins_udp_v2_transport_server_t *server);
@@ -167,6 +185,29 @@ void netins_udp_v2_transport_server_connection_request_shutdown(
     uint64_t application_error);
 void netins_udp_v2_transport_server_connection_close(
     netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms);
+int netins_udp_v2_transport_server_request_accept(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms, int wait_forever,
+    netins_udp_v2_transport_server_request_t **out_request);
+int netins_udp_v2_transport_server_request_set_response(
+    netins_udp_v2_transport_server_request_t *request,
+    const netins_udp_v2_transport_h3_response_config_t *config);
+int64_t netins_udp_v2_transport_server_request_send(
+    netins_udp_v2_transport_server_request_t *request,
+    const void *data, size_t length, int fin, uint32_t timeout_ms,
+    int wait_forever);
+int64_t netins_udp_v2_transport_server_request_recv(
+    netins_udp_v2_transport_server_request_t *request,
+    void *data, size_t length, int *fin, int peek,
+    uint32_t timeout_ms, int wait_forever);
+int netins_udp_v2_transport_server_request_get_info(
+    netins_udp_v2_transport_server_request_t *request,
+    netins_udp_v2_transport_h3_info_t *out);
+void netins_udp_v2_transport_server_request_close_async(
+    netins_udp_v2_transport_server_request_t *request);
+void netins_udp_v2_transport_server_request_close(
+    netins_udp_v2_transport_server_request_t *request,
     uint32_t timeout_ms);
 int netins_udp_v2_transport_h3_request_open(
     netins_udp_v2_transport_client_t *client,

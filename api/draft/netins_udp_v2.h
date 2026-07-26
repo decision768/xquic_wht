@@ -445,8 +445,9 @@ typedef struct netins_udp_h3_request_info_s {
     char authority[NETINS_UDP_SERVER_NAME_LEN];
     char request_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     char response_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    /* UNKNOWN when an accepted peer request omitted Content-Length. */
     uint64_t request_content_length;
-    /* UNKNOWN when the peer omitted Content-Length. */
+    /* UNKNOWN when the peer response omitted Content-Length. */
     uint64_t response_content_length;
     /* HTTP body bytes only; H3/QPACK framing and headers are excluded. */
     uint64_t bytes_sent;
@@ -582,7 +583,14 @@ NETINS_UDP_PUBLIC void netins_udp_stream_close(
  * the body end. Custom header names must be lowercase, must not start with ':',
  * and cannot replace headers managed by the library (content-length,
  * content-type, host or pseudo-headers). A finite blocking timeout expires
- * with ETIMEDOUT; nonblocking lack of progress returns EAGAIN.
+ * with ETIMEDOUT; nonblocking lack of progress returns EAGAIN. Server request
+ * accept uses the accepted connection's NONBLOCK and RECV_TIMEOUT_MS options.
+ * set_response is single-shot, accepts one final status from 200 through 599,
+ * and must succeed before a server response body is sent. Applications own
+ * every accepted request handle independently and must close it even after
+ * its parent connection has closed. Closing a server request flushes a
+ * response whose complete body and FIN have already been accepted by send;
+ * an incomplete response is canceled.
  */
 NETINS_UDP_PUBLIC void netins_udp_h3_request_config_init(
     netins_udp_h3_request_config_t *config);
