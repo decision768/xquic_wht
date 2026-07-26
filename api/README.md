@@ -7,6 +7,14 @@ receive queues.
 
 Chinese integration guide: [`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md).
 
+## V2 contract work
+
+The currently compiled API is V1. The unified client/listener/accepted-
+connection contract planned for V2 is documented in
+[`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
+non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
+These files define the next ABI but do not change the current build yet.
+
 ## Independent client connection
 
 The library also provides a first connection-lifecycle API that creates a real

@@ -8,7 +8,9 @@ NetIns UDP 是面向 XQUIC UDP/QUIC 的独立客户端连接与状态查询接�
 网卡名称、收发字节、RTT、丢包率、在途数据量和区间速率等信息。独立客户端还可
 通过 HTTP/3 stream API 发起 GET/POST 请求、发送请求正文并读取响应正文。
 
-
+> 当前文档描述正式构建中的 V1 API。统一客户端、监听器和已接受连接对象的
+> V2 契约正在 `NETINS_UDP_API_V2_设计说明.md` 与
+> `draft/netins_udp_v2.h` 中冻结；V2 草案目前不参与编译和安装。
 
 公共头文件：
 
