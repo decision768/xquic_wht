@@ -43,6 +43,7 @@ struct netins_udp_observer_s {
     struct netins_udp_observer_s *registry_next;
 
     netins_udp_snapshot_t snapshot;
+    netins_udp_observer_extended_snapshot_t extended_snapshot;
     netins_udp_observer_path_metadata_t path_metadata[NETINS_UDP_MAX_PATHS];
 
     netins_udp_logger_cb logger;
@@ -127,6 +128,16 @@ netins_udp_observer_init_snapshot(netins_udp_snapshot_t *snapshot)
     netins_udp_observer_init_statis(&snapshot->statis);
     for (size_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
         netins_udp_observer_init_path_statis(&snapshot->paths[i]);
+    }
+}
+
+static void
+netins_udp_observer_init_extended_snapshot(
+    netins_udp_observer_extended_snapshot_t *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    for (size_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
+        snapshot->paths[i].path_id = UINT64_MAX;
     }
 }
 
@@ -322,6 +333,7 @@ netins_udp_observer_new(void)
 
     netins->reference_count = 1;
     netins_udp_observer_init_snapshot(&netins->snapshot);
+    netins_udp_observer_init_extended_snapshot(&netins->extended_snapshot);
     netins->snapshot.info.connection_state = NETINS_UDP_STATE_NEW;
     return netins;
 }
@@ -466,6 +478,7 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
     xqc_engine_t *engine = NULL;
     xqc_cid_t cid;
     netins_udp_snapshot_t previous;
+    netins_udp_observer_extended_snapshot_t previous_extended;
     netins_udp_observer_path_metadata_t metadata[NETINS_UDP_MAX_PATHS];
 
     if (netins == NULL) {
@@ -482,6 +495,8 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
     engine = netins->engine;
     memcpy(&cid, &netins->cid, sizeof(cid));
     memcpy(&previous, &netins->snapshot, sizeof(previous));
+    memcpy(&previous_extended, &netins->extended_snapshot,
+        sizeof(previous_extended));
     memcpy(metadata, netins->path_metadata, sizeof(metadata));
     pthread_mutex_unlock(&netins->lock);
 
@@ -495,6 +510,8 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
 
     netins_udp_snapshot_t next;
     netins_udp_observer_init_snapshot(&next);
+    netins_udp_observer_extended_snapshot_t next_extended;
+    memcpy(&next_extended, &previous_extended, sizeof(next_extended));
     next.info.connection_id = previous.info.connection_id;
     next.info.role = previous.info.role;
     next.info.connection_state = previous.info.connection_state;
@@ -534,6 +551,7 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
      * shift the indexes already observed by callers.
      */
     next.path_count = previous.path_count;
+    next_extended.path_count = (uint32_t)next.path_count;
     for (size_t i = 0; i < next.path_count; ++i) {
         memcpy(&next.paths[i], &previous.paths[i], sizeof(next.paths[i]));
         next.paths[i].transport_state = NETINS_UDP_PATH_CLOSED;
@@ -542,6 +560,9 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         next.paths[i].delivery_mbps = 0.0;
         next.paths[i].recv_mbps = 0.0;
         next.paths[i].effective_recv_mbps = 0.0;
+        next_extended.paths[i].unique_send_mbps = 0.0;
+        next_extended.paths[i].unique_recv_mbps = 0.0;
+        next_extended.paths[i].wire_recv_mbps = 0.0;
     }
 
     for (size_t i = 0; i < transport.path_count; ++i) {
@@ -555,11 +576,19 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         }
         if (dst == NULL) {
             if (next.path_count >= NETINS_UDP_MAX_PATHS) {
+                next_extended.path_table_truncated = 1;
                 continue;
             }
             dst = &next.paths[next.path_count++];
             netins_udp_observer_init_path_statis(dst);
         }
+        size_t path_index = (size_t)(dst - next.paths);
+        netins_udp_observer_extended_path_t *extended =
+            &next_extended.paths[path_index];
+        const netins_udp_observer_extended_path_t *old_extended =
+            path_index < previous_extended.path_count
+                && previous_extended.paths[path_index].path_id == src->path_id
+            ? &previous_extended.paths[path_index] : NULL;
 
         dst->path_id = src->path_id;
         dst->transport_state = src->path_state;
@@ -577,6 +606,35 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         dst->bytes_recv_effective_reinject =
             src->stream_payload_bytes_recv_unique_reinject;
         dst->srtt_us = src->srtt_us;
+        extended->path_id = src->path_id;
+        extended->stream_payload_bytes_sent_unique =
+            src->stream_payload_bytes_sent_unique;
+        extended->stream_payload_bytes_recv_unique =
+            src->stream_payload_bytes_recv_unique;
+        extended->wire_bytes_recv = src->wire_bytes_recv;
+        extended->retransmitted_bytes_sent =
+            src->retransmitted_bytes_sent;
+        extended->cwnd_bytes = src->cwnd_bytes;
+        extended->inflight_bytes = src->inflight_bytes;
+        extended->latest_rtt_us = src->latest_rtt_us;
+        extended->min_rtt_us = src->min_rtt_us;
+        extended->last_received_time_us = src->last_received_time_us;
+        extended->last_sent_time_us = src->last_sent_time_us;
+        extended->lost_packets = src->lost_packets;
+        extended->cwnd_limited = src->cwnd_limited;
+        if (old_extended != NULL) {
+            extended->unique_send_mbps = netins_udp_observer_rate_mbps(
+                extended->stream_payload_bytes_sent_unique,
+                old_extended->stream_payload_bytes_sent_unique,
+                next.statis.sample_interval_us);
+            extended->unique_recv_mbps = netins_udp_observer_rate_mbps(
+                extended->stream_payload_bytes_recv_unique,
+                old_extended->stream_payload_bytes_recv_unique,
+                next.statis.sample_interval_us);
+            extended->wire_recv_mbps = netins_udp_observer_rate_mbps(
+                extended->wire_bytes_recv, old_extended->wire_bytes_recv,
+                next.statis.sample_interval_us);
+        }
 
         const netins_udp_observer_path_metadata_t *path_metadata =
             netins_udp_observer_find_metadata(metadata, dst->path_id);
@@ -655,6 +713,7 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
     }
 
     next.info.path_count = next.path_count;
+    next_extended.path_count = (uint32_t)next.path_count;
     next.statis.send_mbps = netins_udp_observer_rate_mbps(next.statis.bytes_sent,
         previous.statis.bytes_sent, next.statis.sample_interval_us);
     next.statis.wire_send_mbps = netins_udp_observer_rate_mbps(
@@ -676,6 +735,8 @@ netins_udp_observer_refresh(netins_udp_observer_t *netins)
         return NETINS_UDP_NOT_FOUND;
     }
     memcpy(&netins->snapshot, &next, sizeof(next));
+    memcpy(&netins->extended_snapshot, &next_extended,
+        sizeof(next_extended));
     netins_udp_observer_set_error_locked(netins, 0, NULL);
     pthread_mutex_unlock(&netins->lock);
     return NETINS_UDP_OK;
@@ -906,6 +967,36 @@ netins_udp_observer_get_snapshot(netins_udp_observer_t *netins, netins_udp_snaps
     }
     pthread_mutex_lock(&netins->lock);
     memcpy(out, &netins->snapshot, sizeof(*out));
+    pthread_mutex_unlock(&netins->lock);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_observer_get_extended_snapshot(
+    netins_udp_observer_t *netins,
+    netins_udp_observer_extended_snapshot_t *out)
+{
+    if (netins == NULL || out == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&netins->lock);
+    memcpy(out, &netins->extended_snapshot, sizeof(*out));
+    pthread_mutex_unlock(&netins->lock);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_observer_get_private_snapshot(
+    netins_udp_observer_t *netins,
+    netins_udp_observer_private_snapshot_t *out)
+{
+    if (netins == NULL || out == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&netins->lock);
+    memcpy(&out->legacy, &netins->snapshot, sizeof(out->legacy));
+    memcpy(&out->extended, &netins->extended_snapshot,
+        sizeof(out->extended));
     pthread_mutex_unlock(&netins->lock);
     return NETINS_UDP_OK;
 }

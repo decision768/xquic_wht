@@ -103,6 +103,7 @@ netins_udp_transport_metrics_collect(xqc_engine_t *engine,
         dst->packets_recv = send_ctl->ctl_recv_count;
         dst->app_packet_bytes_sent = send_ctl->ctl_app_bytes_send;
         dst->wire_bytes_sent = send_ctl->ctl_bytes_send;
+        dst->wire_bytes_recv = send_ctl->ctl_bytes_recv;
         dst->delivered_bytes = send_ctl->ctl_delivered;
         dst->reinjected_bytes_sent = send_ctl->ctl_reinjected_bytes_send;
         dst->retransmitted_bytes_sent = send_ctl->ctl_retrans_bytes_send;
@@ -126,6 +127,23 @@ netins_udp_transport_metrics_collect(xqc_engine_t *engine,
         dst->cwnd_block_count = send_ctl->diag.send_cwnd_block_count;
         dst->cwnd_block_duration_us =
             send_ctl->diag.send_cwnd_block_duration_us;
+        dst->lost_packets = send_ctl->ctl_lost_count;
+        dst->last_sent_time_us = send_ctl->ctl_last_inflight_pkt_sent_time;
+        for (size_t pns = 0; pns < XQC_PNS_N; ++pns) {
+            if (send_ctl->ctl_largest_recv_time[pns]
+                > dst->last_received_time_us)
+            {
+                dst->last_received_time_us =
+                    send_ctl->ctl_largest_recv_time[pns];
+            }
+            if (send_ctl->ctl_time_of_last_sent_ack_eliciting_packet[pns]
+                > dst->last_sent_time_us)
+            {
+                dst->last_sent_time_us =
+                    send_ctl
+                        ->ctl_time_of_last_sent_ack_eliciting_packet[pns];
+            }
+        }
     }
 
     return 0;

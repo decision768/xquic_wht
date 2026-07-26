@@ -74,6 +74,7 @@ struct netins_udp_stream_s {
     int send_fin_requested;
     int send_finished;
     int recv_finished;
+    int recv_eof_delivered;
     int close_requested;
     int close_sent;
     int close_notified;
@@ -93,6 +94,8 @@ struct netins_udp_stream_s {
     netins_udp_buffer_t *send_tail;
     netins_udp_buffer_t *recv_head;
     netins_udp_buffer_t *recv_tail;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 };
 
 typedef struct netins_udp_client_path_s {
@@ -145,10 +148,38 @@ struct netins_udp_client_s {
     xqc_scheduler_callback_t scheduler;
     uint32_t idle_timeout_ms;
     uint32_t close_timeout_ms;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 
     char ciphers[256];
     char groups[128];
 };
+
+static void
+netins_udp_client_notify(netins_udp_client_t *client, uint32_t events)
+{
+    if (client == NULL || events == 0) {
+        return;
+    }
+    pthread_mutex_lock(&client->lock);
+    if (client->notify != NULL) {
+        client->notify(client->notify_user_data, events);
+    }
+    pthread_mutex_unlock(&client->lock);
+}
+
+static void
+netins_udp_stream_notify(netins_udp_stream_t *stream, uint32_t events)
+{
+    if (stream == NULL || events == 0) {
+        return;
+    }
+    pthread_mutex_lock(&stream->lock);
+    if (stream->notify != NULL) {
+        stream->notify(stream->notify_user_data, events);
+    }
+    pthread_mutex_unlock(&stream->lock);
+}
 
 static void
 netins_udp_stream_free_queue(netins_udp_buffer_t *head)
@@ -234,6 +265,7 @@ netins_udp_stream_mark_error(netins_udp_stream_t *stream, int error_code)
     stream->close_requested = 1;
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->lock);
+    netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_ERROR);
 }
 
 static netins_udp_buffer_t *
@@ -332,6 +364,7 @@ netins_udp_stream_parse_response_headers(netins_udp_stream_t *stream,
     stream->response_headers_received = 1;
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->lock);
+    netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_READABLE);
 }
 
 static void netins_udp_client_process_streams(netins_udp_client_t *client);
@@ -412,6 +445,7 @@ netins_udp_client_fail_runtime(netins_udp_client_t *client, int error_code,
         (void)netins_udp_backend_connection_error(client->observer,
             error_code, message);
     }
+    netins_udp_client_notify(client, NETINS_UDP_V2_EVENT_ERROR);
 }
 
 static int
@@ -787,6 +821,7 @@ netins_udp_client_path_removed(const xqc_cid_t *cid, uint64_t path_id,
             break;
         }
     }
+    netins_udp_client_notify(client, NETINS_UDP_V2_EVENT_PATH_CHANGED);
 }
 
 static int
@@ -831,6 +866,8 @@ netins_udp_client_h3_conn_close(xqc_h3_conn_t *h3_conn,
         (void)netins_udp_backend_connection_closed(client->observer,
             conn_error);
     }
+    netins_udp_client_notify(client, conn_error != 0
+        ? NETINS_UDP_V2_EVENT_ERROR : NETINS_UDP_V2_EVENT_CLOSED);
     return XQC_OK;
 }
 
@@ -852,6 +889,7 @@ netins_udp_client_h3_handshake_finished(xqc_h3_conn_t *h3_conn,
             client->observer);
         (void)netins_udp_backend_connection_refresh(client->observer);
     }
+    netins_udp_client_notify(client, NETINS_UDP_V2_EVENT_CONNECTED);
 }
 
 static int
@@ -931,6 +969,10 @@ netins_udp_stream_drain_response(netins_udp_stream_t *stream,
         }
         pthread_cond_broadcast(&stream->cond);
         pthread_mutex_unlock(&stream->lock);
+        if (received > 0 || fin) {
+            netins_udp_stream_notify(stream,
+                NETINS_UDP_V2_EVENT_READABLE);
+        }
 
         if (fin || received == 0) {
             return;
@@ -963,6 +1005,13 @@ netins_udp_stream_h3_read(xqc_h3_request_t *request,
             stream->recv_finished = 1;
             pthread_cond_broadcast(&stream->cond);
             pthread_mutex_unlock(&stream->lock);
+            /*
+             * A response that ends in headers/trailers may not produce a body
+             * callback. Wake the request descriptor after recv_finished is
+             * visible so epoll users can consume the one-shot EOF readiness.
+             */
+            netins_udp_stream_notify(stream,
+                NETINS_UDP_V2_EVENT_READABLE);
         }
     }
 
@@ -975,6 +1024,7 @@ netins_udp_stream_h3_read(xqc_h3_request_t *request,
         stream->recv_finished = 1;
         pthread_cond_broadcast(&stream->cond);
         pthread_mutex_unlock(&stream->lock);
+        netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_READABLE);
     }
     return XQC_OK;
 }
@@ -991,6 +1041,7 @@ netins_udp_stream_h3_write(xqc_h3_request_t *request, void *user_data)
     netins_udp_client_t *client = stream->client;
     pthread_mutex_unlock(&stream->lock);
     netins_udp_client_wake(client);
+    netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_WRITABLE);
     return XQC_OK;
 }
 
@@ -1012,6 +1063,9 @@ netins_udp_stream_h3_closing(xqc_h3_request_t *request, xqc_int_t error,
     }
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->lock);
+    if (error != 0) {
+        netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_ERROR);
+    }
 }
 
 static int
@@ -1036,9 +1090,12 @@ netins_udp_stream_h3_close(xqc_h3_request_t *request, void *user_data)
     } else {
         stream->state = NETINS_UDP_STREAM_STATE_CLOSED;
     }
+    uint32_t terminal_event = stream->stream_error != 0
+        ? NETINS_UDP_V2_EVENT_ERROR : NETINS_UDP_V2_EVENT_CLOSED;
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->lock);
 
+    netins_udp_stream_notify(stream, terminal_event);
     netins_udp_client_detach_stream(client, stream);
     if (release_request_ref) {
         netins_udp_stream_release(stream);
@@ -1224,6 +1281,7 @@ netins_udp_client_try_create_path(netins_udp_client_t *client)
     path->active = 1;
     client->path_count++;
     netins_udp_client_update_path_metadata(client, path);
+    netins_udp_client_notify(client, NETINS_UDP_V2_EVENT_PATH_CHANGED);
     return NETINS_UDP_OK;
 }
 
@@ -1486,6 +1544,7 @@ netins_udp_stream_drive_send(netins_udp_stream_t *stream,
         int finished = stream->send_finished;
         pthread_cond_broadcast(&stream->cond);
         pthread_mutex_unlock(&stream->lock);
+        netins_udp_stream_notify(stream, NETINS_UDP_V2_EVENT_WRITABLE);
         activity = 1;
 
         if (finish_only || sent == 0 || (fin && finished)) {
@@ -1507,6 +1566,8 @@ netins_udp_stream_complete_without_request(netins_udp_stream_t *stream,
         ? NETINS_UDP_STREAM_STATE_CLOSED : NETINS_UDP_STREAM_STATE_ERROR;
     pthread_cond_broadcast(&stream->cond);
     pthread_mutex_unlock(&stream->lock);
+    netins_udp_stream_notify(stream, error_code == 0
+        ? NETINS_UDP_V2_EVENT_CLOSED : NETINS_UDP_V2_EVENT_ERROR);
     netins_udp_client_detach_stream(client, stream);
 }
 
@@ -1911,8 +1972,13 @@ netins_udp_client_detach_all_streams(netins_udp_client_t *client,
                 ? NETINS_UDP_STREAM_STATE_CLOSED
                 : NETINS_UDP_STREAM_STATE_ERROR;
         }
+        uint32_t terminal_event =
+            stream->state == NETINS_UDP_STREAM_STATE_ERROR
+                ? NETINS_UDP_V2_EVENT_ERROR
+                : NETINS_UDP_V2_EVENT_CLOSED;
         pthread_cond_broadcast(&stream->cond);
         pthread_mutex_unlock(&stream->lock);
+        netins_udp_stream_notify(stream, terminal_event);
 
         if (release_request_ref) {
             netins_udp_stream_release(stream);
@@ -2323,6 +2389,9 @@ netins_udp_stream_recv_internal(netins_udp_stream_t *stream, void *buffer,
     if (stream->recv_head == NULL) {
         if (stream->recv_finished) {
             *fin = 1;
+            if (!peek) {
+                stream->recv_eof_delivered = 1;
+            }
             pthread_mutex_unlock(&stream->lock);
             return 0;
         }
@@ -2867,6 +2936,120 @@ netins_udp_client_get_snapshot(netins_udp_client_t *client,
         return NETINS_UDP_ERROR;
     }
     return netins_udp_observer_get_snapshot(client->observer, out);
+}
+
+int
+netins_udp_client_get_private_snapshot(
+    netins_udp_client_t *client,
+    netins_udp_observer_private_snapshot_t *out)
+{
+    if (client == NULL || client->observer == NULL || out == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    return netins_udp_observer_get_private_snapshot(client->observer, out);
+}
+
+int
+netins_udp_client_get_events(netins_udp_client_t *client,
+    uint32_t *out_events)
+{
+    if (client == NULL || out_events == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    /*
+     * Connection events are transitions only for a client HTTP/3 handle.
+     * Request body readiness belongs to the independent request descriptor.
+     */
+    *out_events = 0;
+    return NETINS_UDP_OK;
+}
+
+void
+netins_udp_client_set_notify(netins_udp_client_t *client,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    if (client == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&client->lock);
+    client->notify = notify;
+    client->notify_user_data = user_data;
+    int state = client->state;
+    pthread_mutex_unlock(&client->lock);
+    if (notify != NULL) {
+        uint32_t events = state == NETINS_UDP_STATE_CONNECTED
+            ? NETINS_UDP_V2_EVENT_CONNECTED : 0;
+        if (state == NETINS_UDP_STATE_CLOSED) {
+            events |= NETINS_UDP_V2_EVENT_CLOSED;
+        } else if (state == NETINS_UDP_STATE_ERROR) {
+            events |= NETINS_UDP_V2_EVENT_ERROR;
+        }
+        if (events != 0) {
+            notify(user_data, events);
+        }
+    }
+}
+
+int
+netins_udp_client_h3_request_get_events(netins_udp_stream_t *stream,
+    uint32_t *out_events)
+{
+    if (stream == NULL || out_events == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&stream->lock);
+    uint32_t events = 0;
+    if (stream->recv_head != NULL
+        || (stream->recv_finished && !stream->recv_eof_delivered))
+    {
+        events |= NETINS_UDP_V2_EVENT_READABLE;
+    }
+    if (!stream->send_fin_requested && !stream->send_finished
+        && !stream->close_requested
+        && stream->state != NETINS_UDP_STREAM_STATE_CLOSED
+        && stream->state != NETINS_UDP_STREAM_STATE_ERROR
+        && stream->send_queue_bytes < stream->config.send_queue_limit_bytes)
+    {
+        events |= NETINS_UDP_V2_EVENT_WRITABLE;
+    }
+    *out_events = events;
+    pthread_mutex_unlock(&stream->lock);
+    return NETINS_UDP_OK;
+}
+
+void
+netins_udp_client_h3_request_set_notify(netins_udp_stream_t *stream,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    if (stream == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&stream->lock);
+    stream->notify = notify;
+    stream->notify_user_data = user_data;
+    uint32_t events = 0;
+    if (stream->recv_head != NULL
+        || (stream->recv_finished && !stream->recv_eof_delivered))
+    {
+        events |= NETINS_UDP_V2_EVENT_READABLE;
+    }
+    if (!stream->send_fin_requested && !stream->send_finished
+        && !stream->close_requested
+        && stream->state != NETINS_UDP_STREAM_STATE_CLOSED
+        && stream->state != NETINS_UDP_STREAM_STATE_ERROR
+        && stream->send_queue_bytes < stream->config.send_queue_limit_bytes)
+    {
+        events |= NETINS_UDP_V2_EVENT_WRITABLE;
+    }
+    if (stream->state == NETINS_UDP_STREAM_STATE_CLOSED) {
+        events |= NETINS_UDP_V2_EVENT_CLOSED;
+    } else if (stream->state == NETINS_UDP_STREAM_STATE_ERROR) {
+        events |= NETINS_UDP_V2_EVENT_ERROR;
+    }
+    pthread_mutex_unlock(&stream->lock);
+    if (notify != NULL && events != 0) {
+        notify(user_data, events);
+    }
 }
 
 int

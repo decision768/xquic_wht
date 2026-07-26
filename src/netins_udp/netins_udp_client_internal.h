@@ -6,6 +6,9 @@
 #include <xquic/netins_udp.h>
 #include <xquic/xquic.h>
 
+#include "netins_udp_observer_internal.h"
+#include "netins_udp_v2_transport.h"
+
 #define NETINS_UDP_CLIENT_H3_MAX_HEADERS       16U
 #define NETINS_UDP_CLIENT_H3_HEADER_NAME_LEN   64U
 #define NETINS_UDP_CLIENT_H3_HEADER_VALUE_LEN  256U
@@ -72,5 +75,16 @@ void netins_udp_client_h3_request_close_async(
     netins_udp_stream_t *stream);
 void netins_udp_client_h3_request_abandon(
     netins_udp_stream_t *stream);
+int netins_udp_client_get_private_snapshot(
+    netins_udp_client_t *client,
+    netins_udp_observer_private_snapshot_t *out);
+int netins_udp_client_get_events(netins_udp_client_t *client,
+    uint32_t *out_events);
+void netins_udp_client_set_notify(netins_udp_client_t *client,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
+int netins_udp_client_h3_request_get_events(netins_udp_stream_t *stream,
+    uint32_t *out_events);
+void netins_udp_client_h3_request_set_notify(netins_udp_stream_t *stream,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 
 #endif /* NETINS_UDP_CLIENT_INTERNAL_H */

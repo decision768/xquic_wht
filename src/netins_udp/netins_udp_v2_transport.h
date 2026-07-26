@@ -18,6 +18,18 @@
 #define NETINS_UDP_V2_TRANSPORT_H3_HEADER_NAME_LEN 64U
 #define NETINS_UDP_V2_TRANSPORT_H3_HEADER_VALUE_LEN 256U
 
+#define NETINS_UDP_V2_EVENT_CONNECTED             (1U << 0)
+#define NETINS_UDP_V2_EVENT_ACCEPTABLE            (1U << 1)
+#define NETINS_UDP_V2_EVENT_READABLE              (1U << 2)
+#define NETINS_UDP_V2_EVENT_WRITABLE              (1U << 3)
+#define NETINS_UDP_V2_EVENT_PATH_CHANGED          (1U << 4)
+#define NETINS_UDP_V2_EVENT_CLOSED                (1U << 5)
+#define NETINS_UDP_V2_EVENT_ERROR                 (1U << 6)
+#define NETINS_UDP_V2_EVENT_H3_REQUEST_ACCEPTABLE (1U << 8)
+
+typedef void (*netins_udp_v2_transport_notify_cb)(void *user_data,
+    uint32_t events);
+
 typedef struct netins_udp_client_s netins_udp_v2_transport_client_t;
 typedef struct netins_udp_stream_s netins_udp_v2_transport_request_t;
 typedef struct netins_udp_server_s netins_udp_v2_transport_server_t;
@@ -35,6 +47,65 @@ typedef enum netins_udp_v2_transport_state_e {
     NETINS_UDP_V2_TRANSPORT_CLOSED = 5,
     NETINS_UDP_V2_TRANSPORT_ERROR = 6
 } netins_udp_v2_transport_state_t;
+
+typedef struct netins_udp_v2_transport_path_snapshot_s {
+    uint64_t path_id;
+    uint32_t path_index;
+    int path_state;
+    int app_status;
+    int cwnd_blocked;
+    char interface_name[NETINS_UDP_V2_TRANSPORT_INTERFACE_NAME_LEN];
+    char local_address[NETINS_UDP_V2_TRANSPORT_HOST_LEN];
+    char peer_address[NETINS_UDP_V2_TRANSPORT_HOST_LEN];
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t bytes_wire_sent;
+    uint64_t bytes_wire_received;
+    uint64_t bytes_acked;
+    uint64_t bytes_lost;
+    uint64_t bytes_inflight;
+    uint64_t cwnd_bytes;
+    uint64_t srtt_us;
+    uint64_t latest_rtt_us;
+    uint64_t min_rtt_us;
+    uint64_t last_received_time_us;
+    uint64_t last_sent_time_us;
+    double send_mbps;
+    double receive_mbps;
+    double acked_mbps;
+    double loss_rate;
+} netins_udp_v2_transport_path_snapshot_t;
+
+typedef struct netins_udp_v2_transport_snapshot_s {
+    uint64_t connection_id;
+    int state;
+    int handshake_finished;
+    int multipath_mode;
+    int multipath_active;
+    int connection_error;
+    uint32_t path_count;
+    uint32_t active_path_count;
+    uint32_t validating_path_count;
+    uint32_t path_table_truncated;
+    char alpn[64];
+    char local_address[NETINS_UDP_V2_TRANSPORT_HOST_LEN];
+    char peer_address[NETINS_UDP_V2_TRANSPORT_HOST_LEN];
+    uint64_t snapshot_time_us;
+    uint64_t sample_interval_us;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t bytes_wire_sent;
+    uint64_t bytes_wire_received;
+    uint64_t bytes_acked;
+    uint64_t bytes_lost;
+    uint64_t bytes_inflight;
+    double send_mbps;
+    double receive_mbps;
+    double acked_mbps;
+    double loss_rate;
+    netins_udp_v2_transport_path_snapshot_t
+        paths[NETINS_UDP_V2_TRANSPORT_MAX_PATHS];
+} netins_udp_v2_transport_snapshot_t;
 
 /*
  * Private, version-independent configuration passed from the V2 object to the
@@ -58,6 +129,8 @@ typedef struct netins_udp_v2_transport_config_s {
     int verify_peer;
     int scheduler;
     int congestion_control;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 } netins_udp_v2_transport_config_t;
 
 typedef struct netins_udp_v2_transport_server_config_s {
@@ -72,6 +145,8 @@ typedef struct netins_udp_v2_transport_server_config_s {
     uint32_t initial_cwnd_packets;
     int scheduler;
     int congestion_control;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 } netins_udp_v2_transport_server_config_t;
 
 typedef struct netins_udp_v2_transport_h3_header_s {
@@ -142,6 +217,14 @@ int netins_udp_v2_transport_client_get_last_error_code(
 int netins_udp_v2_transport_client_get_last_error_msg(
     netins_udp_v2_transport_client_t *client,
     char *buffer, size_t buffer_len);
+int netins_udp_v2_transport_client_get_snapshot(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_snapshot_t *out);
+int netins_udp_v2_transport_client_get_events(
+    netins_udp_v2_transport_client_t *client, uint32_t *out_events);
+void netins_udp_v2_transport_client_set_notify(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 void netins_udp_v2_transport_client_set_close_timeout(
     netins_udp_v2_transport_client_t *client, uint32_t close_timeout_ms);
 void netins_udp_v2_transport_client_request_close(
@@ -161,6 +244,11 @@ int netins_udp_v2_transport_server_get_last_error_code(
 int netins_udp_v2_transport_server_get_last_error_msg(
     netins_udp_v2_transport_server_t *server,
     char *buffer, size_t buffer_len);
+int netins_udp_v2_transport_server_get_events(
+    netins_udp_v2_transport_server_t *server, uint32_t *out_events);
+void netins_udp_v2_transport_server_set_notify(
+    netins_udp_v2_transport_server_t *server,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 int netins_udp_v2_transport_server_accept(
     netins_udp_v2_transport_server_t *server,
     uint32_t timeout_ms, int wait_forever,
@@ -180,6 +268,15 @@ int netins_udp_v2_transport_server_connection_get_last_error_msg(
 int netins_udp_v2_transport_server_connection_get_peer_address(
     netins_udp_v2_transport_server_connection_t *connection,
     struct sockaddr_storage *address, socklen_t *address_len);
+int netins_udp_v2_transport_server_connection_get_snapshot(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_snapshot_t *out);
+int netins_udp_v2_transport_server_connection_get_events(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t *out_events);
+void netins_udp_v2_transport_server_connection_set_notify(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 void netins_udp_v2_transport_server_connection_request_shutdown(
     netins_udp_v2_transport_server_connection_t *connection,
     uint64_t application_error);
@@ -204,6 +301,12 @@ int64_t netins_udp_v2_transport_server_request_recv(
 int netins_udp_v2_transport_server_request_get_info(
     netins_udp_v2_transport_server_request_t *request,
     netins_udp_v2_transport_h3_info_t *out);
+int netins_udp_v2_transport_server_request_get_events(
+    netins_udp_v2_transport_server_request_t *request,
+    uint32_t *out_events);
+void netins_udp_v2_transport_server_request_set_notify(
+    netins_udp_v2_transport_server_request_t *request,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 void netins_udp_v2_transport_server_request_close_async(
     netins_udp_v2_transport_server_request_t *request);
 void netins_udp_v2_transport_server_request_close(
@@ -224,10 +327,20 @@ int64_t netins_udp_v2_transport_h3_request_recv(
 int netins_udp_v2_transport_h3_request_get_info(
     netins_udp_v2_transport_request_t *request,
     netins_udp_v2_transport_h3_info_t *out);
+int netins_udp_v2_transport_h3_request_get_events(
+    netins_udp_v2_transport_request_t *request, uint32_t *out_events);
+void netins_udp_v2_transport_h3_request_set_notify(
+    netins_udp_v2_transport_request_t *request,
+    netins_udp_v2_transport_notify_cb notify, void *user_data);
 void netins_udp_v2_transport_h3_request_close_async(
     netins_udp_v2_transport_request_t *request);
 void netins_udp_v2_transport_h3_request_close(
     netins_udp_v2_transport_request_t *request,
     uint32_t timeout_ms);
+
+struct netins_udp_observer_s;
+int netins_udp_v2_transport_snapshot_from_observer(
+    struct netins_udp_observer_s *observer,
+    netins_udp_v2_transport_snapshot_t *out);
 
 #endif /* NETINS_UDP_V2_TRANSPORT_H */

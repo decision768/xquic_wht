@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -28,7 +29,11 @@ struct netins_udp_stream_s {
     unsigned char received[64];
     size_t received_length;
     size_t received_offset;
+    int eof_delivered;
     int close_async;
+    uint32_t events;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 };
 
 struct netins_udp_server_connection_s {
@@ -41,8 +46,12 @@ struct netins_udp_server_request_s {
     unsigned char received[64];
     size_t received_length;
     size_t received_offset;
+    int eof_delivered;
     int response_configured;
     int close_async;
+    uint32_t events;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 };
 
 static struct netins_udp_client_s g_client;
@@ -212,6 +221,9 @@ netins_udp_v2_transport_h3_request_recv(
     if (available == 0) {
         if (request->info.receive_finished) {
             *fin = 1;
+            if (!peek) {
+                request->eof_delivered = 1;
+            }
             return 0;
         }
         errno = EAGAIN;
@@ -238,6 +250,34 @@ netins_udp_v2_transport_h3_request_get_info(
 {
     *out = request->info;
     return 0;
+}
+
+int
+netins_udp_v2_transport_h3_request_get_events(
+    netins_udp_v2_transport_request_t *request, uint32_t *out_events)
+{
+    *out_events = request->events;
+    if (request->received_offset < request->received_length
+        || (request->info.receive_finished && !request->eof_delivered))
+    {
+        *out_events |= NETINS_UDP_V2_EVENT_READABLE;
+    }
+    return 0;
+}
+
+void
+netins_udp_v2_transport_h3_request_set_notify(
+    netins_udp_v2_transport_request_t *request,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    request->notify = notify;
+    request->notify_user_data = user_data;
+    if (notify != NULL
+        && (request->received_length != 0
+            || request->info.receive_finished))
+    {
+        notify(user_data, NETINS_UDP_V2_EVENT_READABLE);
+    }
 }
 
 void
@@ -345,6 +385,9 @@ netins_udp_v2_transport_server_request_recv(
         - request->received_offset;
     if (available == 0) {
         *fin = request->info.receive_finished;
+        if (*fin && !peek) {
+            request->eof_delivered = 1;
+        }
         return request->info.receive_finished ? 0 : -1;
     }
     size_t copied = available < length ? available : length;
@@ -368,6 +411,41 @@ netins_udp_v2_transport_server_request_get_info(
 {
     *out = request->info;
     return 0;
+}
+
+int
+netins_udp_v2_transport_server_request_get_events(
+    netins_udp_v2_transport_server_request_t *request,
+    uint32_t *out_events)
+{
+    *out_events = request->events;
+    if (request->received_offset < request->received_length
+        || (request->info.receive_finished && !request->eof_delivered))
+    {
+        *out_events |= NETINS_UDP_V2_EVENT_READABLE;
+    }
+    if (request->response_configured) {
+        *out_events |= NETINS_UDP_V2_EVENT_WRITABLE;
+    }
+    return 0;
+}
+
+void
+netins_udp_v2_transport_server_request_set_notify(
+    netins_udp_v2_transport_server_request_t *request,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    request->notify = notify;
+    request->notify_user_data = user_data;
+    uint32_t events = request->received_length != 0
+        || request->info.receive_finished
+        ? NETINS_UDP_V2_EVENT_READABLE : 0;
+    if (request->response_configured) {
+        events |= NETINS_UDP_V2_EVENT_WRITABLE;
+    }
+    if (notify != NULL && events != 0) {
+        notify(user_data, events);
+    }
 }
 
 void
@@ -467,6 +545,17 @@ main(void)
     assert(errno == EINVAL);
     request = open_request(&connection, "POST", 5);
     assert(g_child_count == 1);
+    int request_fd = netins_udp_h3_request_get_fd(request);
+    assert(request_fd >= 0);
+    struct pollfd request_poll = {
+        .fd = request_fd,
+        .events = POLLIN,
+    };
+    assert(poll(&request_poll, 1, 0) == 1);
+    uint32_t request_events = 0;
+    assert(netins_udp_h3_request_get_events(request, &request_events)
+        == NETINS_UDP_OK);
+    assert((request_events & NETINS_UDP_EVENT_READABLE) != 0);
     assert(netins_udp_h3_request_set_response(request, &response)
         == NETINS_UDP_ERROR);
     assert(errno == EOPNOTSUPP);
@@ -493,6 +582,12 @@ main(void)
     assert(netins_udp_h3_request_recv(request, buffer, 3, 0) == 3);
     assert(netins_udp_h3_request_recv(request, buffer, 3, 0) == 2);
     assert(netins_udp_h3_request_recv(request, buffer, 3, 0) == 0);
+    request_events = UINT32_MAX;
+    assert(netins_udp_h3_request_get_events(request, &request_events)
+        == NETINS_UDP_OK);
+    assert((request_events & NETINS_UDP_EVENT_READABLE) == 0);
+    request_poll.revents = 0;
+    assert(poll(&request_poll, 1, 0) == 0);
 
     netins_udp_h3_request_info_t info =
         NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
@@ -542,6 +637,11 @@ main(void)
         == NETINS_UDP_OK);
     assert(request != NULL);
     assert(g_child_count == 1);
+    assert(netins_udp_h3_request_get_fd(request) >= 0);
+    request_events = 0;
+    assert(netins_udp_h3_request_get_events(request, &request_events)
+        == NETINS_UDP_OK);
+    assert((request_events & NETINS_UDP_EVENT_READABLE) != 0);
     info = (netins_udp_h3_request_info_t)
         NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
     assert(netins_udp_h3_request_get_info(request, &info)

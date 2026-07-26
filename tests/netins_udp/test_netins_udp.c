@@ -59,8 +59,16 @@ prepare_mock_stats(void)
     path0->app_packet_bytes_sent = 70000;
     path0->delivered_bytes = 65000;
     path0->app_packet_bytes_recv = 90000;
+    path0->wire_bytes_recv = 95000;
+    path0->stream_payload_bytes_sent_unique = 60000;
     path0->stream_payload_bytes_recv_unique = 85000;
+    path0->retransmitted_bytes_sent = 1200;
     path0->srtt_us = 30000;
+    path0->latest_rtt_us = 31000;
+    path0->min_rtt_us = 20000;
+    path0->cwnd_bytes = 128000;
+    path0->inflight_bytes = 32000;
+    path0->lost_packets = 1;
 
     netins_udp_transport_path_metrics_t *path1 = &g_mock_metrics.paths[1];
     path1->path_id = 1;
@@ -72,8 +80,16 @@ prepare_mock_stats(void)
     path1->app_packet_bytes_sent = 30000;
     path1->delivered_bytes = 25000;
     path1->app_packet_bytes_recv = 50000;
+    path1->wire_bytes_recv = 55000;
+    path1->stream_payload_bytes_sent_unique = 20000;
     path1->stream_payload_bytes_recv_unique = 45000;
+    path1->retransmitted_bytes_sent = 800;
     path1->srtt_us = 45000;
+    path1->latest_rtt_us = 47000;
+    path1->min_rtt_us = 35000;
+    path1->cwnd_bytes = 96000;
+    path1->inflight_bytes = 16000;
+    path1->lost_packets = 1;
 }
 
 typedef struct reader_context_s {
@@ -162,6 +178,22 @@ main(void)
     assert(strcmp(by_id.paths[0].local_address, "10.0.0.2:41000") == 0);
     assert(by_id.statis.bytes_wire_sent == 120000);
     assert(by_id.statis.bytes_recv_effective == 130000);
+
+    netins_udp_observer_private_snapshot_t private_snapshot;
+    assert(netins_udp_observer_get_private_snapshot(host, &private_snapshot)
+        == NETINS_UDP_OK);
+    assert(private_snapshot.legacy.path_count == 2);
+    assert(private_snapshot.extended.path_count == 2);
+    assert(private_snapshot.extended.paths[0]
+        .stream_payload_bytes_sent_unique == 60000);
+    assert(private_snapshot.extended.paths[0]
+        .stream_payload_bytes_recv_unique == 85000);
+    assert(private_snapshot.extended.paths[0].wire_bytes_recv == 95000);
+    assert(private_snapshot.extended.paths[0].cwnd_bytes == 128000);
+    assert(private_snapshot.extended.paths[0].inflight_bytes == 32000);
+    assert(private_snapshot.extended.paths[0].latest_rtt_us == 31000);
+    assert(private_snapshot.extended.paths[0].min_rtt_us == 20000);
+    assert(private_snapshot.extended.paths[0].lost_packets == 1);
 
     /* Collector order changes must not change the public path indexes. */
     netins_udp_transport_path_metrics_t swap = g_mock_metrics.paths[0];

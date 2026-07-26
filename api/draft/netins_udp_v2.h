@@ -47,7 +47,6 @@ extern "C" {
 #define NETINS_UDP_ALL_PATHS                (-1)
 
 typedef struct netins_udp_s netins_udp_t;
-typedef struct netins_udp_stream_s netins_udp_stream_t;
 typedef struct netins_udp_h3_request_s netins_udp_h3_request_t;
 
 /*
@@ -66,11 +65,12 @@ typedef enum netins_udp_type_e {
     NETINS_UDP_TYPE_MPQUIC = 2
 } netins_udp_type_t;
 
-/* Application protocol selected before connect/listen. */
+/*
+ * The first formal V2 contract is HTTP/3-only. Value 1 is deliberately
+ * reserved so that the abandoned RAW_STREAM draft cannot be confused with
+ * the incompatible V1 stream API.
+ */
 typedef enum netins_udp_app_protocol_e {
-    /* netins-udp/1: default bidirectional QUIC byte stream. */
-    NETINS_UDP_APP_RAW_STREAM = 1,
-    /* HTTP/3: use netins_udp_h3_request_*; connection send/recv is invalid. */
     NETINS_UDP_APP_HTTP3 = 2
 } netins_udp_app_protocol_t;
 
@@ -159,8 +159,8 @@ typedef enum netins_udp_msg_flag_e {
 /*
  * Events reported by connection and child notification descriptors.
  * CONNECTED/PATH_CHANGED/CLOSED/ERROR are latched transition events.
- * ACCEPTABLE/READABLE/WRITABLE, STREAM_ACCEPTABLE and
- * H3_REQUEST_ACCEPTABLE are level conditions.
+ * ACCEPTABLE/READABLE/WRITABLE and H3_REQUEST_ACCEPTABLE are level
+ * conditions. Bit 7 is reserved for ABI stability.
  */
 typedef enum netins_udp_event_e {
     NETINS_UDP_EVENT_NONE = 0,
@@ -171,7 +171,6 @@ typedef enum netins_udp_event_e {
     NETINS_UDP_EVENT_PATH_CHANGED = 1U << 4,
     NETINS_UDP_EVENT_CLOSED = 1U << 5,
     NETINS_UDP_EVENT_ERROR = 1U << 6,
-    NETINS_UDP_EVENT_STREAM_ACCEPTABLE = 1U << 7,
     NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE = 1U << 8
 } netins_udp_event_t;
 
@@ -193,9 +192,6 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_CONGESTION_CONTROL = 15,  /* int: netins_udp_congestion_control_t */
     NETINS_UDP_OPT_SOCKOPT = 16              /* netins_udp_sockopt_t */
 } netins_udp_opt_t;
-
-typedef void (*netins_udp_logger_cb)(int level, const char *message,
-    void *user_data);
 
 typedef struct netins_udp_interfaces_s {
     uint32_t struct_size;
@@ -295,6 +291,10 @@ typedef struct netins_udp_statis_s {
     uint64_t bytes_wire_sent;
     uint64_t bytes_wire_received;
     uint64_t bytes_acked;
+    /*
+     * Encoded retransmitted bytes used as a loss-volume proxy. XQUIC does not
+     * retain an exact lost-byte counter; loss_rate is the packet-based ratio.
+     */
     uint64_t bytes_lost;
     uint64_t bytes_inflight;
     double send_mbps;
@@ -325,6 +325,7 @@ typedef struct netins_udp_path_statis_s {
     uint64_t bytes_sent;
     uint64_t bytes_received;
     uint64_t bytes_acked;
+    /* Same retransmitted-byte loss proxy as netins_udp_statis_t. */
     uint64_t bytes_lost;
     uint64_t bytes_inflight;
     uint64_t cwnd_bytes;
@@ -372,26 +373,6 @@ typedef struct netins_udp_snapshot_s {
 #define NETINS_UDP_SNAPSHOT_INITIALIZER \
     { sizeof(netins_udp_snapshot_t), NETINS_UDP_API_VERSION, \
       NETINS_UDP_INFO_INITIALIZER, NETINS_UDP_STATIS_INITIALIZER }
-
-typedef struct netins_udp_stream_info_s {
-    uint32_t struct_size;
-    uint32_t api_version;
-    uint64_t stream_id;
-    int local_initiated;
-    int bidirectional;
-    int send_finished;
-    int receive_finished;
-    int last_error_code;
-    uint32_t reserved32;
-    /* Body bytes accepted/delivered by this public stream API object. */
-    uint64_t bytes_sent;
-    uint64_t bytes_received;
-    uint64_t reserved[4];
-} netins_udp_stream_info_t;
-
-#define NETINS_UDP_STREAM_INFO_INITIALIZER \
-    { sizeof(netins_udp_stream_info_t), NETINS_UDP_API_VERSION, \
-      NETINS_UDP_INVALID_STREAM_ID }
 
 typedef struct netins_udp_h3_header_s {
     char name[NETINS_UDP_H3_HEADER_NAME_LEN];
@@ -467,7 +448,11 @@ NETINS_UDP_PUBLIC int netins_udp_init(void);
  * while public handles still exist.
  */
 NETINS_UDP_PUBLIC int netins_udp_cleanup(void);
-NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
+/*
+ * The V2 version query is deliberately absent while this header is a
+ * non-installed draft. The installed V1 netins_udp_get_api_version() remains
+ * the only version symbol and continues to return 1.
+ */
 
 /*
  * Creates an unconnected object. On allocation/initialization failure, returns
@@ -502,8 +487,6 @@ NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *netins,
 NETINS_UDP_PUBLIC int netins_udp_get_opt(netins_udp_t *netins,
     int option, void *value, size_t *value_len);
 
-NETINS_UDP_PUBLIC int netins_udp_set_logger(netins_udp_t *netins,
-    netins_udp_logger_cb logger, void *user_data);
 NETINS_UDP_PUBLIC void netins_udp_tls_config_init(
     netins_udp_tls_config_t *config);
 
@@ -538,44 +521,10 @@ NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *netins,
     uint64_t application_error);
 
 /*
- * send/recv operate only on the default bidirectional stream in RAW_STREAM
- * mode. They support partial transfers. recv returns 0 only after stream FIN
- * and all buffered data have been delivered. On return from send, the caller
- * may immediately reuse or release the supplied buffer.
- */
-NETINS_UDP_PUBLIC ssize_t netins_udp_send(netins_udp_t *netins,
-    const void *data, size_t length, int flags);
-NETINS_UDP_PUBLIC ssize_t netins_udp_recv(netins_udp_t *netins,
-    void *data, size_t length, int flags);
-
-/* Additional raw QUIC streams; invalid in HTTP3 mode. */
-NETINS_UDP_PUBLIC int netins_udp_stream_open(netins_udp_t *netins,
-    netins_udp_stream_t **out_stream);
-NETINS_UDP_PUBLIC int netins_udp_stream_accept(netins_udp_t *netins,
-    netins_udp_stream_t **out_stream);
-NETINS_UDP_PUBLIC ssize_t netins_udp_stream_send(
-    netins_udp_stream_t *stream, const void *data, size_t length, int flags);
-NETINS_UDP_PUBLIC ssize_t netins_udp_stream_recv(
-    netins_udp_stream_t *stream, void *data, size_t length, int flags);
-NETINS_UDP_PUBLIC int netins_udp_stream_get_info(
-    netins_udp_stream_t *stream, netins_udp_stream_info_t *out);
-NETINS_UDP_PUBLIC int netins_udp_stream_get_last_error_code(
-    netins_udp_stream_t *stream);
-NETINS_UDP_PUBLIC int netins_udp_stream_get_last_error_msg(
-    netins_udp_stream_t *stream, char *buffer, size_t buffer_len);
-NETINS_UDP_PUBLIC int netins_udp_stream_get_fd(
-    netins_udp_stream_t *stream);
-NETINS_UDP_PUBLIC int netins_udp_stream_get_events(
-    netins_udp_stream_t *stream, uint32_t *out_events);
-NETINS_UDP_PUBLIC int netins_udp_stream_shutdown(
-    netins_udp_stream_t *stream, uint64_t application_error);
-NETINS_UDP_PUBLIC void netins_udp_stream_close(
-    netins_udp_stream_t *stream);
-
-/*
  * HTTP/3 request extension. Client opens requests; server accepts requests.
  * Body send/recv has the same partial-transfer, blocking and ownership rules as
- * raw stream send/recv. config_init selects GET, "/", application/octet-stream
+ * the connection options. config_init selects GET, "/",
+ * application/octet-stream
  * and a zero-length request body. A zero-length request/response is finished
  * with its headers. For a non-empty body, FIN is valid only on the call that
  * accepts the final declared content-length bytes. If content_length is
@@ -660,16 +609,13 @@ NETINS_UDP_PUBLIC int netins_udp_get_last_error_msg(
  * returns latched transitions plus current level conditions, then rearms the
  * descriptor before returning if any level condition is still true.
  *
- * On a connection, READABLE/WRITABLE refer only to the default RAW_STREAM.
- * Additional raw streams and H3 requests use their child get_fd/get_events.
+ * Listener ACCEPTABLE and accepted-connection H3_REQUEST_ACCEPTABLE are
+ * connection-level conditions. HTTP/3 request READABLE/WRITABLE are reported
+ * by the request's own get_fd/get_events descriptor.
  */
 NETINS_UDP_PUBLIC int netins_udp_get_fd(netins_udp_t *netins);
 NETINS_UDP_PUBLIC int netins_udp_get_events(netins_udp_t *netins,
     uint32_t *out_events);
-
-NETINS_UDP_PUBLIC const char *netins_udp_state_name(int state);
-NETINS_UDP_PUBLIC const char *netins_udp_path_state_name(int state);
-NETINS_UDP_PUBLIC const char *netins_udp_app_path_status_name(int status);
 
 #ifdef __cplusplus
 }

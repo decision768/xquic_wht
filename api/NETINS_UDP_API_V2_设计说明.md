@@ -2,11 +2,12 @@
 
 ## 1. 文档状态
 
-本文档是 `netins_udp` V2 的接口契约，阶段二以此文档和
+本文档是 `netins_udp` V2 的接口契约，阶段八以此文档和
 `api/draft/netins_udp_v2.h` 为准。
 
 当前安装头文件仍是 V1 的 `include/xquic/netins_udp.h`。V2 草案已经作为内部
-契约参与客户端生命周期和 HTTP/3 request 数据面的编译、测试及增量符号导出，
+契约覆盖完整连接生命周期、HTTP/3 request 数据面、状态统计和通知机制，并已
+纳入编译目标、测试目标及增量符号导出，
 但尚不安装，也不把 `netins_udp_get_api_version()` 切换到 2。
 
 阶段 3.5 已恢复 XQUIC 原公共 ABI，并把扩展统计、连接生命周期、路径元数据和
@@ -35,8 +36,13 @@ if (netins_udp_connect(conn, host, port) != NETINS_UDP_OK) {
     /* netins_udp_get_last_error_* */
 }
 
-ssize_t sent = netins_udp_send(conn, data, length, 0);
-ssize_t received = netins_udp_recv(conn, buffer, capacity, 0);
+netins_udp_h3_request_config_t config;
+netins_udp_h3_request_config_init(&config);
+netins_udp_h3_request_t *request = NULL;
+netins_udp_h3_request_open(conn, &config, &request);
+ssize_t received =
+    netins_udp_h3_request_recv(request, buffer, capacity, 0);
+netins_udp_h3_request_close(request);
 netins_udp_close(conn);
 netins_udp_cleanup();
 ```
@@ -58,8 +64,8 @@ netins_udp_cleanup();
 | 创建接口 | `netins_udp_new(NETINS_UDP_TYPE_QUIC/MPQUIC)` |
 | 关闭接口 | `netins_udp_close()` 关闭真实传输并释放句柄 |
 | 默认模式 | 阻塞 |
-| 普通收发 | 默认双向 QUIC stream 的字节流 |
-| HTTP/3 | 独立的 `netins_udp_h3_request_*` 扩展 |
+| 数据收发 | 首个正式 V2 只发布 `netins_udp_h3_request_*` |
+| RAW stream | ABI 冻结前不发布，保留值 1 但不声明名称或符号 |
 | 多路径结果 | 连接后通过 `is_multipath/info/path_count` 查询 |
 | 状态结构 | 调用方提供结构体，API 复制输出 |
 | 错误码 | 返回 `-1`，详细错误为 errno 风格 |
@@ -177,28 +183,20 @@ netins_udp_get_path_count(conn, &count);
 
 ## 6. 应用协议与数据语义
 
-### 6.1 RAW_STREAM
+### 6.1 首个正式 V2 仅发布 HTTP/3
 
-默认应用模式为 `NETINS_UDP_APP_RAW_STREAM`，使用库私有 ALPN
-`netins-udp/1`。
+V2 草案早期曾保留 RAW_STREAM 和连接级 `send/recv` 设计，但这些名称会与已发布
+V1 stream API 形成同名不同签名的 ABI 风险。阶段八起，首个正式 V2 明确为
+HTTP/3-only：
 
-连接建立阶段由库创建并确认一条默认双向 stream。因此阻塞 connect/accept
-成功返回时，连接级 `send/recv` 已经可用。
-
-RAW_STREAM 只保证本库 V2 客户端和服务端之间互通，不承诺与任意第三方 QUIC
-应用协议直接互通。
-
-```c
-netins_udp_send(conn, ...);
-netins_udp_recv(conn, ...);
-```
-
-只操作这条默认 stream，不会在多条 stream 之间拼接数据。额外 stream 必须使用
-`netins_udp_stream_*`。
+- 默认且唯一支持的应用协议为 `NETINS_UDP_APP_HTTP3`；
+- 应用协议枚举值 1 保留，但不声明 RAW_STREAM 名称；
+- 不声明或导出 V2 连接级 `send/recv` 和 raw `stream_*`；
+- 后续若发布 raw QUIC stream，必须使用不与 V1 冲突的新命名并单独冻结语义。
 
 ### 6.2 HTTP/3
 
-HTTP/3 模式必须在 connect/listen 前设置：
+HTTP/3 是默认且唯一支持的模式；调用方可以在 connect/listen 前显式设置：
 
 ```c
 int protocol = NETINS_UDP_APP_HTTP3;
@@ -206,8 +204,7 @@ netins_udp_set_opt(conn, NETINS_UDP_OPT_APP_PROTOCOL,
     &protocol, sizeof(protocol));
 ```
 
-HTTP/3 模式中，连接级 `netins_udp_send/recv` 和原始
-`netins_udp_stream_*` 返回 `-1/EOPNOTSUPP`。GET/POST 使用：
+GET/POST 使用：
 
 ```c
 netins_udp_h3_request_open();
@@ -267,14 +264,19 @@ netins_udp_h3_request_close(request);
 ```
 
 `request_accept()` 的阻塞行为继承 accepted connection 的 `NONBLOCK` 和
-`RECV_TIMEOUT_MS`。请求正文接收队列上限为 16 MiB，响应正文发送队列上限为
-4 MiB；达到上限时通过背压返回或等待，不允许无界增长。服务端应用线程只复制
+`RECV_TIMEOUT_MS`。单 request 的请求正文接收队列和响应正文发送队列上限均为
+4 MiB；每条连接分别预留不超过 64 MiB 的收/发容量，全 server 分别预留不超过
+256 MiB 的收/发容量。达到上限时拒绝新 request 或通过背压返回/等待，不允许
+无界增长。服务端应用线程只复制
 数据和修改请求状态，所有 `xqc_h3_request_*()` 操作均由共享 server engine
 线程串行执行。`set_response()` 只能成功一次，当前只接受 200 到 599 的最终
 响应状态码。
-服务端 `request_close()` 会继续冲刷已经完整提交（含 FIN）的响应队列；如果响应
-尚未配置或正文只提交了一部分，则按取消处理。连接 shutdown、断网和协议错误
-仍会立即中止 request。
+服务端 `request_close()` 会继续冲刷已经完整提交（含 FIN）的响应队列。公开
+request 关闭后，尚未交付给应用的请求正文不再入公开接收队列，而由 engine 线程
+以每批最多 256 KiB 的方式丢弃式 drain，直到 FIN 或真实协议错误；这保证大 POST
+提前响应/提前关闭时不会因未读流控数据卡住。响应未配置或只提交一部分时，在
+请求正文 drain 完成后按取消处理。连接 shutdown、断网和协议错误仍会立即中止
+request。
 
 ### 6.3 send/recv
 
@@ -329,9 +331,13 @@ if (netins_udp_listen(listener, NULL, 8443) == NULL) {
 
 netins_udp_t *client = netins_udp_accept(listener, NULL, NULL);
 if (client != NULL) {
-    netins_udp_recv(client, buffer, sizeof(buffer), 0);
-    netins_udp_send(client, response, response_length,
+    netins_udp_h3_request_t *request = NULL;
+    netins_udp_h3_request_accept(client, &request);
+    netins_udp_h3_request_recv(request, buffer, sizeof(buffer), 0);
+    netins_udp_h3_request_set_response(request, &response_config);
+    netins_udp_h3_request_send(request, response, response_length,
         NETINS_UDP_MSG_FIN);
+    netins_udp_h3_request_close(request);
     netins_udp_close(client);
 }
 netins_udp_close(listener);
@@ -420,10 +426,12 @@ V2 公共结构内部使用固定宽度整数、固定大小字符数组和预�
   使用的路径；重传和重注入不再次增加。
 - 接收侧唯一字节只在此前未交付的 stream offset 被 `xqc_stream_recv()` 向上层
   移动时计数，并归属实际提供这些字节的接收路径；完全或部分重叠均不重复增加。
-- RAW child stream 和 H3 request info 中的 `bytes_sent/received` 是各公共对象
-  接受/交付的正文数据；H3 request 的计数不包含 H3/QPACK framing 与头部。
+- H3 request info 中的 `bytes_sent/received` 是各公开 request 对象接受/交付
+  的正文数据，不包含 H3/QPACK framing 与头部。
 - `bytes_wire_sent/received` 是包含控制包、重传和重注入的 UDP payload 字节。
 - `bytes_acked` 是被 ACK 确认的已发送 wire 字节。
+- XQUIC 当前没有精确 lost-byte 累计值，`bytes_lost` 使用丢包后编码重传字节作为
+  损失体量代理；`loss_rate` 保持按丢失包数/发送包数计算。
 - `bytes_inflight` 是快照时尚未确认的 wire 字节。
 - `*_mbps` 按相邻内部快照的区间增量计算，单位为 Mbit/s。
 - RTT 和时间字段单位为微秒，CWND/inflight 字段单位为字节。
@@ -473,19 +481,23 @@ int netins_udp_get_fd(netins_udp_t *netins);
 - 可用于 epoll/select/poll。
 - 调用方不得直接 read/write/close。
 - fd 可读后调用对应的 `get_events()` 获取并确认事件。
-- 每个 listener/connection、额外 raw stream 和 H3 request 都有独立通知 fd。
+- 每个 listener/connection 和 H3 request 都有独立通知 fd。
 - 关闭句柄后 fd 失效。
 - 通知采用“边沿事件锁存 + 就绪条件电平”的组合语义。`CONNECTED`、
   `PATH_CHANGED`、`CLOSED`、`ERROR` 锁存到下一次 `get_events()`；
-  `ACCEPTABLE`、`READABLE`、`WRITABLE`、`STREAM_ACCEPTABLE` 和
+  `ACCEPTABLE`、`READABLE`、`WRITABLE` 和
   `H3_REQUEST_ACCEPTABLE` 只要对应条件仍成立就继续报告。
 - `get_events()` 原子清除通知计数、返回锁存事件和当前电平条件；若条件在返回
   时仍成立，库必须先重新置为可读，避免 ET epoll 丢失唤醒。
-- connection 的 `READABLE/WRITABLE` 只表示 RAW_STREAM 默认 stream；
-  HTTP/3 connection 不报告这两个事件。
-- `STREAM_ACCEPTABLE` 和 `H3_REQUEST_ACCEPTABLE` 分别表示连接的对应接受队列
-  非空。已取得的额外 stream/request 使用子句柄自己的 fd，其适用事件仅为
+- 电平条件查询使用通知代次握手；如果 READABLE/WRITABLE 等事件恰好发生在
+  后端状态采样与 pipe 清空之间，库会保留一次重新查询唤醒，不会把新事件随旧
+  字节一起清掉。
+- listener 使用 `ACCEPTABLE`，accepted connection 使用
+  `H3_REQUEST_ACCEPTABLE` 表示对应接受队列非空。已取得的 request 使用子句柄
+  自己的 fd，其适用事件仅为
   `READABLE`、`WRITABLE`、`CLOSED` 和 `ERROR`。
+- request 的 EOF 只在尚未向调用方交付时属于 `READABLE`；调用方读到一次 0 后
+  不再重置可读电平，避免 epoll 忙循环。
 - 父连接关闭后尚未由调用方 close 的子句柄保持可查询，并收到
   `CLOSED`，异常中止时同时收到 `ERROR`；其 fd 到子句柄 close 后才失效。
 
@@ -523,7 +535,7 @@ V2 目标是公共 API 线程安全：
 | `netins_udp_client_close()` | `netins_udp_close()` |
 | V1 `netins_udp_stream_*` H3 request | V2 `netins_udp_h3_request_*` |
 | 无服务端对象 | `listen/accept` |
-| 无普通 QUIC stream | 连接级 send/recv + V2 stream API |
+| 无普通 QUIC stream | 首个正式 V2 不发布 RAW stream |
 | client snapshot | 统一句柄 snapshot |
 
 V1 观察器注册表可保留为内部诊断能力，阶段三使用
@@ -535,8 +547,9 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 槽，以及 mini/API 共用 backend。它不替换成熟 mini 的 socket/Libevent 主循环，
 也不改变拥塞控制器、调度器和 XQUIC engine 串行执行模型。
 
-客户端生命周期、阶段五客户端 HTTP/3 数据对象、阶段六服务端连接生命周期和
-阶段七服务端 HTTP/3 request 数据面已实现并编译以下增量 V2 符号：
+客户端生命周期、阶段五客户端 HTTP/3 数据对象、阶段六服务端连接生命周期、
+阶段七服务端 HTTP/3 request 数据面，以及阶段八状态统计和通知闭环已实现并纳入
+编译目标，包含以下增量 V2 符号：
 
 - `netins_udp_init()` / `netins_udp_cleanup()`；
 - `netins_udp_new()` / `netins_udp_close()`；
@@ -544,11 +557,13 @@ V1 观察器注册表可保留为内部诊断能力，阶段三使用
 - `netins_udp_connect()` / `netins_udp_get_state()`；
 - `netins_udp_listen()` / `netins_udp_accept()`；
 - `netins_udp_shutdown()`；
-- 连接句柄错误查询和 TLS 配置初始化。
+- `netins_udp_is_multipath/get_path_count/get_info/get_statis/`
+  `get_path_statis/get_snapshot/get_close_reason`；
+- 连接句柄 `get_fd/get_events`、错误查询和 TLS 配置初始化；
 - H3 request/response 配置初始化和扩展头添加；
 - 客户端 `netins_udp_h3_request_open/send/recv/get_info/close`；
 - 服务端 `netins_udp_h3_request_accept/set_response/send/recv/get_info/close`；
-- H3 request 错误查询。
+- H3 request `get_fd/get_events` 和错误查询。
 
 这些函数通过私有 transport bridge 复用现有 standalone H3 client。V1 的
 `netins_udp_client_connect()` 仍保持原阻塞语义，mini 的 socket、Libevent、
@@ -568,21 +583,35 @@ connection。accepted close 只请求关闭对应的 QUIC connection，最后一
 线程执行，应用线程只设置关闭请求。现有 mini_server 的 Libevent、UDP 收包和
 engine 调度路径没有修改。
 
-阶段七在阶段六的独立 server backend 内增加 request 接收队列和有界正文队列。
+阶段七/八在阶段六的独立 server backend 内增加 request 接收队列、有界正文队列、
+丢弃式 drain 以及连接/server 总预算。
 XQUIC request create/read/write/close 回调仍只运行在原 server engine 线程；
 公开 API 线程不会直接调用 XQUIC。每个 request 独立持有连接引用，accepted
 connection 或 listener 先关闭时，尚未由调用方 close 的 request 仍可查询并
-安全释放。每连接最多保留 256 个 request 对象和 256 个待 accept request，
-超过限制时关闭新 request，避免异常客户端导致无界内存增长。
+安全释放。每个 request 预留 4 MiB 收队列和 4 MiB 发队列容量；每连接收/发各
+64 MiB、全 server 收/发各 256 MiB，因此当前最多接纳 16 个并发 request/连接和
+64 个并发 request/server。达到预算时关闭新 request，避免异常客户端导致无界
+内存增长。
 
-调用 connect/listen 前仍必须设置 `APP_PROTOCOL=HTTP3`，listener 还必须配置服务端
-证书和私钥。当前 XQUIC TLS server backend 尚不支持强制客户端证书校验，因此
+HTTP/3 已是默认应用协议，显式设置时只接受 `APP_PROTOCOL=HTTP3`；listener 还
+必须配置服务端证书和私钥。当前 XQUIC TLS server backend 尚不支持强制客户端
+证书校验，因此
 `require_client_certificate` 或 listener `ca_file` 返回 `EOPNOTSUPP`。
-连接级 `netins_udp_send/recv`
-属于 RAW_STREAM，在当前实现中明确返回 `EOPNOTSUPP`。默认 RAW_STREAM、普通
-stream、request/connection 通知 fd、SOCKOPT、自定义客户端证书/CA 文件以及
-现有 mini 到 V2 API 的迁移仍待后续阶段实现。
+V2 草案不再声明或导出连接级 `netins_udp_send/recv` 和普通 raw stream。SOCKOPT、
+自定义客户端证书/CA 文件以及现有 mini 到 V2 API 的迁移仍待后续阶段实现。
 
 为避免中途版本破坏，正式 `include/xquic/netins_udp.h` 和现有
-`netins_udp_get_api_version()==1` 暂不切换。`api/draft/netins_udp_v2.h` 已用于
-内部编译和测试，但仍不安装；完成全部 V2 符号和 ABI 检查后再统一切换到版本 2。
+`netins_udp_get_api_version()==1` 暂不切换。V2 草案中也暂不声明这个版本查询
+符号，避免解析到 V1 实现后产生错误语义。`api/draft/netins_udp_v2.h` 已用于
+内部编译和测试，但仍不安装；完成真实目标平台验收后再统一切换到版本 2。
+
+阶段八测试入口：
+
+- `netins_udp_v2_notifier_unit_test`：通知锁存、电平重置、独立 fd、采样/清空竞态
+  不丢唤醒和 EOF 后不忙循环；
+- `netins_udp_v2_abi_guard`：V1/V2 名称隔离、V1 版本保持 1、V2 不安装及
+  HTTP/3-only 符号检查；
+- `netins_udp_v2_loopback_test CERT KEY PORT`：本机真实 client/server，1 个 GET 和
+  4 个并发 POST，其中一个正文大于 17 MiB；服务端不读正文而提前 204/close，
+  在 accepted connection 存活时先关闭 listener，并覆盖真实通知、accepted
+  先关闭、客户端感知 peer close，以及本机 UDP blackhole 握手超时。

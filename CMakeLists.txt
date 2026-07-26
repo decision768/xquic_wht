@@ -421,6 +421,7 @@ set (
     "src/netins_udp/netins_udp_transport_metrics.c"
     "src/netins_udp/netins_udp_client.c"
     "src/netins_udp/netins_udp_server.c"
+    "src/netins_udp/netins_udp_v2_notifier.c"
     "src/netins_udp/netins_udp_v2_client.c"
     "src/netins_udp/netins_udp_v2_h3.c"
     "src/netins_udp/netins_udp_v2_transport.c"
@@ -461,6 +462,7 @@ if(NETINS_UDP_BUILD_TESTS)
     add_test(NAME netins_udp_unit_test COMMAND netins_udp_unit_test)
 
     add_executable(netins_udp_v2_client_unit_test
+        src/netins_udp/netins_udp_v2_notifier.c
         src/netins_udp/netins_udp_v2_client.c
         tests/netins_udp/test_netins_udp_v2_client.c
     )
@@ -473,6 +475,7 @@ if(NETINS_UDP_BUILD_TESTS)
         COMMAND netins_udp_v2_client_unit_test)
 
     add_executable(netins_udp_v2_h3_unit_test
+        src/netins_udp/netins_udp_v2_notifier.c
         src/netins_udp/netins_udp_v2_h3.c
         tests/netins_udp/test_netins_udp_v2_h3.c
     )
@@ -483,6 +486,40 @@ if(NETINS_UDP_BUILD_TESTS)
     target_link_libraries(netins_udp_v2_h3_unit_test pthread)
     add_test(NAME netins_udp_v2_h3_unit_test
         COMMAND netins_udp_v2_h3_unit_test)
+
+    add_executable(netins_udp_v2_notifier_unit_test
+        src/netins_udp/netins_udp_v2_notifier.c
+        tests/netins_udp/test_netins_udp_v2_notifier.c
+    )
+    target_include_directories(netins_udp_v2_notifier_unit_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
+    )
+    target_link_libraries(netins_udp_v2_notifier_unit_test pthread)
+    add_test(NAME netins_udp_v2_notifier_unit_test
+        COMMAND netins_udp_v2_notifier_unit_test)
+
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME netins_udp_v2_abi_guard
+            COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_v2_abi.py)
+    endif()
+
+    # Manual real-transport acceptance test. It requires a certificate/key:
+    # netins_udp_v2_loopback_test server.crt server.key 18443
+    add_executable(netins_udp_v2_loopback_test
+        tests/netins_udp/test_netins_udp_v2_loopback.c
+    )
+    target_include_directories(netins_udp_v2_loopback_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(netins_udp_v2_loopback_test PRIVATE
+        xquic-static
+        ${SSL_LIB_PATH}
+        pthread
+        dl
+        m
+    )
 
     add_library(netins_udp_example OBJECT
         api/examples/netins_udp_snapshot_example.c

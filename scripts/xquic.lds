@@ -173,11 +173,18 @@ XQUIC_VERS_1.0 {
         netins_udp_listen;
         netins_udp_accept;
         netins_udp_shutdown;
-        netins_udp_send;
-        netins_udp_recv;
         netins_udp_get_state;
+        netins_udp_is_multipath;
+        netins_udp_get_path_count;
+        netins_udp_get_info;
+        netins_udp_get_statis;
+        netins_udp_get_path_statis;
+        netins_udp_get_snapshot;
+        netins_udp_get_close_reason;
         netins_udp_get_last_error_code;
         netins_udp_get_last_error_msg;
+        netins_udp_get_fd;
+        netins_udp_get_events;
         netins_udp_h3_request_config_init;
         netins_udp_h3_request_config_add_header;
         netins_udp_h3_response_config_init;
@@ -190,6 +197,8 @@ XQUIC_VERS_1.0 {
         netins_udp_h3_request_get_info;
         netins_udp_h3_request_get_last_error_code;
         netins_udp_h3_request_get_last_error_msg;
+        netins_udp_h3_request_get_fd;
+        netins_udp_h3_request_get_events;
         netins_udp_h3_request_close;
     local:
         *;

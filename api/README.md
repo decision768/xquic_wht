@@ -14,9 +14,9 @@ connection contract for V2 is documented in
 [`NETINS_UDP_API_V2_设计说明.md`](NETINS_UDP_API_V2_设计说明.md), with its
 non-installed contract header in [`draft/netins_udp_v2.h`](draft/netins_udp_v2.h).
 The V2 client lifecycle, client and server HTTP/3 request symbols, and server
-listener/accepted-connection lifecycle are now compiled internally and tested
-against that draft header, but the header and API version are not
-installed/switched until the remaining V2 objects are implemented.
+listener/accepted-connection lifecycle are now included in the internal source
+and test targets against that draft header, but the header and API version are
+not installed/switched until the remaining V2 acceptance work is complete.
 
 The current V2 lifecycle slice supports HTTP/3 connections by adapting the
 existing standalone client. The server lifecycle uses an independent
@@ -38,9 +38,13 @@ a certificate and private key. Client GET/POST request objects support partial
 send/receive, FIN, DONTWAIT, PEEK, extension headers, request info and
 independent close. Server request objects additionally support accept,
 request-body receive, single-shot response configuration, response-body send,
-request info and independent close. RAW_STREAM, notification descriptors,
-custom CA/client-certificate verification, generic SOCKOPT handling, and mini
-program migration remain later V2 stages.
+request info and independent close. Stage 8 additionally provides independent
+notification descriptors for listeners, accepted connections, client
+connections and HTTP/3 requests, plus private-observer-backed V2 connection
+and path snapshots. The first formal V2 surface is HTTP/3-only; connection-
+level raw send/receive is not published. Custom CA/client-certificate
+verification, generic SOCKOPT handling, and mini program migration remain
+later V2 stages.
 
 See `examples/netins_udp_v2_server_lifecycle_example.c` for the
 listener/accept/request/response/shutdown/close sequence.

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "netins_udp_v2_internal.h"
+#include "netins_udp_v2_notifier.h"
 #include "netins_udp_v2_transport.h"
 
 _Static_assert(NETINS_UDP_METHOD_LEN
@@ -56,7 +57,17 @@ struct netins_udp_h3_request_s {
 
     int last_error_code;
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
+    netins_udp_v2_notifier_t notifier;
 };
+
+static void
+netins_udp_v2_h3_notify_handle(void *user_data, uint32_t events)
+{
+    netins_udp_h3_request_t *request = user_data;
+    if (request != NULL) {
+        netins_udp_v2_notifier_signal(&request->notifier, events);
+    }
+}
 
 static void
 netins_udp_v2_h3_set_error_locked(netins_udp_h3_request_t *request,
@@ -360,8 +371,19 @@ netins_udp_v2_h3_request_allocate(int nonblock,
         *out_error = init_error;
         return NULL;
     }
+    if (netins_udp_v2_notifier_init(&request->notifier) != 0) {
+        int error_code = errno != 0 ? errno : EIO;
+        pthread_cond_destroy(&request->idle_cond);
+        pthread_mutex_destroy(&request->recv_lock);
+        pthread_mutex_destroy(&request->send_lock);
+        pthread_mutex_destroy(&request->lock);
+        free(request);
+        *out_error = error_code;
+        return NULL;
+    }
     if (netins_udp_v2_child_handle_acquire() != NETINS_UDP_OK) {
         int error_code = errno != 0 ? errno : EOVERFLOW;
+        netins_udp_v2_notifier_destroy(&request->notifier);
         pthread_cond_destroy(&request->idle_cond);
         pthread_mutex_destroy(&request->recv_lock);
         pthread_mutex_destroy(&request->send_lock);
@@ -382,6 +404,7 @@ static void
 netins_udp_v2_h3_request_free_handle(
     netins_udp_h3_request_t *request)
 {
+    netins_udp_v2_notifier_destroy(&request->notifier);
     pthread_cond_destroy(&request->idle_cond);
     pthread_mutex_destroy(&request->recv_lock);
     pthread_mutex_destroy(&request->send_lock);
@@ -535,6 +558,8 @@ netins_udp_h3_request_open(netins_udp_t *netins,
         netins_udp_v2_connection_release(netins);
         return NETINS_UDP_ERROR;
     }
+    netins_udp_v2_transport_h3_request_set_notify(request->transport,
+        netins_udp_v2_h3_notify_handle, request);
 
     netins_udp_v2_connection_set_error(netins, 0, NULL);
     *out_request = request;
@@ -627,6 +652,8 @@ netins_udp_h3_request_accept(netins_udp_t *netins,
     request->config.content_length = info.request_content_length_known
         ? info.request_content_length
         : NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+    netins_udp_v2_transport_server_request_set_notify(server_transport,
+        netins_udp_v2_h3_notify_handle, request);
 
     netins_udp_v2_connection_set_error(netins, 0, NULL);
     *out_request = request;
@@ -1025,6 +1052,63 @@ netins_udp_h3_request_get_info(netins_udp_h3_request_t *request,
 }
 
 int
+netins_udp_h3_request_get_fd(netins_udp_h3_request_t *request)
+{
+    if (netins_udp_v2_h3_begin_call(request) != NETINS_UDP_OK) {
+        return -1;
+    }
+    int fd = netins_udp_v2_notifier_get_fd(&request->notifier);
+    if (fd < 0) {
+        (void)netins_udp_v2_h3_fail(request, EBADF,
+            "HTTP/3 request notification descriptor is unavailable");
+    }
+    netins_udp_v2_h3_end_call(request);
+    return fd;
+}
+
+int
+netins_udp_h3_request_get_events(netins_udp_h3_request_t *request,
+    uint32_t *out_events)
+{
+    if (request == NULL || out_events == NULL) {
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+    if (netins_udp_v2_h3_begin_call(request) != NETINS_UDP_OK) {
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&request->lock);
+    int server_side = request->server_side;
+    netins_udp_v2_transport_request_t *transport = request->transport;
+    netins_udp_v2_transport_server_request_t *server_transport =
+        request->server_transport;
+    pthread_mutex_unlock(&request->lock);
+
+    uint64_t level_generation =
+        netins_udp_v2_notifier_begin_level_query(&request->notifier);
+    uint32_t level_events = 0;
+    int transport_result = server_side
+        ? netins_udp_v2_transport_server_request_get_events(
+            server_transport, &level_events)
+        : netins_udp_v2_transport_h3_request_get_events(transport,
+            &level_events);
+    int result = NETINS_UDP_OK;
+    if (transport_result != 0) {
+        result = netins_udp_v2_h3_fail(request,
+            errno != 0 ? errno : EIO,
+            "failed to query HTTP/3 request readiness");
+    } else if (netins_udp_v2_notifier_consume(&request->notifier,
+            level_generation, level_events, out_events) != 0)
+    {
+        result = netins_udp_v2_h3_fail(request,
+            errno != 0 ? errno : EIO,
+            "failed to acknowledge HTTP/3 request notification");
+    }
+    netins_udp_v2_h3_end_call(request);
+    return result;
+}
+
+int
 netins_udp_h3_request_get_last_error_code(
     netins_udp_h3_request_t *request)
 {
@@ -1076,9 +1160,13 @@ netins_udp_h3_request_close(netins_udp_h3_request_t *request)
     pthread_mutex_unlock(&request->lock);
 
     if (server_transport != NULL) {
+        netins_udp_v2_transport_server_request_set_notify(server_transport,
+            NULL, NULL);
         netins_udp_v2_transport_server_request_close_async(
             server_transport);
     } else if (transport != NULL) {
+        netins_udp_v2_transport_h3_request_set_notify(transport,
+            NULL, NULL);
         netins_udp_v2_transport_h3_request_close_async(transport);
     }
 

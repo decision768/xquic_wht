@@ -26,6 +26,7 @@ typedef struct netins_udp_transport_path_metrics_s {
     /* Encoded packet bytes used by the legacy diagnostics. */
     uint64_t app_packet_bytes_sent;
     uint64_t wire_bytes_sent;
+    uint64_t wire_bytes_recv;
     uint64_t delivered_bytes;
     uint64_t reinjected_bytes_sent;
     uint64_t retransmitted_bytes_sent;
@@ -47,6 +48,9 @@ typedef struct netins_udp_transport_path_metrics_s {
     uint64_t inflight_bytes;
     uint64_t cwnd_block_count;
     uint64_t cwnd_block_duration_us;
+    uint64_t last_received_time_us;
+    uint64_t last_sent_time_us;
+    uint64_t lost_packets;
     int cwnd_limited;
 } netins_udp_transport_path_metrics_t;
 

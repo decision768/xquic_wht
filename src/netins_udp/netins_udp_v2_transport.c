@@ -40,6 +40,154 @@ _Static_assert(NETINS_UDP_CLIENT_H3_HEADER_VALUE_LEN
         == NETINS_UDP_V2_TRANSPORT_H3_HEADER_VALUE_LEN,
     "V1 client and V2 transport H3 header-value limits must match");
 
+static int
+netins_udp_v2_transport_legacy_state(int state)
+{
+    switch (state) {
+    case NETINS_UDP_STATE_NEW:
+        return NETINS_UDP_V2_TRANSPORT_NEW;
+    case NETINS_UDP_STATE_CONNECTING:
+        return NETINS_UDP_V2_TRANSPORT_CONNECTING;
+    case NETINS_UDP_STATE_CONNECTED:
+        return NETINS_UDP_V2_TRANSPORT_CONNECTED;
+    case NETINS_UDP_STATE_CLOSING:
+        return NETINS_UDP_V2_TRANSPORT_CLOSING;
+    case NETINS_UDP_STATE_CLOSED:
+        return NETINS_UDP_V2_TRANSPORT_CLOSED;
+    case NETINS_UDP_STATE_ERROR:
+    default:
+        return NETINS_UDP_V2_TRANSPORT_ERROR;
+    }
+}
+
+static int
+netins_udp_v2_transport_map_private_snapshot(
+    const netins_udp_observer_private_snapshot_t *source,
+    netins_udp_v2_transport_snapshot_t *out)
+{
+    if (source == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    const netins_udp_snapshot_t *legacy = &source->legacy;
+    const netins_udp_observer_extended_snapshot_t *extended =
+        &source->extended;
+    memset(out, 0, sizeof(*out));
+    out->connection_id = legacy->info.connection_id;
+    out->state = netins_udp_v2_transport_legacy_state(
+        legacy->info.connection_state);
+    out->handshake_finished = legacy->info.handshake_finished;
+    out->multipath_mode = legacy->info.multipath_mode;
+    out->multipath_active = legacy->info.multipath_mode != 0
+        && (legacy->info.mp_state == 1
+            || legacy->info.active_path_count > 1);
+    out->connection_error = legacy->info.conn_error;
+    out->path_count = legacy->path_count;
+    out->active_path_count = legacy->info.active_path_count;
+    out->validating_path_count = legacy->info.validating_path_count;
+    out->path_table_truncated = extended->path_table_truncated;
+    snprintf(out->alpn, sizeof(out->alpn), "%s", legacy->info.alpn);
+
+    out->snapshot_time_us = legacy->statis.snapshot_time_us;
+    out->sample_interval_us = legacy->statis.sample_interval_us;
+    out->bytes_wire_sent = legacy->statis.bytes_wire_sent;
+    out->bytes_acked = legacy->statis.bytes_delivered;
+    out->bytes_inflight = legacy->statis.inflight_bytes;
+    out->acked_mbps = legacy->statis.delivery_mbps;
+    out->loss_rate = legacy->statis.loss_rate;
+
+    uint32_t count = out->path_count;
+    if (count > NETINS_UDP_V2_TRANSPORT_MAX_PATHS) {
+        count = NETINS_UDP_V2_TRANSPORT_MAX_PATHS;
+        out->path_table_truncated = 1;
+    }
+    out->path_count = count;
+    for (uint32_t i = 0; i < count; ++i) {
+        const netins_udp_path_statis_t *legacy_path = &legacy->paths[i];
+        const netins_udp_observer_extended_path_t *extended_path =
+            &extended->paths[i];
+        netins_udp_v2_transport_path_snapshot_t *path = &out->paths[i];
+        path->path_id = legacy_path->path_id;
+        path->path_index = i;
+        path->path_state = legacy_path->transport_state;
+        path->app_status = legacy_path->app_status;
+        path->cwnd_blocked = extended_path->cwnd_limited;
+        snprintf(path->interface_name, sizeof(path->interface_name), "%s",
+            legacy_path->interface_name);
+        snprintf(path->local_address, sizeof(path->local_address), "%s",
+            legacy_path->local_address);
+        snprintf(path->peer_address, sizeof(path->peer_address), "%s",
+            legacy_path->peer_address);
+        path->bytes_sent =
+            extended_path->stream_payload_bytes_sent_unique;
+        path->bytes_received =
+            extended_path->stream_payload_bytes_recv_unique;
+        path->bytes_wire_sent = legacy_path->bytes_wire_sent;
+        path->bytes_wire_received = extended_path->wire_bytes_recv;
+        path->bytes_acked = legacy_path->bytes_delivered;
+        /*
+         * XQUIC does not retain an exact lost-byte counter.  Encoded bytes
+         * retransmitted after loss are the stable byte-volume proxy; the
+         * exact cumulative loss ratio below remains packet based.
+         */
+        path->bytes_lost = extended_path->retransmitted_bytes_sent;
+        path->bytes_inflight = extended_path->inflight_bytes;
+        path->cwnd_bytes = extended_path->cwnd_bytes;
+        path->srtt_us = legacy_path->srtt_us;
+        path->latest_rtt_us = extended_path->latest_rtt_us;
+        path->min_rtt_us = extended_path->min_rtt_us;
+        path->last_received_time_us =
+            extended_path->last_received_time_us;
+        path->last_sent_time_us = extended_path->last_sent_time_us;
+        path->send_mbps = extended_path->unique_send_mbps;
+        path->receive_mbps = extended_path->unique_recv_mbps;
+        path->acked_mbps = legacy_path->delivery_mbps;
+        path->loss_rate = legacy_path->packets_sent > 0
+            ? (double)extended_path->lost_packets
+                / (double)legacy_path->packets_sent
+            : 0.0;
+
+        out->bytes_sent += path->bytes_sent;
+        out->bytes_received += path->bytes_received;
+        out->bytes_wire_received += path->bytes_wire_received;
+        out->bytes_lost += path->bytes_lost;
+        out->send_mbps += path->send_mbps;
+        out->receive_mbps += path->receive_mbps;
+        if (out->local_address[0] == '\0'
+            && path->local_address[0] != '\0')
+        {
+            snprintf(out->local_address, sizeof(out->local_address), "%s",
+                path->local_address);
+        }
+        if (out->peer_address[0] == '\0'
+            && path->peer_address[0] != '\0')
+        {
+            snprintf(out->peer_address, sizeof(out->peer_address), "%s",
+                path->peer_address);
+        }
+    }
+    return 0;
+}
+
+int
+netins_udp_v2_transport_snapshot_from_observer(
+    struct netins_udp_observer_s *observer,
+    netins_udp_v2_transport_snapshot_t *out)
+{
+    netins_udp_observer_private_snapshot_t source;
+    if (observer == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (netins_udp_observer_get_private_snapshot(observer, &source)
+        != NETINS_UDP_OK)
+    {
+        errno = EIO;
+        return -1;
+    }
+    return netins_udp_v2_transport_map_private_snapshot(&source, out);
+}
+
 static const xqc_scheduler_callback_t *
 netins_udp_v2_transport_scheduler(int scheduler)
 {
@@ -130,6 +278,8 @@ netins_udp_v2_transport_client_create(
         errno = ENOMEM;
         return -1;
     }
+    netins_udp_client_set_notify(client, config->notify,
+        config->notify_user_data);
     if (netins_udp_client_configure_transport(client, congestion_control,
             scheduler, config->idle_timeout_ms,
             config->close_timeout_ms) != NETINS_UDP_OK)
@@ -226,6 +376,46 @@ netins_udp_v2_transport_client_get_last_error_msg(
         return -1;
     }
     return 0;
+}
+
+int
+netins_udp_v2_transport_client_get_snapshot(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_snapshot_t *out)
+{
+    netins_udp_observer_private_snapshot_t source;
+    if (client == NULL || out == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (netins_udp_client_get_private_snapshot(client, &source)
+        != NETINS_UDP_OK)
+    {
+        errno = EIO;
+        return -1;
+    }
+    return netins_udp_v2_transport_map_private_snapshot(&source, out);
+}
+
+int
+netins_udp_v2_transport_client_get_events(
+    netins_udp_v2_transport_client_t *client, uint32_t *out_events)
+{
+    if (netins_udp_client_get_events(client, out_events)
+        != NETINS_UDP_OK)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+void
+netins_udp_v2_transport_client_set_notify(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    netins_udp_client_set_notify(client, notify, user_data);
 }
 
 void
@@ -402,6 +592,27 @@ netins_udp_v2_transport_h3_request_get_info(
             internal.peer_headers[i].value);
     }
     return 0;
+}
+
+int
+netins_udp_v2_transport_h3_request_get_events(
+    netins_udp_v2_transport_request_t *request, uint32_t *out_events)
+{
+    if (netins_udp_client_h3_request_get_events(request, out_events)
+        != NETINS_UDP_OK)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
+
+void
+netins_udp_v2_transport_h3_request_set_notify(
+    netins_udp_v2_transport_request_t *request,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    netins_udp_client_h3_request_set_notify(request, notify, user_data);
 }
 
 void

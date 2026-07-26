@@ -1,6 +1,7 @@
 #include <assert.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,6 +17,9 @@ struct netins_udp_client_s {
     int error_code;
     char error_message[NETINS_UDP_V2_TRANSPORT_ERROR_MSG_LEN];
     uint32_t close_timeout_ms;
+    uint32_t events;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 };
 
 struct netins_udp_server_s {
@@ -25,6 +29,9 @@ struct netins_udp_server_s {
     int accepting;
     int error_code;
     char error_message[NETINS_UDP_V2_TRANSPORT_ERROR_MSG_LEN];
+    uint32_t events;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
 };
 
 struct netins_udp_server_connection_s {
@@ -34,6 +41,10 @@ struct netins_udp_server_connection_s {
     struct sockaddr_storage peer_address;
     socklen_t peer_address_len;
     uint64_t shutdown_error;
+    uint32_t events;
+    netins_udp_v2_transport_notify_cb notify;
+    void *notify_user_data;
+    netins_udp_v2_transport_snapshot_t snapshot;
 };
 
 static netins_udp_v2_transport_config_t g_last_config;
@@ -69,6 +80,8 @@ netins_udp_v2_transport_client_create(
     assert(client != NULL);
     client->state = NETINS_UDP_V2_TRANSPORT_NEW;
     client->close_timeout_ms = config->close_timeout_ms;
+    client->notify = config->notify;
+    client->notify_user_data = config->notify_user_data;
     *out_client = client;
     g_last_client = client;
     g_create_count++;
@@ -127,6 +140,11 @@ netins_udp_v2_transport_client_wait_connected(
         return -1;
     }
     client->state = NETINS_UDP_V2_TRANSPORT_CONNECTED;
+    client->events |= NETINS_UDP_V2_EVENT_CONNECTED;
+    if (client->notify != NULL) {
+        client->notify(client->notify_user_data,
+            NETINS_UDP_V2_EVENT_CONNECTED);
+    }
     return 0;
 }
 
@@ -151,6 +169,50 @@ netins_udp_v2_transport_client_get_last_error_msg(
 {
     snprintf(buffer, buffer_len, "%s", client->error_message);
     return 0;
+}
+
+int
+netins_udp_v2_transport_client_get_snapshot(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_snapshot_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->state = client->state;
+    out->connection_id = 101;
+    out->handshake_finished =
+        client->state == NETINS_UDP_V2_TRANSPORT_CONNECTED;
+    out->multipath_mode = 1;
+    out->multipath_active = 1;
+    out->path_count = 2;
+    out->active_path_count = 2;
+    out->bytes_sent = 1000;
+    out->bytes_received = 2000;
+    out->paths[0].path_id = 10;
+    out->paths[0].path_index = 0;
+    out->paths[0].path_state = 2;
+    out->paths[0].bytes_sent = 400;
+    out->paths[1].path_id = 20;
+    out->paths[1].path_index = 1;
+    out->paths[1].path_state = 2;
+    out->paths[1].bytes_sent = 600;
+    return 0;
+}
+
+int
+netins_udp_v2_transport_client_get_events(
+    netins_udp_v2_transport_client_t *client, uint32_t *out_events)
+{
+    *out_events = client->events;
+    return 0;
+}
+
+void
+netins_udp_v2_transport_client_set_notify(
+    netins_udp_v2_transport_client_t *client,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    client->notify = notify;
+    client->notify_user_data = user_data;
 }
 
 void
@@ -203,6 +265,8 @@ netins_udp_v2_transport_server_create(
     assert(pthread_cond_init(&server->cond, NULL) == 0);
     server->state = NETINS_UDP_V2_TRANSPORT_LISTENING;
     server->accepting = 1;
+    server->notify = config->notify;
+    server->notify_user_data = config->notify_user_data;
     g_last_server_config = *config;
     g_last_server = server;
     g_server_create_count++;
@@ -237,6 +301,23 @@ netins_udp_v2_transport_server_get_last_error_msg(
 }
 
 int
+netins_udp_v2_transport_server_get_events(
+    netins_udp_v2_transport_server_t *server, uint32_t *out_events)
+{
+    *out_events = server->events;
+    return 0;
+}
+
+void
+netins_udp_v2_transport_server_set_notify(
+    netins_udp_v2_transport_server_t *server,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    server->notify = notify;
+    server->notify_user_data = user_data;
+}
+
+int
 netins_udp_v2_transport_server_accept(
     netins_udp_v2_transport_server_t *server,
     uint32_t timeout_ms, int wait_forever,
@@ -259,6 +340,7 @@ netins_udp_v2_transport_server_accept(
         return -1;
     }
     g_server_accept_ready = 0;
+    server->events &= ~NETINS_UDP_V2_EVENT_ACCEPTABLE;
     pthread_mutex_unlock(&server->lock);
 
     netins_udp_v2_transport_server_connection_t *connection =
@@ -271,6 +353,13 @@ netins_udp_v2_transport_server_accept(
     peer->sin_port = htons(43210);
     peer->sin_addr.s_addr = htonl(0xc000020aU);
     connection->peer_address_len = sizeof(*peer);
+    connection->snapshot.connection_id = 202;
+    connection->snapshot.state = NETINS_UDP_V2_TRANSPORT_CONNECTED;
+    connection->snapshot.handshake_finished = 1;
+    connection->snapshot.path_count = 1;
+    connection->snapshot.active_path_count = 1;
+    connection->snapshot.paths[0].path_id = 30;
+    connection->snapshot.paths[0].path_state = 2;
     g_last_connection = connection;
     *out_connection = connection;
     return 0;
@@ -332,6 +421,38 @@ netins_udp_v2_transport_server_connection_get_peer_address(
     *address = connection->peer_address;
     *address_len = connection->peer_address_len;
     return 0;
+}
+
+int
+netins_udp_v2_transport_server_connection_get_snapshot(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_snapshot_t *out)
+{
+    *out = connection->snapshot;
+    return 0;
+}
+
+int
+netins_udp_v2_transport_server_connection_get_events(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t *out_events)
+{
+    *out_events = connection->events;
+    return 0;
+}
+
+void
+netins_udp_v2_transport_server_connection_set_notify(
+    netins_udp_v2_transport_server_connection_t *connection,
+    netins_udp_v2_transport_notify_cb notify, void *user_data)
+{
+    connection->notify = notify;
+    connection->notify_user_data = user_data;
+    if (notify != NULL
+        && connection->state == NETINS_UDP_V2_TRANSPORT_CONNECTED)
+    {
+        notify(user_data, NETINS_UDP_V2_EVENT_CONNECTED);
+    }
 }
 
 void
@@ -481,6 +602,50 @@ main(void)
     assert(g_last_config.scheduler == NETINS_UDP_SCHEDULER_ADAPTIVE);
     assert(g_last_config.congestion_control == NETINS_UDP_CC_BBR2);
 
+    int notify_fd = netins_udp_get_fd(client);
+    assert(notify_fd >= 0);
+    struct pollfd notify_poll = {
+        .fd = notify_fd,
+        .events = POLLIN,
+    };
+    assert(poll(&notify_poll, 1, 0) == 1);
+    uint32_t events = 0;
+    assert(netins_udp_get_events(client, &events) == NETINS_UDP_OK);
+    assert((events & NETINS_UDP_EVENT_CONNECTED) != 0);
+    g_last_client->notify(g_last_client->notify_user_data,
+        NETINS_UDP_V2_EVENT_PATH_CHANGED);
+    events = 0;
+    assert(netins_udp_get_events(client, &events) == NETINS_UDP_OK);
+    assert((events & NETINS_UDP_EVENT_PATH_CHANGED) != 0);
+
+    assert(netins_udp_is_multipath(client) == 1);
+    uint32_t path_count = 0;
+    assert(netins_udp_get_path_count(client, &path_count) == NETINS_UDP_OK);
+    assert(path_count == 2);
+    netins_udp_info_t connection_info = NETINS_UDP_INFO_INITIALIZER;
+    assert(netins_udp_get_info(client, &connection_info) == NETINS_UDP_OK);
+    assert(connection_info.connection_id == 101);
+    netins_udp_statis_t connection_statis =
+        NETINS_UDP_STATIS_INITIALIZER;
+    assert(netins_udp_get_statis(client, &connection_statis)
+        == NETINS_UDP_OK);
+    assert(connection_statis.bytes_sent == 1000);
+    netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
+    assert(netins_udp_get_snapshot(client, &snapshot) == NETINS_UDP_OK);
+    assert(snapshot.info.connection_id == 101);
+    assert(snapshot.statis.bytes_sent == 1000);
+    assert(snapshot.statis.bytes_received == 2000);
+    assert(snapshot.paths[0].path_id == 10);
+    assert(snapshot.paths[1].bytes_sent == 600);
+    netins_udp_path_statis_t path =
+        NETINS_UDP_PATH_STATIS_INITIALIZER;
+    assert(netins_udp_get_path_statis(client, 1, &path)
+        == NETINS_UDP_OK);
+    assert(path.path_id == 20);
+    assert(netins_udp_get_path_statis(client, 2, &path)
+        == NETINS_UDP_ERROR);
+    assert(errno == ENOENT);
+
     uint32_t close_timeout_ms = 2500;
     assert(netins_udp_set_opt(client, NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
         &close_timeout_ms, sizeof(close_timeout_ms)) == NETINS_UDP_OK);
@@ -490,6 +655,12 @@ main(void)
     assert(errno == EBUSY);
     assert(netins_udp_shutdown(client, 77) == NETINS_UDP_OK);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_CLOSING);
+    netins_udp_close_reason_t close_reason =
+        NETINS_UDP_CLOSE_REASON_INITIALIZER;
+    assert(netins_udp_get_close_reason(client, &close_reason)
+        == NETINS_UDP_OK);
+    assert(close_reason.source == NETINS_UDP_CLOSE_LOCAL);
+    assert(close_reason.application_error == 77);
 
     netins_udp_close(client);
     assert(g_close_count == 1);
@@ -591,6 +762,12 @@ main(void)
     assert(errno == ETIMEDOUT);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_ERROR);
     assert(netins_udp_get_last_error_code(client) == ETIMEDOUT);
+    close_reason =
+        (netins_udp_close_reason_t)NETINS_UDP_CLOSE_REASON_INITIALIZER;
+    assert(netins_udp_get_close_reason(client, &close_reason)
+        == NETINS_UDP_OK);
+    assert(close_reason.source == NETINS_UDP_CLOSE_HANDSHAKE_TIMEOUT);
+    assert(close_reason.system_error == ETIMEDOUT);
     close_timeout_ms = 3000;
     assert(netins_udp_set_opt(client, NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
         &close_timeout_ms, sizeof(close_timeout_ms)) == NETINS_UDP_OK);
@@ -620,10 +797,11 @@ main(void)
     assert(netins_udp_init() == NETINS_UDP_OK);
     client = netins_udp_new(NETINS_UDP_TYPE_QUIC);
     assert(client != NULL);
-    assert(netins_udp_connect(client, "203.0.113.1", 443)
+    int reserved_raw_protocol = 1;
+    assert(netins_udp_set_opt(client, NETINS_UDP_OPT_APP_PROTOCOL,
+        &reserved_raw_protocol, sizeof(reserved_raw_protocol))
         == NETINS_UDP_ERROR);
     assert(errno == EOPNOTSUPP);
-    assert(netins_udp_get_state(client) == NETINS_UDP_STATE_ERROR);
     assert(netins_udp_get_last_error_code(client) == EOPNOTSUPP);
     netins_udp_close(client);
     assert(netins_udp_cleanup() == NETINS_UDP_OK);
@@ -668,8 +846,18 @@ main(void)
 
     pthread_mutex_lock(&g_last_server->lock);
     g_server_accept_ready = 1;
+    g_last_server->events |= NETINS_UDP_V2_EVENT_ACCEPTABLE;
+    if (g_last_server->notify != NULL) {
+        g_last_server->notify(g_last_server->notify_user_data,
+            NETINS_UDP_V2_EVENT_ACCEPTABLE);
+    }
     pthread_cond_broadcast(&g_last_server->cond);
     pthread_mutex_unlock(&g_last_server->lock);
+    int listener_fd = netins_udp_get_fd(listener);
+    assert(listener_fd >= 0);
+    events = 0;
+    assert(netins_udp_get_events(listener, &events) == NETINS_UDP_OK);
+    assert((events & NETINS_UDP_EVENT_ACCEPTABLE) != 0);
     struct sockaddr_storage peer_address;
     socklen_t peer_address_len = sizeof(peer_address);
     netins_udp_t *accepted = netins_udp_accept(listener,
@@ -678,6 +866,21 @@ main(void)
     assert(peer_address.ss_family == AF_INET);
     assert(peer_address_len == sizeof(struct sockaddr_in));
     assert(netins_udp_get_state(accepted) == NETINS_UDP_STATE_CONNECTED);
+    assert(netins_udp_get_fd(accepted) >= 0);
+    assert(netins_udp_get_fd(accepted) != listener_fd);
+    events = 0;
+    assert(netins_udp_get_events(accepted, &events) == NETINS_UDP_OK);
+    assert((events & NETINS_UDP_EVENT_CONNECTED) != 0);
+    g_last_connection->events |=
+        NETINS_UDP_V2_EVENT_H3_REQUEST_ACCEPTABLE;
+    g_last_connection->notify(g_last_connection->notify_user_data,
+        NETINS_UDP_V2_EVENT_H3_REQUEST_ACCEPTABLE);
+    events = 0;
+    assert(netins_udp_get_events(accepted, &events) == NETINS_UDP_OK);
+    assert((events & NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE) != 0);
+    snapshot = (netins_udp_snapshot_t)NETINS_UDP_SNAPSHOT_INITIALIZER;
+    assert(netins_udp_get_snapshot(accepted, &snapshot) == NETINS_UDP_OK);
+    assert(snapshot.info.connection_id == 202);
     option_len = sizeof(nonblock);
     nonblock = 0;
     assert(netins_udp_get_opt(accepted, NETINS_UDP_OPT_NONBLOCK,
