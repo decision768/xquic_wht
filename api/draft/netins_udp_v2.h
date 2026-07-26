@@ -37,8 +37,12 @@ extern "C" {
 #define NETINS_UDP_METHOD_LEN               16U
 #define NETINS_UDP_REQUEST_PATH_LEN         1024U
 #define NETINS_UDP_CONTENT_TYPE_LEN         128U
+#define NETINS_UDP_MAX_H3_HEADERS           16U
+#define NETINS_UDP_H3_HEADER_NAME_LEN       64U
+#define NETINS_UDP_H3_HEADER_VALUE_LEN      256U
 #define NETINS_UDP_INVALID_CONNECTION_ID    UINT64_MAX
 #define NETINS_UDP_INVALID_STREAM_ID        UINT64_MAX
+#define NETINS_UDP_CONTENT_LENGTH_UNKNOWN   UINT64_MAX
 #define NETINS_UDP_ALL_PATHS                (-1)
 
 typedef struct netins_udp_s netins_udp_t;
@@ -202,12 +206,14 @@ typedef struct netins_udp_interfaces_s {
 /*
  * The library copies this structure and all strings during set_opt().
  * cert/key are required for listeners. Client certificate fields may be empty.
+ * Peer verification defaults to enabled. require_client_certificate is only
+ * meaningful for a listener.
  */
 typedef struct netins_udp_tls_config_s {
     uint32_t struct_size;
     uint32_t api_version;
     int verify_peer;
-    uint32_t reserved32;
+    int require_client_certificate;
     char server_name[NETINS_UDP_SERVER_NAME_LEN];
     char certificate_file[NETINS_UDP_FILE_PATH_LEN];
     char private_key_file[NETINS_UDP_FILE_PATH_LEN];
@@ -216,7 +222,7 @@ typedef struct netins_udp_tls_config_s {
 } netins_udp_tls_config_t;
 
 #define NETINS_UDP_TLS_CONFIG_INITIALIZER \
-    { sizeof(netins_udp_tls_config_t), NETINS_UDP_API_VERSION }
+    { sizeof(netins_udp_tls_config_t), NETINS_UDP_API_VERSION, 1, 0 }
 
 /*
  * Raw UDP socket option. path_index=-1 applies to every current and future
@@ -291,9 +297,9 @@ typedef struct netins_udp_path_statis_s {
     uint32_t struct_size;
     uint32_t api_version;
     uint64_t path_id;
+    uint32_t path_index;
     int path_state;           /* netins_udp_path_state_t */
     int app_status;           /* netins_udp_app_path_status_t */
-    int socket_fd_available;
     int cwnd_blocked;
     char interface_name[NETINS_UDP_INTERFACE_NAME_LEN];
     char local_address[NETINS_UDP_ADDRESS_LEN];
@@ -368,6 +374,11 @@ typedef struct netins_udp_stream_info_s {
     { sizeof(netins_udp_stream_info_t), NETINS_UDP_API_VERSION, \
       NETINS_UDP_INVALID_STREAM_ID }
 
+typedef struct netins_udp_h3_header_s {
+    char name[NETINS_UDP_H3_HEADER_NAME_LEN];
+    char value[NETINS_UDP_H3_HEADER_VALUE_LEN];
+} netins_udp_h3_header_t;
+
 typedef struct netins_udp_h3_request_config_s {
     uint32_t struct_size;
     uint32_t api_version;
@@ -376,28 +387,51 @@ typedef struct netins_udp_h3_request_config_s {
     char authority[NETINS_UDP_SERVER_NAME_LEN];
     char content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     uint64_t content_length;
-    uint64_t reserved[8];
+    uint32_t header_count;
+    uint32_t reserved32;
+    netins_udp_h3_header_t headers[NETINS_UDP_MAX_H3_HEADERS];
+    uint64_t reserved[4];
 } netins_udp_h3_request_config_t;
 
 #define NETINS_UDP_H3_REQUEST_CONFIG_INITIALIZER \
     { sizeof(netins_udp_h3_request_config_t), NETINS_UDP_API_VERSION }
+
+typedef struct netins_udp_h3_response_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    int status;
+    uint32_t header_count;
+    uint64_t content_length;
+    char content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    netins_udp_h3_header_t headers[NETINS_UDP_MAX_H3_HEADERS];
+    uint64_t reserved[4];
+} netins_udp_h3_response_config_t;
+
+#define NETINS_UDP_H3_RESPONSE_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_h3_response_config_t), NETINS_UDP_API_VERSION, 200 }
 
 typedef struct netins_udp_h3_request_info_s {
     uint32_t struct_size;
     uint32_t api_version;
     uint64_t stream_id;
     int response_status;
-    int headers_received;
+    int request_headers_ready;
+    int response_headers_ready;
     int send_finished;
     int receive_finished;
     int last_error_code;
+    uint32_t peer_header_count;
     char method[NETINS_UDP_METHOD_LEN];
     char path[NETINS_UDP_REQUEST_PATH_LEN];
-    char content_type[NETINS_UDP_CONTENT_TYPE_LEN];
-    uint64_t content_length;
+    char authority[NETINS_UDP_SERVER_NAME_LEN];
+    char request_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    char response_content_type[NETINS_UDP_CONTENT_TYPE_LEN];
+    uint64_t request_content_length;
+    uint64_t response_content_length;
     uint64_t bytes_sent;
     uint64_t bytes_received;
-    uint64_t reserved[8];
+    netins_udp_h3_header_t peer_headers[NETINS_UDP_MAX_H3_HEADERS];
+    uint64_t reserved[4];
 } netins_udp_h3_request_info_t;
 
 #define NETINS_UDP_H3_REQUEST_INFO_INITIALIZER \
@@ -423,7 +457,9 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int type);
 /*
  * Gracefully closes the represented connection/listener, stops owned workers,
  * releases all resources and invalidates the pointer. Calling close twice is
- * invalid. Closing a listener also wakes blocked accept calls.
+ * invalid. Closing a listener also wakes blocked accept calls. Outstanding
+ * child stream/request handles are aborted and detached but remain valid for
+ * get_info/close; the caller must still close every child handle.
  */
 NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);
 
@@ -439,6 +475,8 @@ NETINS_UDP_PUBLIC int netins_udp_get_opt(netins_udp_t *netins,
 
 NETINS_UDP_PUBLIC int netins_udp_set_logger(netins_udp_t *netins,
     netins_udp_logger_cb logger, void *user_data);
+NETINS_UDP_PUBLIC void netins_udp_tls_config_init(
+    netins_udp_tls_config_t *config);
 
 /*
  * Blocking connect returns after the QUIC handshake and application protocol
@@ -503,18 +541,30 @@ NETINS_UDP_PUBLIC void netins_udp_stream_close(
  * raw stream send/recv. config_init selects GET, "/", application/octet-stream
  * and a zero-length request body. A zero-length request/response is finished
  * with its headers. For a non-empty body, FIN is valid only on the call that
- * accepts the final declared content-length bytes.
+ * accepts the final declared content-length bytes. If content_length is
+ * NETINS_UDP_CONTENT_LENGTH_UNKNOWN, Content-Length is omitted and FIN defines
+ * the body end. Custom header names must be lowercase, must not start with ':',
+ * and cannot replace headers managed by the library (content-length,
+ * content-type, host or pseudo-headers).
  */
 NETINS_UDP_PUBLIC void netins_udp_h3_request_config_init(
     netins_udp_h3_request_config_t *config);
+NETINS_UDP_PUBLIC int netins_udp_h3_request_config_add_header(
+    netins_udp_h3_request_config_t *config,
+    const char *name, const char *value);
+NETINS_UDP_PUBLIC void netins_udp_h3_response_config_init(
+    netins_udp_h3_response_config_t *config);
+NETINS_UDP_PUBLIC int netins_udp_h3_response_config_add_header(
+    netins_udp_h3_response_config_t *config,
+    const char *name, const char *value);
 NETINS_UDP_PUBLIC int netins_udp_h3_request_open(netins_udp_t *netins,
     const netins_udp_h3_request_config_t *config,
     netins_udp_h3_request_t **out_request);
 NETINS_UDP_PUBLIC int netins_udp_h3_request_accept(netins_udp_t *netins,
     netins_udp_h3_request_t **out_request);
 NETINS_UDP_PUBLIC int netins_udp_h3_request_set_response(
-    netins_udp_h3_request_t *request, int status,
-    const char *content_type, uint64_t content_length);
+    netins_udp_h3_request_t *request,
+    const netins_udp_h3_response_config_t *config);
 NETINS_UDP_PUBLIC ssize_t netins_udp_h3_request_send(
     netins_udp_h3_request_t *request, const void *data,
     size_t length, int flags);

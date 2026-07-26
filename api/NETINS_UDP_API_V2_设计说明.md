@@ -16,6 +16,10 @@ V2 是一次明确的 ABI 断代，不保证与尚未发布的 V1 API 二进制�
 V2 的调用方式尽量接近 TCP/MPTCP 版本 NetIns：
 
 ```c
+if (netins_udp_init() != NETINS_UDP_OK) {
+    /* errno */
+}
+
 netins_udp_t *conn = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
 if (conn == NULL) {
     /* errno */
@@ -28,6 +32,7 @@ if (netins_udp_connect(conn, host, port) != NETINS_UDP_OK) {
 ssize_t sent = netins_udp_send(conn, data, length, 0);
 ssize_t received = netins_udp_recv(conn, buffer, capacity, 0);
 netins_udp_close(conn);
+netins_udp_cleanup();
 ```
 
 同时必须正确表达 QUIC 与 TCP 不同的对象关系：
@@ -107,6 +112,9 @@ CONNECTED/LISTENING ──shutdown/close/error──> CLOSING ──> CLOSED/ERR
   listener 配置复制，之后可以在 accepted 连接上独立修改运行期选项。
 - `shutdown()` 发起协议级优雅关闭但不释放公共句柄，便于读取最终状态和原因。
 - `close()` 是最终释放操作，返回后指针失效，重复 close 属于调用方错误。
+- 连接 close 时尚未关闭的 stream/request 会被中止并与 engine 脱离，但子句柄
+  本身继续有效，可读取最终 info 并单独 close；调用方仍必须关闭所有子句柄。
+- 子句柄脱离父连接后，任何新收发返回 `ECANCELED`，不会访问已经销毁的 engine。
 
 ### 4.3 阻塞和非阻塞
 
@@ -194,8 +202,18 @@ netins_udp_h3_request_recv();
 ```
 
 客户端通过 request config 提供 method、path、authority、content type 和
-content length。服务端通过 `netins_udp_h3_request_set_response()` 设置状态码和
-响应正文长度。
+content length。服务端通过 response config 和
+`netins_udp_h3_request_set_response()` 设置状态码、响应正文长度和扩展头。
+
+request/response config 最多携带 `NETINS_UDP_MAX_H3_HEADERS` 个扩展头。头名称
+必须是小写、不能以 `:` 开头，也不能覆盖由 API 管理的 pseudo-header、host、
+content-length 和 content-type。mini 使用的 `x-stream-index`、
+`x-stream-count`、`x-stream-offset` 和 `x-total-length` 通过该机制传递。对端的
+扩展头复制到 request info 的 `peer_headers[]`。
+
+正文长度已知时必须填写准确值，API 校验累计发送量。设置为
+`NETINS_UDP_CONTENT_LENGTH_UNKNOWN` 时不发送 Content-Length，由带
+`NETINS_UDP_MSG_FIN` 的最后一次 send 决定正文结束。
 
 当前 mini 的 GET/POST、多 stream 分片和文件偏移元数据将在阶段七迁入 H3
 扩展；这些元数据不进入普通 QUIC stream API。
@@ -206,6 +224,8 @@ content length。服务端通过 `netins_udp_h3_request_set_response()` 设置�
 netins_udp_h3_request_config_t config;
 netins_udp_h3_request_config_init(&config);
 /* 填写 method/path/content_length */
+netins_udp_h3_request_config_add_header(
+    &config, "x-stream-index", "0");
 netins_udp_h3_request_open(conn, &config, &request);
 /* POST/content_length>0 时循环发送正文，最后一次带 FIN；GET 跳过此步。 */
 netins_udp_h3_request_send(request, data, length,
@@ -219,9 +239,11 @@ netins_udp_h3_request_close(request);
 ```c
 netins_udp_h3_request_accept(conn, &request);
 netins_udp_h3_request_recv(request, buffer, capacity, 0);
-netins_udp_h3_request_set_response(request, 200,
-    "application/octet-stream", response_length);
-netins_udp_h3_request_send(request, response, response_length,
+netins_udp_h3_response_config_t response_config;
+netins_udp_h3_response_config_init(&response_config);
+response_config.content_length = response_length;
+netins_udp_h3_request_set_response(request, &response_config);
+netins_udp_h3_request_send(request, response_data, response_length,
     NETINS_UDP_MSG_FIN);
 netins_udp_h3_request_close(request);
 ```
@@ -270,6 +292,7 @@ IPv6，并逐个尝试返回的地址。端口有效范围是 1 到 65535。
 服务端基本调用顺序：
 
 ```c
+netins_udp_init();
 netins_udp_t *listener = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
 netins_udp_set_opt(listener, NETINS_UDP_OPT_TLS, &tls, sizeof(tls));
 if (netins_udp_listen(listener, NULL, 8443) == NULL) {
@@ -284,6 +307,7 @@ if (client != NULL) {
     netins_udp_close(client);
 }
 netins_udp_close(listener);
+netins_udp_cleanup();
 ```
 
 ## 8. 选项
@@ -317,6 +341,10 @@ netins_udp_close(listener);
 listener 设置 `INTERFACES` 返回 `EOPNOTSUPP`。内核 socket 缓冲选项会应用到
 客户端的每条路径 socket，或服务端共享监听 socket。
 
+TLS 配置初始化后默认 `verify_peer=1`。客户端只有显式设置为 0 才能跳过服务端
+证书校验；listener 的 `require_client_certificate` 默认是 0，启用后必须同时
+配置可用于验证客户端证书的 CA。
+
 ## 9. 状态、统计与 ABI
 
 所有输出结构都包含：
@@ -340,6 +368,7 @@ V2 公共结构内部使用固定宽度整数、固定大小字符数组和预�
 每路径统计至少包含：
 
 - path ID、网卡名称和地址。
+- 稳定的快照数组下标 `path_index`；它不是 XQUIC path ID。
 - transport/app path 状态。
 - 收发、ACK、丢包和 inflight 字节。
 - SRTT、latest RTT、min RTT。
