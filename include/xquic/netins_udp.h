@@ -2,13 +2,11 @@
 #define NETINS_UDP_API_H
 
 /*
- * NetIns UDP final public API.
+ * NetIns UDP public API.
  *
- * This is the only header installed for third-party consumers. It provides a
- * unified client/listener/accepted-connection object, HTTP/3 request data
- * plane, multipath observability, readiness notifications and close reasons.
- * Compatibility backends used inside this repository are implementation
- * details and are intentionally not declared here.
+ * Provides client connections, server listeners, accepted connections,
+ * HTTP/3 request data transfer, multipath status and statistics, readiness
+ * notifications, logging, errors and close reasons.
  */
 
 #include <stddef.h>
@@ -66,10 +64,7 @@ typedef enum netins_udp_type_e {
     NETINS_UDP_TYPE_MPQUIC = 2
 } netins_udp_type_t;
 
-/*
- * The final public contract is HTTP/3-only. Value 1 is reserved for ABI
- * stability and has no public protocol name.
- */
+/* Application protocol used for request and response data transfer. */
 typedef enum netins_udp_app_protocol_e {
     NETINS_UDP_APP_HTTP3 = 2
 } netins_udp_app_protocol_t;
@@ -124,6 +119,13 @@ typedef enum netins_udp_log_level_e {
     NETINS_UDP_LOG_LEVEL_WARN = 2,
     NETINS_UDP_LOG_LEVEL_ERROR = 3
 } netins_udp_log_level_t;
+
+/*
+ * Log messages are valid only for the duration of the callback. The callback
+ * may run on an API caller or an internal transport worker thread, must return
+ * promptly, and must not call back into NetIns UDP with the same handle.
+ */
+typedef void (*netins_udp_logger_cb)(int level, const char *message);
 
 typedef enum netins_udp_scheduler_e {
     NETINS_UDP_SCHEDULER_DEFAULT = 0,
@@ -191,7 +193,8 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_TLS = 12,                 /* netins_udp_tls_config_t */
     NETINS_UDP_OPT_INITIAL_CWND_PACKETS = 13,/* uint32_t */
     NETINS_UDP_OPT_SCHEDULER = 14,           /* int: netins_udp_scheduler_t */
-    NETINS_UDP_OPT_CONGESTION_CONTROL = 15   /* int: netins_udp_congestion_control_t */
+    NETINS_UDP_OPT_CONGESTION_CONTROL = 15,  /* int: netins_udp_congestion_control_t */
+    NETINS_UDP_OPT_LOG_LEVEL = 16            /* int: netins_udp_log_level_t */
 } netins_udp_opt_t;
 
 typedef struct netins_udp_interfaces_s {
@@ -449,6 +452,19 @@ NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int type);
 
 /*
+ * Installs a per-object logger. NULL disables logging and is the default.
+ * The default threshold is INFO; set NETINS_UDP_OPT_LOG_LEVEL to DEBUG for
+ * additional low-frequency lifecycle details. Detailed path and throughput
+ * data remains available through snapshot/statistics APIs and is not emitted
+ * as log text. Accepted connections inherit the listener's logger and level
+ * at accept time, then remain independently configurable.
+ *
+ * Replacing or disabling a logger waits for callbacks already in progress.
+ */
+NETINS_UDP_PUBLIC int netins_udp_set_logger(netins_udp_t *netins,
+    netins_udp_logger_cb logger);
+
+/*
  * Gracefully closes the represented connection/listener, releases its
  * ownership and invalidates the pointer. Shared listener workers stop when
  * their last accepted-connection reference is released. Calling close twice
@@ -462,7 +478,7 @@ NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);
 
 /*
  * Options may be set in NEW state. Runtime options are limited to NONBLOCK,
- * send/receive/close timeouts, plus ACCEPT_TIMEOUT_MS on a listener.
+ * send/receive/close timeouts, LOG_LEVEL, plus ACCEPT_TIMEOUT_MS on a listener.
  * Immutable options fail with EBUSY after connect/listen begins.
  * Runtime values are captured when a child HTTP/3 request is opened/accepted;
  * changing its parent later affects subsequent child handles only. Accepted
@@ -502,8 +518,8 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_listen(netins_udp_t *netins,
 
 /*
  * Returns an independently owned accepted connection. Blocking behavior is
- * controlled by listener options. Accepted connections share the listener's
- * UDP socket/engine internally but have independent QUIC close lifecycles.
+ * controlled by listener options. The returned connection remains valid until
+ * it is closed, including after the listener has been closed.
  */
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(
     netins_udp_t *listener, struct sockaddr *addr, socklen_t *addrlen);
@@ -524,9 +540,8 @@ NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *netins,
  * with its headers. For a non-empty body, FIN is valid only on the call that
  * accepts the final declared content-length bytes. If content_length is
  * NETINS_UDP_CONTENT_LENGTH_UNKNOWN, Content-Length is omitted and FIN defines
- * the body end. The API never injects legacy x-stream-* fields; applications
- * that need them must add them explicitly. Custom header names must be
- * lowercase, must not start with ':',
+ * the body end. Application-specific fields are added only when explicitly
+ * configured. Custom header names must be lowercase, must not start with ':',
  * and cannot replace headers managed by the library (content-length,
  * content-type, host or pseudo-headers). HTTP/3 connection-specific fields are
  * rejected; TE is accepted only with the value "trailers". A finite blocking

@@ -73,6 +73,19 @@ static int g_block_get_state;
 static int g_get_state_entered;
 static int g_get_state_continue;
 static int g_pending_resolvers;
+static int g_log_count[4];
+static char g_last_log_message[NETINS_UDP_ERROR_MSG_LEN + 32];
+
+static void
+test_logger(int level, const char *message)
+{
+    assert(level >= NETINS_UDP_LOG_LEVEL_DEBUG);
+    assert(level <= NETINS_UDP_LOG_LEVEL_ERROR);
+    assert(message != NULL);
+    g_log_count[level]++;
+    snprintf(g_last_log_message, sizeof(g_last_log_message), "%s",
+        message);
+}
 
 int
 netins_udp_v2_transport_has_pending_resolvers(void)
@@ -591,6 +604,23 @@ main(void)
 
     netins_udp_t *client = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
     assert(client != NULL);
+    assert(netins_udp_set_logger(NULL, test_logger) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    int log_level = -1;
+    size_t log_level_len = sizeof(log_level);
+    assert(netins_udp_get_opt(client, NETINS_UDP_OPT_LOG_LEVEL,
+        &log_level, &log_level_len) == NETINS_UDP_OK);
+    assert(log_level == NETINS_UDP_LOG_LEVEL_INFO);
+    log_level = NETINS_UDP_LOG_LEVEL_ERROR + 1;
+    assert(netins_udp_set_opt(client, NETINS_UDP_OPT_LOG_LEVEL,
+        &log_level, sizeof(log_level)) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    log_level = NETINS_UDP_LOG_LEVEL_DEBUG;
+    assert(netins_udp_set_opt(client, NETINS_UDP_OPT_LOG_LEVEL,
+        &log_level, sizeof(log_level)) == NETINS_UDP_OK);
+    assert(netins_udp_set_logger(client, test_logger) == NETINS_UDP_OK);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_DEBUG] == 0);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_INFO] == 0);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_NEW);
     assert(netins_udp_cleanup() == NETINS_UDP_ERROR);
     assert(errno == EBUSY);
@@ -660,6 +690,8 @@ main(void)
 
     assert(netins_udp_connect(client, "192.0.2.1", 8443)
         == NETINS_UDP_OK);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_DEBUG] == 1);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_INFO] == 2);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_CONNECTED);
     assert(g_create_count == 1);
     assert(g_last_config.enable_multipath == 1);
@@ -683,6 +715,8 @@ main(void)
     assert((events & NETINS_UDP_EVENT_CONNECTED) != 0);
     g_last_client->notify(g_last_client->notify_user_data,
         NETINS_UDP_V2_EVENT_PATH_CHANGED);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_WARN] == 1);
+    assert(strstr(g_last_log_message, "snapshot") != NULL);
     events = 0;
     assert(netins_udp_get_events(client, &events) == NETINS_UDP_OK);
     assert((events & NETINS_UDP_EVENT_PATH_CHANGED) != 0);
@@ -894,10 +928,15 @@ main(void)
     client = netins_udp_new(NETINS_UDP_TYPE_QUIC);
     assert(client != NULL);
     set_http3_test_options(client);
+    memset(g_log_count, 0, sizeof(g_log_count));
+    g_last_log_message[0] = '\0';
+    assert(netins_udp_set_logger(client, test_logger) == NETINS_UDP_OK);
     g_wait_result = -1;
     assert(netins_udp_connect(client, "198.51.100.2", 443)
         == NETINS_UDP_ERROR);
     assert(errno == ETIMEDOUT);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_ERROR] == 1);
+    assert(strstr(g_last_log_message, "mock handshake timeout") != NULL);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_ERROR);
     assert(netins_udp_get_last_error_code(client) == ETIMEDOUT);
     close_reason =
@@ -989,11 +1028,15 @@ main(void)
     assert(netins_udp_init() == NETINS_UDP_OK);
     netins_udp_t *listener = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
     assert(listener != NULL);
+    memset(g_log_count, 0, sizeof(g_log_count));
+    g_last_log_message[0] = '\0';
+    assert(netins_udp_set_logger(listener, test_logger) == NETINS_UDP_OK);
     set_http3_server_options(listener);
     nonblock = 1;
     assert(netins_udp_set_opt(listener, NETINS_UDP_OPT_NONBLOCK,
         &nonblock, sizeof(nonblock)) == NETINS_UDP_OK);
     assert(netins_udp_listen(listener, NULL, 8443) == listener);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_INFO] == 1);
     assert(netins_udp_get_state(listener) == NETINS_UDP_STATE_LISTENING);
     accept_timeout_ms = 50;
     assert(netins_udp_set_opt(listener, NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS,
@@ -1033,6 +1076,8 @@ main(void)
     netins_udp_t *accepted = netins_udp_accept(listener,
         (struct sockaddr *)&peer_address, &peer_address_len);
     assert(accepted != NULL);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_INFO] == 2);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_WARN] == 1);
     assert(peer_address.ss_family == AF_INET);
     assert(peer_address_len == sizeof(struct sockaddr_in));
     assert(netins_udp_get_state(accepted) == NETINS_UDP_STATE_CONNECTED);
@@ -1048,6 +1093,26 @@ main(void)
     events = 0;
     assert(netins_udp_get_events(accepted, &events) == NETINS_UDP_OK);
     assert((events & NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE) != 0);
+    int inherited_log_level = -1;
+    size_t inherited_log_level_len = sizeof(inherited_log_level);
+    assert(netins_udp_get_opt(accepted, NETINS_UDP_OPT_LOG_LEVEL,
+        &inherited_log_level, &inherited_log_level_len) == NETINS_UDP_OK);
+    assert(inherited_log_level == NETINS_UDP_LOG_LEVEL_INFO);
+    g_last_connection->notify(g_last_connection->notify_user_data,
+        NETINS_UDP_V2_EVENT_PATH_CHANGED);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_WARN] == 2);
+    assert(netins_udp_set_logger(listener, NULL) == NETINS_UDP_OK);
+    g_last_connection->notify(g_last_connection->notify_user_data,
+        NETINS_UDP_V2_EVENT_PATH_CHANGED);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_WARN] == 3);
+    inherited_log_level = NETINS_UDP_LOG_LEVEL_ERROR;
+    assert(netins_udp_set_opt(accepted, NETINS_UDP_OPT_LOG_LEVEL,
+        &inherited_log_level, sizeof(inherited_log_level))
+        == NETINS_UDP_OK);
+    g_last_connection->notify(g_last_connection->notify_user_data,
+        NETINS_UDP_V2_EVENT_PATH_CHANGED);
+    assert(g_log_count[NETINS_UDP_LOG_LEVEL_WARN] == 3);
+    assert(netins_udp_set_logger(accepted, NULL) == NETINS_UDP_OK);
     snapshot = (netins_udp_snapshot_t)NETINS_UDP_SNAPSHOT_INITIALIZER;
     assert(netins_udp_get_snapshot(accepted, &snapshot) == NETINS_UDP_OK);
     assert(snapshot.info.connection_id == 202);

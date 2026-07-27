@@ -643,7 +643,6 @@ install(FILES include/xquic/netins_udp.h
 install(FILES
     api/README.md
     api/NETINS_UDP_API_使用说明.md
-    api/NETINS_UDP_API_设计说明.md
     api/examples/netins_udp_snapshot_example.c
     api/examples/netins_udp_connect_example.c
     api/examples/netins_udp_connect_main.c

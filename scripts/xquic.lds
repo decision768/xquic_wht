@@ -159,6 +159,7 @@ XQUIC_VERS_1.0 {
         netins_udp_cleanup;
         netins_udp_new;
         netins_udp_close;
+        netins_udp_set_logger;
         netins_udp_set_opt;
         netins_udp_get_opt;
         netins_udp_tls_config_init;

@@ -15,12 +15,18 @@
  * adapter centralizes observer lifecycle calls, path metadata helpers and the
  * bounded/fair RX policy; it does not replace either host's event loop.
  */
-#define NETINS_UDP_BACKEND_RX_BATCH_CAPACITY 256U
+/*
+ * Internal receive-service limits. They bound work performed in one event-loop
+ * dispatch to balance feedback latency with batched receive efficiency. These
+ * values are implementation details and are not part of the public API/ABI.
+ */
+#define NETINS_UDP_BACKEND_RX_BATCH_CAPACITY     256U
+#define NETINS_UDP_BACKEND_RX_RESPONSIVE_BUDGET   40U
 
 typedef struct netins_udp_backend_rx_policy_s {
     uint32_t batch_capacity;
-    uint32_t single_path_packets;
-    uint32_t multipath_packets_per_path;
+    uint32_t responsive_packet_budget;
+    uint32_t bulk_packet_budget;
 } netins_udp_backend_rx_policy_t;
 
 void netins_udp_backend_rx_policy_init(

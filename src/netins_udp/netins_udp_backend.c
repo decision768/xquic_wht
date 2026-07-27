@@ -11,8 +11,9 @@ netins_udp_backend_rx_policy_init(netins_udp_backend_rx_policy_t *policy)
         return;
     }
     policy->batch_capacity = NETINS_UDP_BACKEND_RX_BATCH_CAPACITY;
-    policy->single_path_packets = 40;
-    policy->multipath_packets_per_path =
+    policy->responsive_packet_budget =
+        NETINS_UDP_BACKEND_RX_RESPONSIVE_BUDGET;
+    policy->bulk_packet_budget =
         NETINS_UDP_BACKEND_RX_BATCH_CAPACITY;
 }
 
@@ -25,8 +26,8 @@ netins_udp_backend_rx_packet_limit(
     }
 
     uint32_t limit = active_path_count > 1
-        ? policy->multipath_packets_per_path
-        : policy->single_path_packets;
+        ? policy->bulk_packet_budget
+        : policy->responsive_packet_budget;
     if (limit == 0 || limit > policy->batch_capacity) {
         limit = policy->batch_capacity;
     }

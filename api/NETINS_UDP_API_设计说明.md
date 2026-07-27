@@ -66,6 +66,17 @@ detach 子对象，但不会替应用释放子对象地址。
 accepted connection 在 accept 时继承 listener 选项，此后与 listener 独立。
 这样避免并发中的半次调用改变阻塞策略，也不要求父对象反向持有公开子句柄。
 
+日志回调同样属于连接对象，而不属于 XQUIC engine。默认回调为空，因此公共
+API 不会主动输出诊断文本。accepted connection 在 accept 时复制 listener 的
+logger 和日志级别，之后独立修改。回调执行计数纳入对象关闭同步：
+`set_logger(NULL)` 和 `close()` 都会等待已进入的回调结束。回调消息只包含低频
+生命周期、路径可用性变化和异常；稳定统计继续由私有 observer 快照提供，不把
+逐包诊断或内部策略参数变成公共日志 ABI。
+
+公共 API 创建的 XQUIC connection 保持 `mp_diag_enabled=0`，因此旧的 scheduler、
+ACK 和路径诊断 `printf` 不会绕过 logger 直接输出。mini 测试程序仍可通过自己
+原有的诊断开关启用这些内部报告；该开关不属于第三方 API。
+
 端点建立可能在底层 transport 分配前失败。此时公共对象仍保留 ERROR 状态和
 配置元数据，info/snapshot 返回空 transport 统计，保证调用方始终能够完成
 “查询失败原因—记录状态—close”的生命周期。

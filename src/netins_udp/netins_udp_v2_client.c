@@ -18,6 +18,13 @@
 #define NETINS_UDP_V2_DEFAULT_SOCKET_BUFFER       (16 * 1024 * 1024)
 #define NETINS_UDP_V2_DEFAULT_INITIAL_CWND        100U
 
+#define NETINS_UDP_V2_LOGGED_CONNECTED (1U << 0)
+#define NETINS_UDP_V2_LOGGED_LISTENING (1U << 1)
+#define NETINS_UDP_V2_LOGGED_SHUTDOWN  (1U << 2)
+#define NETINS_UDP_V2_LOGGED_CLOSED    (1U << 3)
+#define NETINS_UDP_V2_LOGGED_ERROR     (1U << 4)
+#define NETINS_UDP_V2_LOGGED_MP_STATUS (1U << 5)
+
 _Static_assert(NETINS_UDP_MAX_PATHS
         == NETINS_UDP_V2_TRANSPORT_MAX_PATHS,
     "public and transport path limits must match");
@@ -51,6 +58,7 @@ struct netins_udp_s {
     pthread_mutex_t lock;
     pthread_cond_t idle_cond;
     size_t active_calls;
+    size_t active_logs;
     int closing;
     int endpoint_attempted;
 
@@ -71,6 +79,9 @@ struct netins_udp_s {
     uint32_t initial_cwnd_packets;
     int scheduler;
     int congestion_control;
+    int log_level;
+    netins_udp_logger_cb logger;
+    uint32_t logged_lifecycle;
     netins_udp_interfaces_t interfaces;
     netins_udp_tls_config_t tls;
 
@@ -88,11 +99,142 @@ static uint32_t g_netins_udp_v2_init_refs;
 static uint32_t g_netins_udp_v2_handle_count;
 
 static void
+netins_udp_v2_log(netins_udp_t *netins, int level, uint32_t once,
+    const char *message)
+{
+    netins_udp_logger_cb logger = NULL;
+    pthread_mutex_lock(&netins->lock);
+    if (once != 0 && (netins->logged_lifecycle & once) != 0) {
+        pthread_mutex_unlock(&netins->lock);
+        return;
+    }
+    if (once != 0) {
+        netins->logged_lifecycle |= once;
+    }
+    if (netins->logger != NULL && level >= netins->log_level) {
+        logger = netins->logger;
+        netins->active_logs++;
+    }
+    pthread_mutex_unlock(&netins->lock);
+
+    if (logger != NULL) {
+        logger(level, message);
+        pthread_mutex_lock(&netins->lock);
+        if (netins->active_logs > 0) {
+            netins->active_logs--;
+        }
+        if (netins->active_logs == 0) {
+            pthread_cond_broadcast(&netins->idle_cond);
+        }
+        pthread_mutex_unlock(&netins->lock);
+    }
+}
+
+static void
+netins_udp_v2_log_current_error(netins_udp_t *netins,
+    const char *fallback)
+{
+    char message[NETINS_UDP_ERROR_MSG_LEN + 32];
+    pthread_mutex_lock(&netins->lock);
+    const char *detail = netins->last_error_msg[0] != '\0'
+        ? netins->last_error_msg : fallback;
+    snprintf(message, sizeof(message), "NetIns UDP error: %s", detail);
+    pthread_mutex_unlock(&netins->lock);
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_ERROR,
+        NETINS_UDP_V2_LOGGED_ERROR, message);
+}
+
+/*
+ * This helper is called only after a transport operation has returned. The
+ * transport may invoke the generic notify callback while holding its own
+ * lock, so querying the observer directly from notify would risk re-entry.
+ */
+static void
+netins_udp_v2_log_connection_summary(netins_udp_t *netins)
+{
+    pthread_mutex_lock(&netins->lock);
+    if (netins->closing
+        || (netins->logged_lifecycle & NETINS_UDP_V2_LOGGED_MP_STATUS) != 0)
+    {
+        pthread_mutex_unlock(&netins->lock);
+        return;
+    }
+    int requested_type = netins->requested_type;
+    int role = netins->role;
+    netins_udp_v2_transport_client_t *client_transport =
+        netins->client_transport;
+    netins_udp_v2_transport_server_connection_t *accepted_transport =
+        netins->accepted_transport;
+    pthread_mutex_unlock(&netins->lock);
+
+    netins_udp_v2_transport_snapshot_t snapshot;
+    memset(&snapshot, 0, sizeof(snapshot));
+    int snapshot_result = -1;
+    if (role == NETINS_UDP_ROLE_CLIENT && client_transport != NULL) {
+        snapshot_result =
+            netins_udp_v2_transport_client_get_snapshot(client_transport,
+                &snapshot);
+    } else if (role == NETINS_UDP_ROLE_ACCEPTED
+        && accepted_transport != NULL)
+    {
+        snapshot_result =
+            netins_udp_v2_transport_server_connection_get_snapshot(
+                accepted_transport, &snapshot);
+    }
+    if (snapshot_result != 0) {
+        return;
+    }
+    if (!snapshot.handshake_finished || snapshot.path_count == 0) {
+        return;
+    }
+
+    char message[128];
+    if (snapshot.multipath_active) {
+        snprintf(message, sizeof(message),
+            "multipath QUIC active: paths=%u active=%u",
+            snapshot.path_count, snapshot.active_path_count);
+        netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+            NETINS_UDP_V2_LOGGED_MP_STATUS, message);
+
+    } else if (requested_type == NETINS_UDP_TYPE_MPQUIC) {
+        netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_WARN,
+            NETINS_UDP_V2_LOGGED_MP_STATUS,
+            "multipath QUIC is not active; connection is using one path");
+
+    } else {
+        netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_DEBUG,
+            NETINS_UDP_V2_LOGGED_MP_STATUS, "single-path QUIC active");
+    }
+}
+
+static void
 netins_udp_v2_notify_handle(void *user_data, uint32_t events)
 {
     netins_udp_t *netins = user_data;
     if (netins != NULL) {
         netins_udp_v2_notifier_signal(&netins->notifier, events);
+        if ((events & NETINS_UDP_V2_EVENT_CONNECTED) != 0) {
+            pthread_mutex_lock(&netins->lock);
+            int accepted = netins->role == NETINS_UDP_ROLE_ACCEPTED;
+            pthread_mutex_unlock(&netins->lock);
+            netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+                NETINS_UDP_V2_LOGGED_CONNECTED,
+                accepted ? "accepted QUIC connection established"
+                         : "QUIC connection established");
+        }
+        if ((events & NETINS_UDP_V2_EVENT_PATH_CHANGED) != 0) {
+            netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_WARN, 0,
+                "QUIC path availability changed; query snapshot for details");
+        }
+        if ((events & NETINS_UDP_V2_EVENT_CLOSED) != 0) {
+            netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+                NETINS_UDP_V2_LOGGED_CLOSED, "QUIC connection closed");
+        }
+        if ((events & NETINS_UDP_V2_EVENT_ERROR) != 0) {
+            netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_ERROR,
+                NETINS_UDP_V2_LOGGED_ERROR,
+                "QUIC transport reported an asynchronous failure");
+        }
     }
 }
 
@@ -253,6 +395,7 @@ netins_udp_v2_runtime_option(int option, int state)
         || option == NETINS_UDP_OPT_SEND_TIMEOUT_MS
         || option == NETINS_UDP_OPT_RECV_TIMEOUT_MS
         || option == NETINS_UDP_OPT_CLOSE_TIMEOUT_MS
+        || option == NETINS_UDP_OPT_LOG_LEVEL
         || (option == NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS
             && state == NETINS_UDP_STATE_LISTENING);
 }
@@ -465,6 +608,7 @@ netins_udp_new(int type)
     netins->kernel_sndbuf = NETINS_UDP_V2_DEFAULT_SOCKET_BUFFER;
     netins->kernel_rcvbuf = NETINS_UDP_V2_DEFAULT_SOCKET_BUFFER;
     netins->initial_cwnd_packets = NETINS_UDP_V2_DEFAULT_INITIAL_CWND;
+    netins->log_level = NETINS_UDP_LOG_LEVEL_INFO;
     netins->interfaces = (netins_udp_interfaces_t)
         NETINS_UDP_INTERFACES_INITIALIZER;
     netins_udp_tls_config_init(&netins->tls);
@@ -474,6 +618,31 @@ netins_udp_new(int type)
     g_netins_udp_v2_handle_count++;
     pthread_mutex_unlock(&g_netins_udp_v2_lock);
     return netins;
+}
+
+int
+netins_udp_set_logger(netins_udp_t *netins, netins_udp_logger_cb logger)
+{
+    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->lock);
+    /*
+     * Stop new callback entries before waiting. This gives callers a stable
+     * handoff point at which the previous callback and its application-owned
+     * state are no longer in use.
+     */
+    netins->logger = NULL;
+    while (netins->active_logs != 0) {
+        pthread_cond_wait(&netins->idle_cond, &netins->lock);
+    }
+    netins->logger = logger;
+    netins_udp_v2_set_error_locked(netins, 0, NULL);
+    pthread_mutex_unlock(&netins->lock);
+
+    netins_udp_v2_end_call(netins);
+    return NETINS_UDP_OK;
 }
 
 int
@@ -702,6 +871,20 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
         netins->congestion_control = congestion_control;
         break;
     }
+    case NETINS_UDP_OPT_LOG_LEVEL: {
+        int log_level = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &log_level,
+                sizeof(log_level))
+            || log_level < NETINS_UDP_LOG_LEVEL_DEBUG
+            || log_level > NETINS_UDP_LOG_LEVEL_ERROR)
+        {
+            result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
+                "LOG_LEVEL requires a valid netins_udp_log_level_t value");
+            break;
+        }
+        netins->log_level = log_level;
+        break;
+    }
     default:
         result = netins_udp_v2_set_option_error_locked(netins,
             EOPNOTSUPP, "unknown option");
@@ -832,6 +1015,11 @@ netins_udp_get_opt(netins_udp_t *netins, int option,
         source = &int_value;
         required = sizeof(int_value);
         break;
+    case NETINS_UDP_OPT_LOG_LEVEL:
+        int_value = netins->log_level;
+        source = &int_value;
+        required = sizeof(int_value);
+        break;
     default: {
         pthread_mutex_unlock(&netins->lock);
         int unknown_result = netins_udp_v2_fail(netins, EOPNOTSUPP,
@@ -946,6 +1134,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
     int nonblock = netins->nonblock;
     uint32_t connect_timeout_ms = netins->connect_timeout_ms;
     pthread_mutex_unlock(&netins->lock);
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_DEBUG, 0,
+        "QUIC client connection startup requested");
 
     netins_udp_v2_transport_config_t config;
     if (netins_udp_v2_prepare_transport_config(netins, host, port,
@@ -956,6 +1146,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
             netins->state = NETINS_UDP_STATE_ERROR;
         }
         pthread_mutex_unlock(&netins->lock);
+        netins_udp_v2_log_current_error(netins,
+            "client transport configuration failed");
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
@@ -971,6 +1163,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
             "failed to create the underlying QUIC client");
         pthread_mutex_unlock(&netins->lock);
         errno = error_code;
+        netins_udp_v2_log_current_error(netins,
+            "failed to create the underlying QUIC client");
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
@@ -1000,6 +1194,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
         }
         pthread_mutex_unlock(&netins->lock);
         errno = error_code;
+        netins_udp_v2_log_current_error(netins,
+            "failed to start the underlying QUIC client");
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
@@ -1014,6 +1210,10 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
                 netins_udp_v2_set_error_locked(netins, 0, NULL);
             }
             pthread_mutex_unlock(&netins->lock);
+            netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+                NETINS_UDP_V2_LOGGED_CONNECTED,
+                "QUIC connection established");
+            netins_udp_v2_log_connection_summary(netins);
             netins_udp_v2_end_call(netins);
             return NETINS_UDP_OK;
         }
@@ -1032,6 +1232,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
             }
             pthread_mutex_unlock(&netins->lock);
             errno = error_code;
+            netins_udp_v2_log_current_error(netins,
+                "nonblocking QUIC connection establishment failed");
             netins_udp_v2_end_call(netins);
             return NETINS_UDP_ERROR;
         }
@@ -1056,6 +1258,8 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
         }
         pthread_mutex_unlock(&netins->lock);
         errno = error_code;
+        netins_udp_v2_log_current_error(netins,
+            "QUIC connection establishment failed");
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
@@ -1072,6 +1276,9 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
     netins->state = NETINS_UDP_STATE_CONNECTED;
     netins_udp_v2_set_error_locked(netins, 0, NULL);
     pthread_mutex_unlock(&netins->lock);
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+        NETINS_UDP_V2_LOGGED_CONNECTED, "QUIC connection established");
+    netins_udp_v2_log_connection_summary(netins);
     netins_udp_v2_end_call(netins);
     return NETINS_UDP_OK;
 }
@@ -1166,6 +1373,8 @@ netins_udp_listen(netins_udp_t *netins, const char *host, int port)
     netins->role = NETINS_UDP_ROLE_LISTENER;
     netins->state = NETINS_UDP_STATE_LISTENING;
     pthread_mutex_unlock(&netins->lock);
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_DEBUG, 0,
+        "QUIC listener startup requested");
 
     netins_udp_v2_transport_server_config_t config;
     if (netins_udp_v2_prepare_server_config(netins, host, port, &config)
@@ -1176,6 +1385,8 @@ netins_udp_listen(netins_udp_t *netins, const char *host, int port)
             netins->state = NETINS_UDP_STATE_ERROR;
         }
         pthread_mutex_unlock(&netins->lock);
+        netins_udp_v2_log_current_error(netins,
+            "server transport configuration failed");
         netins_udp_v2_end_call(netins);
         return NULL;
     }
@@ -1191,6 +1402,8 @@ netins_udp_listen(netins_udp_t *netins, const char *host, int port)
             "failed to create the shared QUIC server backend");
         pthread_mutex_unlock(&netins->lock);
         errno = error_code;
+        netins_udp_v2_log_current_error(netins,
+            "failed to create the shared QUIC server backend");
         netins_udp_v2_end_call(netins);
         return NULL;
     }
@@ -1212,6 +1425,8 @@ netins_udp_listen(netins_udp_t *netins, const char *host, int port)
         return NULL;
     }
 
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+        NETINS_UDP_V2_LOGGED_LISTENING, "QUIC listener is ready");
     netins_udp_v2_end_call(netins);
     return netins;
 }
@@ -1290,6 +1505,8 @@ netins_udp_accept(netins_udp_t *listener, struct sockaddr *addr,
     uint32_t initial_cwnd_packets = listener->initial_cwnd_packets;
     int scheduler = listener->scheduler;
     int congestion_control = listener->congestion_control;
+    int log_level = listener->log_level;
+    netins_udp_logger_cb logger = listener->logger;
     netins_udp_tls_config_t tls = listener->tls;
     pthread_mutex_unlock(&listener->lock);
 
@@ -1330,11 +1547,14 @@ netins_udp_accept(netins_udp_t *listener, struct sockaddr *addr,
     accepted->initial_cwnd_packets = initial_cwnd_packets;
     accepted->scheduler = scheduler;
     accepted->congestion_control = congestion_control;
+    accepted->log_level = log_level;
+    accepted->logger = logger;
     accepted->tls = tls;
     accepted->accepted_transport = connection;
     pthread_mutex_unlock(&accepted->lock);
     netins_udp_v2_transport_server_connection_set_notify(connection,
         netins_udp_v2_notify_handle, accepted);
+    netins_udp_v2_log_connection_summary(accepted);
 
     if (addr != NULL) {
         socklen_t capacity = *addrlen;
@@ -1417,6 +1637,9 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
         netins_udp_v2_transport_server_connection_request_shutdown(
             accepted_transport, application_error);
     }
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+        NETINS_UDP_V2_LOGGED_SHUTDOWN,
+        "graceful QUIC connection shutdown requested");
     netins_udp_v2_end_call(netins);
     return NETINS_UDP_OK;
 }
@@ -1540,7 +1763,10 @@ netins_udp_v2_refresh_state(netins_udp_t *netins)
     }
 
     if (notify_events != 0) {
-        netins_udp_v2_notifier_signal(&netins->notifier, notify_events);
+        netins_udp_v2_notify_handle(netins, notify_events);
+        if ((notify_events & NETINS_UDP_EVENT_CONNECTED) != 0) {
+            netins_udp_v2_log_connection_summary(netins);
+        }
     }
     return state;
 }
@@ -1986,6 +2212,11 @@ netins_udp_get_events(netins_udp_t *netins, uint32_t *out_events)
             errno != 0 ? errno : EIO,
             "failed to acknowledge connection notification");
     }
+    if (result == NETINS_UDP_OK
+        && (*out_events & NETINS_UDP_EVENT_PATH_CHANGED) != 0)
+    {
+        netins_udp_v2_log_connection_summary(netins);
+    }
     netins_udp_v2_end_call(netins);
     return result;
 }
@@ -2232,7 +2463,7 @@ netins_udp_close(netins_udp_t *netins)
     }
 
     pthread_mutex_lock(&netins->lock);
-    while (netins->active_calls != 0) {
+    while (netins->active_calls != 0 || netins->active_logs != 0) {
         pthread_cond_wait(&netins->idle_cond, &netins->lock);
     }
     client_transport = netins->client_transport;
@@ -2255,6 +2486,8 @@ netins_udp_close(netins_udp_t *netins)
             accepted_transport, close_timeout_ms);
     }
 
+    netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
+        NETINS_UDP_V2_LOGGED_CLOSED, "NetIns UDP handle closed");
     netins_udp_v2_notifier_destroy(&netins->notifier);
     pthread_cond_destroy(&netins->idle_cond);
     pthread_mutex_destroy(&netins->lock);

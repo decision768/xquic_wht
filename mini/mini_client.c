@@ -2272,18 +2272,6 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     int packets_per_path = (int)netins_udp_backend_rx_packet_limit(
         &rx_policy, (size_t)ready_paths);
 
-    if (user_conn->rx_last_budget_active_paths != ready_paths
-        || user_conn->rx_last_budget_packets_per_path != packets_per_path)
-    {
-        printf("[diag_rx_budget] active_paths=%d per_path_limit=%d"
-               " round_limit=%d mode=%s\n",
-               ready_paths, packets_per_path,
-               ready_paths * packets_per_path,
-               ready_paths >= 2 ? "dual" : "single");
-        user_conn->rx_last_budget_active_paths = ready_paths;
-        user_conn->rx_last_budget_packets_per_path = packets_per_path;
-    }
-
     int round_packets = 0;
     int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
     for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
@@ -3087,8 +3075,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->rx_next_path_index = 0;
     user_conn->rx_arbiter_running = 0;
     user_conn->rx_shutdown = 0;
-    user_conn->rx_last_budget_active_paths = -1;
-    user_conn->rx_last_budget_packets_per_path = -1;
     pthread_mutex_init(&user_conn->download_write_lock, NULL);
     pthread_cond_init(&user_conn->download_write_cond, NULL);
     pthread_cond_init(&user_conn->download_write_space_cond, NULL);
@@ -3105,14 +3091,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->paths[i].disabled_for_session = 0;
         user_conn->paths[i].last_recover_probe_time = 0;
     }
-
-    netins_udp_backend_rx_policy_t rx_policy;
-    netins_udp_backend_rx_policy_init(&rx_policy);
-    printf("[resolved-rx] mode=%s single_per_path=%u dual_per_path=%u"
-           " dual_round_max=%d rounds=1\n",
-        xqc_mini_cli_rx_mode(), rx_policy.single_path_packets,
-        rx_policy.multipath_packets_per_path,
-        MAX_PATH_CNT * (int)rx_policy.multipath_packets_per_path);
 
     ret = xqc_mini_cli_promote_available_initial_interface(user_conn);
     if (ret != XQC_OK) {

@@ -48,6 +48,7 @@ typedef struct xqc_backup_candidate_s {
 
 typedef struct xqc_backup_scheduler_s {
     xqc_backup_path_sample_t samples[XQC_MAX_PATHS_COUNT];
+    xqc_bool_t diag_enabled;
     xqc_bool_t warmup_started;
     xqc_bool_t warmup_completed;
     xqc_bool_t warmup_timed_out;
@@ -85,8 +86,8 @@ xqc_backup_scheduler_init(void *scheduler, xqc_log_t *log,
     xqc_backup_scheduler_t *backup = scheduler;
 
     (void)log;
-    (void)param;
     memset(backup, 0, sizeof(*backup));
+    backup->diag_enabled = param && param->mp_diag_enabled;
     backup->primary_path_id = UINT64_MAX;
 }
 
@@ -214,14 +215,16 @@ xqc_backup_scheduler_start_warmup(xqc_backup_scheduler_t *backup,
         }
     }
 
-    printf("[diag_strict_backup] conn=%p event=warmup_start paths=%zu"
-           " min_ms=%.3f max_ms=%.3f bytes_per_path=%u"
-           " delivered_min=%u\n",
-           conn, path_count,
-           (double)XQC_BACKUP_WARMUP_MIN_US / 1000.0,
-           (double)XQC_BACKUP_WARMUP_MAX_US / 1000.0,
-           (unsigned)XQC_BACKUP_WARMUP_BYTES_PER_PATH,
-           (unsigned)XQC_BACKUP_WARMUP_DELIVERED_MIN);
+    if (backup->diag_enabled) {
+        printf("[diag_strict_backup] conn=%p event=warmup_start paths=%zu"
+               " min_ms=%.3f max_ms=%.3f bytes_per_path=%u"
+               " delivered_min=%u\n",
+               conn, path_count,
+               (double)XQC_BACKUP_WARMUP_MIN_US / 1000.0,
+               (double)XQC_BACKUP_WARMUP_MAX_US / 1000.0,
+               (unsigned)XQC_BACKUP_WARMUP_BYTES_PER_PATH,
+               (unsigned)XQC_BACKUP_WARMUP_DELIVERED_MIN);
+    }
 }
 
 
@@ -434,20 +437,22 @@ xqc_backup_scheduler_lock_primary(xqc_backup_scheduler_t *backup,
             ? 0.8 * sample->window_rate_Bps + 0.2 * est_component
             : est_component;
 
-        printf("[diag_strict_backup_probe] conn=%p path=%" PRIu64
-               " selected_bytes=%" PRIu64 " delivered_bytes=%" PRIu64
-               " delivery_mbps=%.3f ema_mbps=%.3f est_bw_mbps=%.3f"
-               " score_mbps=%.3f srtt_us=%" PRIu64
-               " cwnd=%" PRIu64 " inflight=%" PRIu64
-               " blocked_checks=%" PRIu64 "\n",
-               conn, sample->path_id, sample->selected_bytes,
-               sample->delivered_bytes,
-               sample->window_rate_Bps * 8.0 / 1000000.0,
-               sample->delivery_rate_ema_Bps * 8.0 / 1000000.0,
-               (double)sample->est_bw_Bps * 8.0 / 1000000.0,
-               sample->score_Bps * 8.0 / 1000000.0,
-               sample->srtt_us, sample->cwnd, sample->inflight,
-               sample->blocked_checks);
+        if (backup->diag_enabled) {
+            printf("[diag_strict_backup_probe] conn=%p path=%" PRIu64
+                   " selected_bytes=%" PRIu64 " delivered_bytes=%" PRIu64
+                   " delivery_mbps=%.3f ema_mbps=%.3f est_bw_mbps=%.3f"
+                   " score_mbps=%.3f srtt_us=%" PRIu64
+                   " cwnd=%" PRIu64 " inflight=%" PRIu64
+                   " blocked_checks=%" PRIu64 "\n",
+                   conn, sample->path_id, sample->selected_bytes,
+                   sample->delivered_bytes,
+                   sample->window_rate_Bps * 8.0 / 1000000.0,
+                   sample->delivery_rate_ema_Bps * 8.0 / 1000000.0,
+                   (double)sample->est_bw_Bps * 8.0 / 1000000.0,
+                   sample->score_Bps * 8.0 / 1000000.0,
+                   sample->srtt_us, sample->cwnd, sample->inflight,
+                   sample->blocked_checks);
+        }
 
         if (best == NULL
             || sample->score_Bps
@@ -470,12 +475,14 @@ xqc_backup_scheduler_lock_primary(xqc_backup_scheduler_t *backup,
     backup->primary_locked = XQC_TRUE;
     backup->warmup_started = XQC_FALSE;
     backup->warmup_completed = XQC_TRUE;
-    printf("[diag_strict_backup] conn=%p event=primary_lock mode=auto_probe"
-           " primary=%" PRIu64 " elapsed_ms=%.3f reason=%s"
-           " score_mbps=%.3f\n",
-           conn, backup->primary_path_id, (double)elapsed / 1000.0,
-           backup->warmup_timed_out ? "timeout" : "samples_ready",
-           best->sample->score_Bps * 8.0 / 1000000.0);
+    if (backup->diag_enabled) {
+        printf("[diag_strict_backup] conn=%p event=primary_lock"
+               " mode=auto_probe primary=%" PRIu64
+               " elapsed_ms=%.3f reason=%s score_mbps=%.3f\n",
+               conn, backup->primary_path_id, (double)elapsed / 1000.0,
+               backup->warmup_timed_out ? "timeout" : "samples_ready",
+               best->sample->score_Bps * 8.0 / 1000000.0);
+    }
 }
 
 
@@ -609,11 +616,13 @@ xqc_backup_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         if (!backup->failover_active) {
             backup->failover_active = XQC_TRUE;
             backup->failover_events++;
-            printf("[diag_strict_backup] conn=%p event=primary_failover"
-                   " primary=%" PRIu64 " state=%d status=%d\n",
-                   conn, backup->primary_path_id,
-                   primary_path ? primary_path->path_state : -1,
-                   primary_path ? primary_path->app_path_status : -1);
+            if (backup->diag_enabled) {
+                printf("[diag_strict_backup] conn=%p event=primary_failover"
+                       " primary=%" PRIu64 " state=%d status=%d\n",
+                       conn, backup->primary_path_id,
+                       primary_path ? primary_path->path_state : -1,
+                       primary_path ? primary_path->app_path_status : -1);
+            }
         }
 
         return xqc_backup_scheduler_pick_fallback(backup, conn, packet_out,
@@ -672,8 +681,10 @@ xqc_backup_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         backup->warmup_start_us = 0;
         backup->warmup_elapsed_us = 0;
         memset(backup->samples, 0, sizeof(backup->samples));
-        printf("[diag_strict_backup] conn=%p event=warmup_abort"
-               " reason=active_paths_below_two\n", conn);
+        if (backup->diag_enabled) {
+            printf("[diag_strict_backup] conn=%p event=warmup_abort"
+                   " reason=active_paths_below_two\n", conn);
+        }
     }
 
     return xqc_backup_scheduler_pick_fallback(backup, conn, packet_out,
@@ -697,6 +708,10 @@ xqc_backup_scheduler_conn_close_diag(void *scheduler, xqc_connection_t *conn)
 {
     size_t i;
     xqc_backup_scheduler_t *backup = scheduler;
+
+    if (backup == NULL || conn == NULL || !backup->diag_enabled) {
+        return;
+    }
 
     printf("[diag_strict_backup_summary] conn=%p mode=auto_probe_lock"
            " primary=%" PRIu64 " locked=%d warmup_started=%d"

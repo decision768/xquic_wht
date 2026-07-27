@@ -39,7 +39,6 @@ V2_LOOPBACK_TEST = ROOT / "tests/netins_udp/test_netins_udp_v2_loopback.c"
 DELIVERY_FILES = (
     ROOT / "api/README.md",
     ROOT / "api/NETINS_UDP_API_使用说明.md",
-    ROOT / "api/NETINS_UDP_API_设计说明.md",
     *sorted((ROOT / "api/examples").glob("*.c")),
 )
 IMPLEMENTATIONS = (

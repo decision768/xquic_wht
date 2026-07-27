@@ -5,10 +5,7 @@
 
 #include <xquic/netins_udp.h>
 
-/*
- * Minimal blocking QUIC/HTTP/3 connection example. The handle owns its
- * transport worker; it does not start mini_client or expose a UDP socket.
- */
+/* Minimal blocking QUIC/HTTP/3 connection example. */
 int
 netins_udp_connect_example(const char *server_address, uint16_t server_port,
     const char *server_name, const char *first_interface,

@@ -91,7 +91,9 @@ xqc_timer_try_mp_path_failover(xqc_connection_t *conn,
     }
 
     if (send_ctl->ctl_pto_count < threshold) {
-        if (send_ctl->ctl_pto_count == 1) {
+        if (send_ctl->ctl_pto_count == 1
+            && conn->conn_settings.scheduler_params.mp_diag_enabled)
+        {
             printf("[diag_path_failover] action=suspect path=%" PRIu64
                    " pto=%u threshold=%u inflight=%u alternate=%" PRIu64 "\n",
                 path->path_id, send_ctl->ctl_pto_count, threshold,
@@ -102,11 +104,14 @@ xqc_timer_try_mp_path_failover(xqc_connection_t *conn,
 
     unsigned inflight = send_ctl->ctl_bytes_in_flight;
     xqc_int_t ret = xqc_path_immediate_close(path);
-    printf("[diag_path_failover] action=%s path=%" PRIu64
-           " pto=%u threshold=%u inflight=%u alternate=%" PRIu64
-           " ret=%d\n",
-        ret == XQC_OK ? "close" : "close_failed", path->path_id,
-        send_ctl->ctl_pto_count, threshold, inflight, alternate->path_id, ret);
+    if (conn->conn_settings.scheduler_params.mp_diag_enabled) {
+        printf("[diag_path_failover] action=%s path=%" PRIu64
+               " pto=%u threshold=%u inflight=%u alternate=%" PRIu64
+               " ret=%d\n",
+            ret == XQC_OK ? "close" : "close_failed", path->path_id,
+            send_ctl->ctl_pto_count, threshold, inflight, alternate->path_id,
+            ret);
+    }
 
     return ret == XQC_OK ? XQC_TRUE : XQC_FALSE;
 }

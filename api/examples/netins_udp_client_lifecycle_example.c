@@ -3,6 +3,16 @@
 
 #include <xquic/netins_udp.h>
 
+static void
+example_logger(int level, const char *message)
+{
+    static const char *names[] = {"DEBUG", "INFO", "WARN", "ERROR"};
+    const char *name = level >= NETINS_UDP_LOG_LEVEL_DEBUG
+            && level <= NETINS_UDP_LOG_LEVEL_ERROR
+        ? names[level] : "UNKNOWN";
+    fprintf(stderr, "[netins-udp:%s] %s\n", name, message);
+}
+
 int
 netins_udp_client_lifecycle_example(const char *host, int port,
     const char *first_interface, const char *second_interface)
@@ -17,6 +27,9 @@ netins_udp_client_lifecycle_example(const char *host, int port,
     if (client == NULL) {
         (void)netins_udp_cleanup();
         return -1;
+    }
+    if (netins_udp_set_logger(client, example_logger) != NETINS_UDP_OK) {
+        goto error;
     }
 
     int protocol = NETINS_UDP_APP_HTTP3;

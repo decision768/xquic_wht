@@ -4,6 +4,16 @@
 
 #include <xquic/netins_udp.h>
 
+static void
+example_logger(int level, const char *message)
+{
+    static const char *names[] = {"DEBUG", "INFO", "WARN", "ERROR"};
+    const char *name = level >= NETINS_UDP_LOG_LEVEL_DEBUG
+            && level <= NETINS_UDP_LOG_LEVEL_ERROR
+        ? names[level] : "UNKNOWN";
+    fprintf(stderr, "[netins-udp:%s] %s\n", name, message);
+}
+
 int
 netins_udp_server_lifecycle_example(const char *bind_host, int port,
     const char *certificate_file, const char *private_key_file)
@@ -23,6 +33,11 @@ netins_udp_server_lifecycle_example(const char *bind_host, int port,
 
     listener = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
     if (listener == NULL) {
+        goto done;
+    }
+    if (netins_udp_set_logger(listener, example_logger)
+        != NETINS_UDP_OK)
+    {
         goto done;
     }
 

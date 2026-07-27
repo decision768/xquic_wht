@@ -752,13 +752,16 @@ xqc_adaptive_select_primary(xqc_adaptive_scheduler_t *adaptive,
     }
     xqc_adaptive_reset_window(adaptive, candidates, count, now);
 
-    printf("[diag_adaptive] conn=%p event=primary_select reason=%s primary=%" PRIu64
-           " score=%.0f srtt=%" PRIu64 " probe=%.1f secondary=%" PRIu64
-           " secondary_score=%.0f\n",
-           (void *)conn, reason, primary->path_id, primary->score, primary->srtt,
-           adaptive->probe_pct,
-           secondary ? secondary->path_id : UINT64_MAX,
-           secondary ? secondary->score : 0.0);
+    if (adaptive->sched_diag.enabled) {
+        printf("[diag_adaptive] conn=%p event=primary_select reason=%s"
+               " primary=%" PRIu64 " score=%.0f srtt=%" PRIu64
+               " probe=%.1f secondary=%" PRIu64
+               " secondary_score=%.0f\n",
+               (void *)conn, reason, primary->path_id, primary->score,
+               primary->srtt, adaptive->probe_pct,
+               secondary ? secondary->path_id : UINT64_MAX,
+               secondary ? secondary->score : 0.0);
+    }
     xqc_adaptive_diag_print_primary_paths(adaptive, candidates, count, now,
         reason);
 }
@@ -779,8 +782,11 @@ xqc_adaptive_start_warmup(xqc_adaptive_scheduler_t *adaptive,
         candidates[i].state->init_delivered = candidates[i].delivered_total;
         candidates[i].warmup_sent = 0;
     }
-    printf("[diag_adaptive] conn=%p event=warmup_start paths=%zu bytes_per_path=%u\n",
-           (void *)conn, count, (unsigned)XQC_ADAPTIVE_WARMUP_BYTES_PER_PATH);
+    if (adaptive->sched_diag.enabled) {
+        printf("[diag_adaptive] conn=%p event=warmup_start paths=%zu"
+               " bytes_per_path=%u\n", (void *)conn, count,
+               (unsigned)XQC_ADAPTIVE_WARMUP_BYTES_PER_PATH);
+    }
 }
 
 static xqc_bool_t
@@ -1217,8 +1223,11 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
             candidates[0].state->adjust_sent_base = candidates[0].sent_total;
             candidates[0].state->adjust_delivered_base =
                 candidates[0].delivered_total;
-            printf("[diag_adaptive] conn=%p event=failover_single primary=%" PRIu64 "\n",
-                   (void *)conn, adaptive->primary_path_id);
+            if (adaptive->sched_diag.enabled) {
+                printf("[diag_adaptive] conn=%p event=failover_single"
+                       " primary=%" PRIu64 "\n",
+                       (void *)conn, adaptive->primary_path_id);
+            }
             xqc_adaptive_diag_print_primary_paths(adaptive, candidates, 1,
                 now, "failover_single");
         }
@@ -1345,31 +1354,32 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
         return;
     }
     adaptive->diag_emitted = XQC_TRUE;
-
-    if (adaptive->sched_diag.enabled) {
-        printf("[diag_adaptive_probe] both_sendable=%" PRIu64
-               " primary_only=%" PRIu64 " secondary_only=%" PRIu64
-               " neither_sendable=%" PRIu64
-               " probe_considered=%" PRIu64 " probe_selected=%" PRIu64
-               " probe_denied_secondary_cwnd=%" PRIu64
-               " probe_denied_secondary_reinject=%" PRIu64
-               " probe_denied_secondary_other=%" PRIu64
-               " probe_denied_share_limit=%" PRIu64
-               " probe_denied_no_secondary=%" PRIu64
-               " fallback_real_inflight=%" PRIu64
-               " fallback_scheduled_reservation=%" PRIu64 "\n",
-               adaptive->both_sendable, adaptive->primary_only,
-               adaptive->secondary_only, adaptive->neither_sendable,
-               adaptive->probe_considered, adaptive->probe_selected,
-               adaptive->probe_denied_secondary_cwnd,
-               adaptive->probe_denied_secondary_reinject,
-               adaptive->probe_denied_secondary_other,
-               adaptive->probe_denied_share_limit,
-               adaptive->probe_denied_no_secondary,
-               adaptive->fallback_real_inflight,
-               adaptive->fallback_scheduled_reservation);
-        xqc_scheduler_diag_close(&adaptive->sched_diag, conn);
+    if (!adaptive->sched_diag.enabled) {
+        return;
     }
+
+    printf("[diag_adaptive_probe] both_sendable=%" PRIu64
+           " primary_only=%" PRIu64 " secondary_only=%" PRIu64
+           " neither_sendable=%" PRIu64
+           " probe_considered=%" PRIu64 " probe_selected=%" PRIu64
+           " probe_denied_secondary_cwnd=%" PRIu64
+           " probe_denied_secondary_reinject=%" PRIu64
+           " probe_denied_secondary_other=%" PRIu64
+           " probe_denied_share_limit=%" PRIu64
+           " probe_denied_no_secondary=%" PRIu64
+           " fallback_real_inflight=%" PRIu64
+           " fallback_scheduled_reservation=%" PRIu64 "\n",
+           adaptive->both_sendable, adaptive->primary_only,
+           adaptive->secondary_only, adaptive->neither_sendable,
+           adaptive->probe_considered, adaptive->probe_selected,
+           adaptive->probe_denied_secondary_cwnd,
+           adaptive->probe_denied_secondary_reinject,
+           adaptive->probe_denied_secondary_other,
+           adaptive->probe_denied_share_limit,
+           adaptive->probe_denied_no_secondary,
+           adaptive->fallback_real_inflight,
+           adaptive->fallback_scheduled_reservation);
+    xqc_scheduler_diag_close(&adaptive->sched_diag, conn);
 
     xqc_usec_t now = xqc_monotonic_timestamp();
     xqc_usec_t start_us = adaptive->diag_start_us > 0
