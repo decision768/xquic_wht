@@ -14,7 +14,9 @@
 #include "xqc_common_test.h"
 #include "xqc_vint_test.h"
 #include "xqc_recv_record_test.h"
+#ifdef XQC_ENABLE_RENO
 #include "xqc_reno_test.h"
+#endif
 #include "xqc_cubic_test.h"
 #include "xqc_packet_test.h"
 #include "xqc_stream_frame_test.h"
@@ -70,7 +72,9 @@ main()
         || !CU_add_test(pSuite, "xqc_test_common", xqc_test_common)
         || !CU_add_test(pSuite, "xqc_test_vint", xqc_test_vint)
         || !CU_add_test(pSuite, "xqc_test_recv_record", xqc_test_recv_record)
+#ifdef XQC_ENABLE_RENO
         || !CU_add_test(pSuite, "xqc_test_reno", xqc_test_reno)
+#endif
         || !CU_add_test(pSuite, "xqc_test_cubic", xqc_test_cubic)
         || !CU_add_test(pSuite, "xqc_test_short_header_parse_cid", xqc_test_short_header_packet_parse_cid)
         || !CU_add_test(pSuite, "xqc_test_long_header_parse_cid", xqc_test_long_header_packet_parse_cid)

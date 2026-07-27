@@ -90,7 +90,6 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_vint_test.c
         ${UNIT_TEST_DIR}/xqc_packet_test.c
         ${UNIT_TEST_DIR}/xqc_recv_record_test.c
-        ${UNIT_TEST_DIR}/xqc_reno_test.c
         ${UNIT_TEST_DIR}/xqc_cubic_test.c
         ${UNIT_TEST_DIR}/xqc_stream_frame_test.c
         ${UNIT_TEST_DIR}/xqc_process_frame_test.c
@@ -115,6 +114,14 @@ if(HAVE_CUNIT)
         ${UNIT_TEST_DIR}/xqc_ack_with_timestamp_test.c
         ${UNIT_TEST_DIR}/xqc_scheduler_diag_test.c
     )
+
+    if(XQC_ENABLE_RENO)
+        set(
+            test_SOURCES
+            ${test_SOURCES}
+            ${UNIT_TEST_DIR}/xqc_reno_test.c
+        )
+    endif()
 
     if(XQC_ENABLE_FEC)
         set(

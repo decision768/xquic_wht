@@ -141,7 +141,9 @@ typedef enum netins_udp_congestion_control_e {
     NETINS_UDP_CC_DEFAULT = 0,
     NETINS_UDP_CC_CUBIC = 1,
     NETINS_UDP_CC_BBR = 2,
+    /* Requires XQUIC to be built with XQC_ENABLE_BBR2=ON. */
     NETINS_UDP_CC_BBR2 = 3,
+    /* Requires XQUIC to be built with XQC_ENABLE_RENO=ON. */
     NETINS_UDP_CC_RENO = 4
 } netins_udp_congestion_control_t;
 

@@ -608,9 +608,17 @@ netins_udp_server_congestion_control(int congestion_control)
     case 1:
         return &xqc_cubic_cb;
     case 3:
+#ifdef XQC_ENABLE_BBR2
         return &xqc_bbr2_cb;
+#else
+        return NULL;
+#endif
     case 4:
+#ifdef XQC_ENABLE_RENO
         return &xqc_reno_cb;
+#else
+        return NULL;
+#endif
     default:
         return NULL;
     }

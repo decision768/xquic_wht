@@ -24,6 +24,7 @@ SERVER_BACKEND = ROOT / "src/netins_udp/netins_udp_server.c"
 OBSERVER_BACKEND = ROOT / "src/netins_udp/netins_udp_observer.c"
 V2_CLIENT = ROOT / "src/netins_udp/netins_udp_v2_client.c"
 V2_H3 = ROOT / "src/netins_udp/netins_udp_v2_h3.c"
+V2_TRANSPORT = ROOT / "src/netins_udp/netins_udp_v2_transport.c"
 XQC_SEND_CTL = ROOT / "src/transport/xqc_send_ctl.c"
 XQC_STREAM = ROOT / "src/transport/xqc_stream.c"
 MINI_CLIENT = ROOT / "mini/mini_client.c"
@@ -147,6 +148,7 @@ def main(argv=None):
     observer_backend = OBSERVER_BACKEND.read_text(encoding="utf-8")
     v2_client = V2_CLIENT.read_text(encoding="utf-8")
     v2_h3 = V2_H3.read_text(encoding="utf-8")
+    v2_transport = V2_TRANSPORT.read_text(encoding="utf-8")
     xqc_send_ctl = XQC_SEND_CTL.read_text(encoding="utf-8")
     xqc_stream = XQC_STREAM.read_text(encoding="utf-8")
     mini_client = MINI_CLIENT.read_text(encoding="utf-8")
@@ -188,6 +190,44 @@ def main(argv=None):
             "server_refuse must detach its observer because no H3 close "
             "callback follows"
         )
+
+    optional_cc_guards = (
+        (
+            SERVER_BACKEND,
+            server_backend,
+            "XQC_ENABLE_BBR2",
+            "xqc_bbr2_cb",
+        ),
+        (
+            SERVER_BACKEND,
+            server_backend,
+            "XQC_ENABLE_RENO",
+            "xqc_reno_cb",
+        ),
+        (
+            V2_TRANSPORT,
+            v2_transport,
+            "XQC_ENABLE_BBR2",
+            "xqc_bbr2_cb",
+        ),
+        (
+            V2_TRANSPORT,
+            v2_transport,
+            "XQC_ENABLE_RENO",
+            "xqc_reno_cb",
+        ),
+    )
+    for source_path, source, feature_macro, callback_symbol in optional_cc_guards:
+        guarded_return = re.compile(
+            rf"#ifdef\s+{feature_macro}\s+"
+            rf"return\s+&{callback_symbol}\s*;\s+"
+            rf"#else\s+return\s+NULL\s*;\s+#endif"
+        )
+        if not guarded_return.search(source):
+            ok = fail(
+                f"{source_path.relative_to(ROOT)} references optional "
+                f"{callback_symbol} without a {feature_macro} fallback"
+            )
 
     if not re.search(
         r"#define\s+NETINS_UDP_API_VERSION\s+2U\b", public
