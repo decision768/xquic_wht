@@ -7,8 +7,18 @@
 # Override any CACHE path below with an additional -D option when the
 # dependency is installed elsewhere.
 
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR x86_64)
+# Do not set CMAKE_SYSTEM_NAME here: this is a native profile, and forcing it
+# would make CMake report CMAKE_CROSSCOMPILING even on an x86_64 Linux host.
+string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" _xqc_host_system_name)
+string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" _xqc_host_processor)
+if(NOT _xqc_host_system_name STREQUAL "linux"
+    OR NOT _xqc_host_processor MATCHES "^(x86_64|amd64)$")
+    message(FATAL_ERROR
+        "linux-x86_64.cmake requires a native Linux x86_64 host; "
+        "detected ${CMAKE_HOST_SYSTEM_NAME}/${CMAKE_HOST_SYSTEM_PROCESSOR}")
+endif()
+unset(_xqc_host_system_name)
+unset(_xqc_host_processor)
 
 set(XQC_USE_SIM8810_TOOLCHAIN OFF CACHE BOOL
     "do not use the SIM8810 cross compiler for native x86_64")
