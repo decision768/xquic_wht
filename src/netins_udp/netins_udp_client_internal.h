@@ -38,6 +38,7 @@ typedef struct netins_udp_client_h3_info_s {
     int send_finished;
     int receive_finished;
     int stream_error;
+    int stream_system_error;
     uint64_t bytes_accepted;
     uint64_t bytes_delivered;
     char request_authority[NETINS_UDP_SERVER_NAME_LEN];
@@ -86,5 +87,6 @@ int netins_udp_client_h3_request_get_events(netins_udp_stream_t *stream,
     uint32_t *out_events);
 void netins_udp_client_h3_request_set_notify(netins_udp_stream_t *stream,
     netins_udp_v2_transport_notify_cb notify, void *user_data);
+int netins_udp_client_has_pending_resolvers(void);
 
 #endif /* NETINS_UDP_CLIENT_INTERNAL_H */

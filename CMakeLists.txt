@@ -1,33 +1,82 @@
 # Copyright (c) 2022, Alibaba Group Holding Limited
 
 cmake_minimum_required (VERSION 3.6)
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
 # set(TOOLCHAIN_DIR /opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux)
 # set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
 # set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
 
 # === SIM8810 SDK ===
-set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
-set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
+set(XQC_SIM8810_SDK_ROOT
+    "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207"
+    CACHE PATH "SIM8810 SDK root")
+set(XQC_SIM8810_TOOLCHAIN_DIR
+    "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux"
+    CACHE PATH
+    "directory containing aarch64-oe-linux-gcc and aarch64-oe-linux-g++")
+set(_xqc_sim8810_default OFF)
+if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
+    AND EXISTS "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm"
+    AND EXISTS "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc"
+    AND EXISTS "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
+    set(_xqc_sim8810_default ON)
+endif()
+option(XQC_USE_SIM8810_TOOLCHAIN
+    "build with the SIM8810 AArch64 SDK toolchain"
+    ${_xqc_sim8810_default})
+unset(_xqc_sim8810_default)
 
-# toolchain（跟 sdk.mk 一致）
-set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
-set(CMAKE_C_COMPILER  ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
-set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
+if(XQC_USE_SIM8810_TOOLCHAIN)
+    if(DEFINED CMAKE_TOOLCHAIN_FILE
+        AND NOT CMAKE_TOOLCHAIN_FILE STREQUAL "")
+        message(FATAL_ERROR
+            "choose either XQC_USE_SIM8810_TOOLCHAIN or "
+            "CMAKE_TOOLCHAIN_FILE, not both")
+    endif()
+    if(NOT EXISTS "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm"
+        OR NOT EXISTS
+            "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc"
+        OR NOT EXISTS
+            "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
+        message(FATAL_ERROR
+            "XQC_USE_SIM8810_TOOLCHAIN is ON, but the configured SDK or "
+            "compiler does not exist")
+    endif()
+    set(CMAKE_SYSTEM_NAME Linux)
+    set(CMAKE_SYSTEM_PROCESSOR aarch64)
+    set(CMAKE_SYSROOT "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm")
 
-# 让 cmake 查找 include/lib 时走 sysroot
-set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+    # toolchain（跟 sdk.mk 一致）
+    set(CMAKE_C_COMPILER
+        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc")
+    set(CMAKE_CXX_COMPILER
+        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
+
+    # 让 cmake 查找 include/lib 时走 sysroot
+    set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
+    set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+    set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+    set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+endif()
 # ====================
 project (xquic)
 set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
 set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _xqc_system_processor)
+    if(_xqc_system_processor MATCHES "^(aarch64|arm64)$")
+        set(XQC_LINUX_ARCH "aarch64")
+    elseif(_xqc_system_processor MATCHES "^(x86_64|amd64)$")
+        set(XQC_LINUX_ARCH "x86_64")
+    else()
+        set(XQC_LINUX_ARCH "${_xqc_system_processor}")
+    endif()
+    unset(_xqc_system_processor)
+    message(STATUS "XQUIC Linux target architecture: ${XQC_LINUX_ARCH}")
+endif()
 
 option (XQC_ENABLE_BBR2 "enable bbr2" OFF)
 option (XQC_ENABLE_COPA "enable copa" OFF)
@@ -52,12 +101,22 @@ if(NOT SSL_TYPE)
     set(SSL_TYPE "babassl")
     message(NOTICE "-- SSL_TYPE not set, use default babassl")
 endif()
+if(NOT SSL_TYPE STREQUAL "babassl"
+    AND NOT SSL_TYPE STREQUAL "boringssl")
+    message(FATAL_ERROR
+        "unsupported SSL_TYPE=${SSL_TYPE}; use babassl or boringssl")
+endif()
 
 if(${SSL_TYPE} MATCHES "babassl")
     # PATH of ssl, by default XQUIC will use babassl installed in
     # /usr/local/babassl if SSL_PATH is not set
     if(NOT SSL_PATH)
-        set(SSL_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Tongsuo-8.3.0")
+        if(XQC_LINUX_ARCH STREQUAL "aarch64")
+            set(SSL_PATH
+                "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/Tongsuo-8.3.0")
+        else()
+            set(SSL_PATH "/usr/local/babassl")
+        endif()
         message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
     endif()
 
@@ -90,10 +149,18 @@ if(NOT SSL_INC_PATH AND NOT SSL_LIB_PATH)
     # endif(NOT SSL_FOUND)
 
     set(SSL_INC_PATH "${SSL_PATH}/include")
-    set(SSL_LIB_PATH
-        "${SSL_PATH}/libssl.a"
-        "${SSL_PATH}/libcrypto.a"
-    )
+    if(SSL_TYPE STREQUAL "babassl"
+        AND NOT XQC_LINUX_ARCH STREQUAL "aarch64")
+        set(SSL_LIB_PATH
+            "${SSL_PATH}/lib/libssl.a"
+            "${SSL_PATH}/lib/libcrypto.a"
+        )
+    else()
+        set(SSL_LIB_PATH
+            "${SSL_PATH}/libssl.a"
+            "${SSL_PATH}/libcrypto.a"
+        )
+    endif()
 
     # compat with elder macros
     # if(SSL_DYNAMIC)
@@ -156,11 +223,26 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
-set(LIBEVENT_ROOT /home/admin123/libevent_aarch64/libevent-2.1.12-stable)
+set(XQC_LIBEVENT_ROOT_X86_64
+    "/data/quic/libevent-2.1.12-stable"
+    CACHE PATH "libevent root for native Linux x86_64 builds")
+set(XQC_LIBEVENT_ROOT_AARCH64
+    "/home/admin123/libevent_aarch64/libevent-2.1.12-stable"
+    CACHE PATH "libevent root for Linux AArch64 builds")
 
-set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_ROOT}/include)
-set(LIBEVENT_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent.a)
-set(LIBEVENT_PTHREADS_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent_pthreads.a)
+if(NOT LIBEVENT_ROOT)
+    if(XQC_LINUX_ARCH STREQUAL "aarch64")
+        set(LIBEVENT_ROOT "${XQC_LIBEVENT_ROOT_AARCH64}")
+    else()
+        set(LIBEVENT_ROOT "${XQC_LIBEVENT_ROOT_X86_64}")
+    endif()
+endif()
+message(STATUS "XQUIC libevent root: ${LIBEVENT_ROOT}")
+
+set(LIBEVENT_INCLUDE_DIR "${LIBEVENT_ROOT}/include")
+set(LIBEVENT_LIBRARY "${LIBEVENT_ROOT}/.libs/libevent.a")
+set(LIBEVENT_PTHREADS_LIBRARY
+    "${LIBEVENT_ROOT}/.libs/libevent_pthreads.a")
 
 include_directories(include
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -448,6 +530,16 @@ add_library(
     ${XQC_SOURCE}
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # The export map must be consumed while libxquic.so is linked.  Attaching
+    # it to the static archive has no effect because archive creation does not
+    # run the linker.
+    set_property(TARGET xquic APPEND_STRING PROPERTY LINK_FLAGS
+        " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds")
+    set_property(TARGET xquic APPEND PROPERTY LINK_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds")
+endif()
+
 option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
 if(NETINS_UDP_BUILD_TESTS)
     enable_testing()
@@ -470,6 +562,7 @@ if(NETINS_UDP_BUILD_TESTS)
     )
     target_include_directories(netins_udp_v2_client_unit_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
     )
     target_link_libraries(netins_udp_v2_client_unit_test pthread)
@@ -483,6 +576,7 @@ if(NETINS_UDP_BUILD_TESTS)
     )
     target_include_directories(netins_udp_v2_h3_unit_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
     )
     target_link_libraries(netins_udp_v2_h3_unit_test pthread)
@@ -500,11 +594,21 @@ if(NETINS_UDP_BUILD_TESTS)
     add_test(NAME netins_udp_v2_notifier_unit_test
         COMMAND netins_udp_v2_notifier_unit_test)
 
-    find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_Interpreter_FOUND)
+    find_package(PythonInterp 3 QUIET)
+    if(PYTHONINTERP_FOUND)
         add_test(NAME netins_udp_api_guard
-            COMMAND ${Python3_EXECUTABLE}
+            COMMAND ${PYTHON_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_netins_udp_api.py)
+
+        find_program(NETINS_UDP_READELF_EXECUTABLE readelf)
+        if(NETINS_UDP_READELF_EXECUTABLE
+            AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(NAME netins_udp_abi_symbols
+                COMMAND ${PYTHON_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_netins_udp_api.py
+                    --library $<TARGET_FILE:xquic>
+                    --readelf ${NETINS_UDP_READELF_EXECUTABLE})
+        endif()
     endif()
 
     # Manual real-transport acceptance test. It requires a certificate/key:
@@ -514,6 +618,7 @@ if(NETINS_UDP_BUILD_TESTS)
     )
     target_include_directories(netins_udp_v2_loopback_test PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     target_link_libraries(netins_udp_v2_loopback_test PRIVATE
         xquic-static
@@ -568,7 +673,7 @@ if(PLATFORM MATCHES "mac")
 else()
     target_link_libraries(
         xquic-static
-        "-ldl -Wl,--whole-archive -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds"
+        "-ldl -Wl,--whole-archive"
         ${SSL_LIB_PATH}
         "-Wl,--no-whole-archive"
         -lpthread

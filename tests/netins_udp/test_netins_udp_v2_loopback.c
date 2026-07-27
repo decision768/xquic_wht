@@ -143,10 +143,13 @@ server_request_main(void *argument)
     netins_udp_h3_response_config_init(&response);
     response.status = 204;
     response.content_length = 0;
+    /*
+     * A 204 response finishes on its headers. The public API intentionally
+     * rejects every body-send call for no-body statuses, including a
+     * zero-length FIN.
+     */
     if (netins_udp_h3_request_set_response(context->request, &response)
-            != NETINS_UDP_OK
-        || netins_udp_h3_request_send(context->request, NULL, 0,
-            NETINS_UDP_MSG_FIN) != 0)
+        != NETINS_UDP_OK)
     {
         context->result = -1;
     }

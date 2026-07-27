@@ -67,5 +67,7 @@ typedef struct netins_udp_transport_metrics_s {
 
 int netins_udp_transport_metrics_collect(xqc_engine_t *engine,
     const xqc_cid_t *cid, netins_udp_transport_metrics_t *metrics);
+int netins_udp_transport_payload_metrics_set_enabled(xqc_engine_t *engine,
+    const xqc_cid_t *cid, int enabled);
 
 #endif /* NETINS_UDP_TRANSPORT_METRICS_H */

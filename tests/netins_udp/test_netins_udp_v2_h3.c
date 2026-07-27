@@ -57,10 +57,14 @@ struct netins_udp_server_request_s {
 static struct netins_udp_client_s g_client;
 static struct netins_udp_server_connection_s g_server_connection;
 static netins_udp_v2_transport_h3_config_t g_open_config;
+static netins_udp_v2_transport_h3_response_config_t
+    g_server_response_config;
 static int g_child_count;
 static size_t g_send_chunk;
 static int g_send_would_block;
 static int g_response_content_length_known = 1;
+static int g_transport_raw_error;
+static int g_transport_system_error;
 static pthread_mutex_t g_mock_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_mock_cond = PTHREAD_COND_INITIALIZER;
 static int g_block_recv;
@@ -158,6 +162,8 @@ netins_udp_v2_transport_h3_request_open(
     request->info.request_headers_ready = 1;
     request->info.response_headers_ready = 1;
     request->info.response_status = 200;
+    request->info.stream_error = g_transport_raw_error;
+    request->info.stream_system_error = g_transport_system_error;
     strcpy(request->info.request_authority, "example.test");
     request->info.response_content_length_known =
         g_response_content_length_known;
@@ -344,6 +350,7 @@ netins_udp_v2_transport_server_request_set_response(
         errno = EALREADY;
         return -1;
     }
+    g_server_response_config = *config;
     request->response = *config;
     request->response_configured = 1;
     request->info.response_status = config->status;
@@ -526,6 +533,15 @@ main(void)
     assert(netins_udp_h3_request_config_add_header(&config,
         "x-test", "bad\rvalue") == NETINS_UDP_ERROR);
     assert(errno == EINVAL);
+    assert(netins_udp_h3_request_config_add_header(&config,
+        "x-test", "bad\x01value") == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_h3_request_config_add_header(&config,
+        "connection", "close") == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_h3_request_config_add_header(&config,
+        "te", "gzip") == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
 
     netins_udp_h3_response_config_t response;
     netins_udp_h3_response_config_init(&response);
@@ -540,6 +556,25 @@ main(void)
     assert(errno == ENOTCONN);
 
     connection.connected = 1;
+    strcpy(config.path, "/bad\rpath");
+    assert(netins_udp_h3_request_open(&connection, &config, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    strcpy(config.path, "/bad path");
+    assert(netins_udp_h3_request_open(&connection, &config, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    strcpy(config.path, "/");
+    strcpy(config.authority, "bad host");
+    assert(netins_udp_h3_request_open(&connection, &config, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    config.authority[0] = '\0';
+    strcpy(config.content_type, "text/\x01plain");
+    assert(netins_udp_h3_request_open(&connection, &config, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    strcpy(config.content_type, "application/octet-stream");
     assert(netins_udp_h3_request_open(&connection, NULL, &request)
         == NETINS_UDP_ERROR);
     assert(errno == EINVAL);
@@ -591,6 +626,19 @@ main(void)
 
     netins_udp_h3_request_info_t info =
         NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
+    info.struct_size = sizeof(info) - 1U;
+    assert(netins_udp_h3_request_get_info(request, &info)
+        == NETINS_UDP_ERROR);
+    assert(errno == ENOBUFS);
+    info = (netins_udp_h3_request_info_t)
+        NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
+    info.api_version++;
+    assert(netins_udp_h3_request_get_info(request, &info)
+        == NETINS_UDP_ERROR);
+    assert(errno == EPROTO);
+    info = (netins_udp_h3_request_info_t)
+        NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
+    info.struct_size = sizeof(info) + 64U;
     assert(netins_udp_h3_request_get_info(request, &info)
         == NETINS_UDP_OK);
     assert(info.stream_id == 7);
@@ -603,6 +651,20 @@ main(void)
     assert(strcmp(info.peer_headers[0].name, "x-test") == 0);
     netins_udp_h3_request_close(request);
     assert(g_child_count == 0);
+
+    g_transport_raw_error = 626;
+    g_transport_system_error = ECONNRESET;
+    request = open_request(&connection, "GET", 0);
+    assert(netins_udp_h3_request_get_last_error_code(request)
+        == ECONNRESET);
+    info = (netins_udp_h3_request_info_t)
+        NETINS_UDP_H3_REQUEST_INFO_INITIALIZER;
+    assert(netins_udp_h3_request_get_info(request, &info)
+        == NETINS_UDP_OK);
+    assert(info.last_error_code == ECONNRESET);
+    netins_udp_h3_request_close(request);
+    g_transport_raw_error = 0;
+    g_transport_system_error = 0;
 
     request = open_request(&connection, "GET", 0);
     assert(netins_udp_h3_request_send(request, "x", 1,
@@ -666,6 +728,11 @@ main(void)
     response.status = 201;
     response.content_length = 2;
     strcpy(response.content_type, "text/plain");
+    strcpy(response.content_type, "text/\nplain");
+    assert(netins_udp_h3_request_set_response(request, &response)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    strcpy(response.content_type, "text/plain");
     response.status = 199;
     assert(netins_udp_h3_request_set_response(request, &response)
         == NETINS_UDP_ERROR);
@@ -688,6 +755,26 @@ main(void)
     assert(info.response_content_length == 2);
     assert(info.bytes_sent == 2);
     assert(info.bytes_received == 6);
+    netins_udp_h3_request_close(request);
+    assert(g_child_count == 0);
+
+    g_server_request_available = 1;
+    assert(netins_udp_h3_request_accept(&server_connection, &request)
+        == NETINS_UDP_OK);
+    netins_udp_h3_response_config_init(&response);
+    response.status = 205;
+    response.content_length = NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+    assert(netins_udp_h3_request_set_response(request, &response)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    response.status = 204;
+    response.content_length = 0;
+    assert(netins_udp_h3_request_set_response(request, &response)
+        == NETINS_UDP_OK);
+    assert(g_server_response_config.content_length_unknown == 1);
+    assert(netins_udp_h3_request_send(request, NULL, 0,
+        NETINS_UDP_MSG_FIN) == -1);
+    assert(errno == EOPNOTSUPP);
     netins_udp_h3_request_close(request);
     assert(g_child_count == 0);
 

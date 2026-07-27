@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "netins_udp_v2_internal.h"
 #include "netins_udp_v2_notifier.h"
@@ -150,7 +151,17 @@ netins_udp_v2_h3_header_managed(const char *name)
     return name[0] == ':'
         || strcmp(name, "host") == 0
         || strcmp(name, "content-length") == 0
-        || strcmp(name, "content-type") == 0;
+        || strcmp(name, "content-type") == 0
+        /*
+         * HTTP/3 forbids connection-specific fields.  Reject them at the
+         * public boundary instead of handing a syntactically valid but
+         * protocol-invalid field block to XQUIC.
+         */
+        || strcmp(name, "connection") == 0
+        || strcmp(name, "proxy-connection") == 0
+        || strcmp(name, "keep-alive") == 0
+        || strcmp(name, "transfer-encoding") == 0
+        || strcmp(name, "upgrade") == 0;
 }
 
 static int
@@ -173,6 +184,40 @@ netins_udp_v2_h3_header_valid(const netins_udp_h3_header_t *header)
          *cursor != '\0'; ++cursor)
     {
         if (!netins_udp_v2_h3_header_name_char_valid(*cursor)) {
+            return 0;
+        }
+    }
+    for (const unsigned char *cursor =
+            (const unsigned char *)header->value;
+         *cursor != '\0'; ++cursor)
+    {
+        if ((*cursor < 0x20 && *cursor != '\t') || *cursor == 0x7f) {
+            return 0;
+        }
+    }
+    if (strcmp(header->name, "te") == 0
+        && strcasecmp(header->value, "trailers") != 0)
+    {
+        return 0;
+    }
+    return 1;
+}
+
+static int
+netins_udp_v2_h3_field_value_valid(const char *value, size_t capacity,
+    int allow_horizontal_tab)
+{
+    if (!netins_udp_v2_h3_fixed_string_valid(value, capacity)) {
+        return 0;
+    }
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0'; ++cursor)
+    {
+        if (((allow_horizontal_tab
+                    ? *cursor < 0x20 && *cursor != '\t'
+                    : *cursor <= 0x20))
+            || *cursor == 0x7f)
+        {
             return 0;
         }
     }
@@ -205,6 +250,12 @@ netins_udp_v2_h3_request_config_error(
         || config->method[0] == '\0'
         || config->path[0] != '/'
         || config->content_type[0] == '\0'
+        || !netins_udp_v2_h3_field_value_valid(config->path,
+            sizeof(config->path), 0)
+        || !netins_udp_v2_h3_field_value_valid(config->authority,
+            sizeof(config->authority), 0)
+        || !netins_udp_v2_h3_field_value_valid(config->content_type,
+            sizeof(config->content_type), 1)
         || config->header_count > NETINS_UDP_MAX_H3_HEADERS)
     {
         *message = "H3 request configuration fields are invalid";
@@ -247,9 +298,17 @@ netins_udp_v2_h3_response_config_error(
         return EPROTO;
     }
     if (config->status < 200 || config->status > 599
+        || (config->status == 204
+            && config->content_length != 0
+            && config->content_length
+                != NETINS_UDP_CONTENT_LENGTH_UNKNOWN)
+        || (config->status == 205
+            && config->content_length != 0)
         || !netins_udp_v2_h3_fixed_string_valid(config->content_type,
             sizeof(config->content_type))
         || config->content_type[0] == '\0'
+        || !netins_udp_v2_h3_field_value_valid(config->content_type,
+            sizeof(config->content_type), 1)
         || config->header_count > NETINS_UDP_MAX_H3_HEADERS)
     {
         *message = "H3 response configuration fields are invalid";
@@ -327,8 +386,10 @@ netins_udp_v2_h3_sync_transport_error(
     if (result == 0
         && info.stream_error != 0)
     {
+        int error_code = info.stream_system_error != 0
+            ? info.stream_system_error : EIO;
         pthread_mutex_lock(&request->lock);
-        netins_udp_v2_h3_set_error_locked(request, EIO,
+        netins_udp_v2_h3_set_error_locked(request, error_code,
             "underlying HTTP/3 request failed");
         pthread_mutex_unlock(&request->lock);
     }
@@ -702,6 +763,14 @@ netins_udp_h3_request_set_response(
     transport_config.content_length = config->content_length;
     transport_config.content_length_unknown =
         config->content_length == NETINS_UDP_CONTENT_LENGTH_UNKNOWN;
+    /*
+     * HTTP forbids Content-Length on 204. Keep the convenient public
+     * zero-length configuration, but omit the field on the wire.
+     */
+    if (config->status == 204) {
+        transport_config.content_length = 0;
+        transport_config.content_length_unknown = 1;
+    }
     transport_config.header_count = config->header_count;
     for (uint32_t i = 0; i < config->header_count; ++i) {
         snprintf(transport_config.headers[i].name,
@@ -781,6 +850,18 @@ netins_udp_h3_request_send(netins_udp_h3_request_t *request,
     if (request->server_side && !request->response_set) {
         (void)netins_udp_v2_h3_fail(request, EINVAL,
             "configure the HTTP/3 response before sending its body");
+        pthread_mutex_unlock(&request->send_lock);
+        netins_udp_v2_h3_end_call(request);
+        return -1;
+    }
+    if (request->server_side
+        && (strcmp(request->config.method, "HEAD") == 0
+            || request->response.status == 204
+            || request->response.status == 205
+            || request->response.status == 304))
+    {
+        (void)netins_udp_v2_h3_fail(request, EOPNOTSUPP,
+            "this HTTP response must not contain a message body");
         pthread_mutex_unlock(&request->send_lock);
         netins_udp_v2_h3_end_call(request);
         return -1;
@@ -966,11 +1047,15 @@ netins_udp_h3_request_get_info(netins_udp_h3_request_t *request,
     if (netins_udp_v2_h3_begin_call(request) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
     }
-    if (out->struct_size != sizeof(*out)
-        || out->api_version != NETINS_UDP_API_VERSION)
-    {
+    if (out->api_version != NETINS_UDP_API_VERSION) {
         int result = netins_udp_v2_h3_fail(request, EPROTO,
-            "H3 request info structure version is invalid");
+            "H3 request info API version is invalid");
+        netins_udp_v2_h3_end_call(request);
+        return result;
+    }
+    if ((size_t)out->struct_size < sizeof(*out)) {
+        int result = netins_udp_v2_h3_fail(request, ENOBUFS,
+            "H3 request info output buffer is too small");
         netins_udp_v2_h3_end_call(request);
         return result;
     }
@@ -990,8 +1075,11 @@ netins_udp_h3_request_get_info(netins_udp_h3_request_t *request,
         return result;
     }
     if (transport_info.stream_error != 0) {
+        int error_code = transport_info.stream_system_error != 0
+            ? transport_info.stream_system_error : EIO;
         pthread_mutex_lock(&request->lock);
-        netins_udp_v2_h3_set_error_locked(request, EIO,
+        netins_udp_v2_h3_set_error_locked(request,
+            error_code,
             "underlying HTTP/3 request failed");
         pthread_mutex_unlock(&request->lock);
     }

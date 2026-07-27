@@ -40,6 +40,7 @@ struct netins_udp_observer_s {
     xqc_cid_t cid;
     int bound;
     int registered;
+    int payload_metrics_enabled;
     struct netins_udp_observer_s *registry_next;
 
     netins_udp_snapshot_t snapshot;
@@ -396,7 +397,8 @@ netins_udp_observer_list_connections(uint64_t *connection_ids, size_t capacity,
 
 int
 netins_udp_observer_bind(netins_udp_observer_t *netins, xqc_engine_t *engine,
-    const xqc_cid_t *cid, netins_udp_role_t role)
+    const xqc_cid_t *cid, netins_udp_role_t role,
+    int enable_payload_metrics)
 {
     if (netins == NULL || engine == NULL || cid == NULL
         || (role != NETINS_UDP_ROLE_CLIENT && role != NETINS_UDP_ROLE_SERVER))
@@ -418,25 +420,52 @@ netins_udp_observer_bind(netins_udp_observer_t *netins, xqc_engine_t *engine,
     netins->engine = engine;
     memcpy(&netins->cid, cid, sizeof(netins->cid));
     netins->bound = 1;
+    netins->payload_metrics_enabled = enable_payload_metrics != 0;
     netins->snapshot.info.role = role;
     netins->snapshot.info.connection_state = NETINS_UDP_STATE_CONNECTING;
     netins_udp_observer_set_error_locked(netins, 0, NULL);
     pthread_mutex_unlock(&netins->lock);
 
-    if (netins_udp_observer_refresh(netins) != NETINS_UDP_OK) {
+    if (enable_payload_metrics
+        && netins_udp_transport_payload_metrics_set_enabled(engine, cid, 1)
+            != 0)
+    {
         pthread_mutex_lock(&netins->lock);
         netins->engine = NULL;
         memset(&netins->cid, 0, sizeof(netins->cid));
         netins->bound = 0;
+        netins->payload_metrics_enabled = 0;
+        netins->snapshot.info.connection_state = NETINS_UDP_STATE_NEW;
+        netins_udp_observer_set_error_locked(netins, ENOENT,
+            "XQUIC connection not found while enabling NetIns metrics");
+        pthread_mutex_unlock(&netins->lock);
+        return NETINS_UDP_ERROR;
+    }
+
+    if (netins_udp_observer_refresh(netins) != NETINS_UDP_OK) {
+        if (enable_payload_metrics) {
+            (void)netins_udp_transport_payload_metrics_set_enabled(
+                engine, cid, 0);
+        }
+        pthread_mutex_lock(&netins->lock);
+        netins->engine = NULL;
+        memset(&netins->cid, 0, sizeof(netins->cid));
+        netins->bound = 0;
+        netins->payload_metrics_enabled = 0;
         netins->snapshot.info.connection_state = NETINS_UDP_STATE_NEW;
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_ERROR;
     }
 
     if (netins_udp_observer_register(netins) != NETINS_UDP_OK) {
+        if (enable_payload_metrics) {
+            (void)netins_udp_transport_payload_metrics_set_enabled(
+                engine, cid, 0);
+        }
         pthread_mutex_lock(&netins->lock);
         netins->engine = NULL;
         netins->bound = 0;
+        netins->payload_metrics_enabled = 0;
         netins->snapshot.info.connection_state = NETINS_UDP_STATE_NEW;
         pthread_mutex_unlock(&netins->lock);
         return NETINS_UDP_ERROR;
@@ -787,6 +816,10 @@ netins_udp_observer_mark_closed(netins_udp_observer_t *netins, int conn_error)
     (void)netins_udp_observer_refresh(netins);
 
     pthread_mutex_lock(&netins->lock);
+    xqc_engine_t *metrics_engine = netins->engine;
+    xqc_cid_t metrics_cid;
+    memcpy(&metrics_cid, &netins->cid, sizeof(metrics_cid));
+    int payload_metrics_enabled = netins->payload_metrics_enabled;
     int keep_error = netins->snapshot.info.connection_state
         == NETINS_UDP_STATE_ERROR
         || netins->snapshot.info.conn_error != 0;
@@ -806,10 +839,56 @@ netins_udp_observer_mark_closed(netins_udp_observer_t *netins, int conn_error)
         netins_udp_observer_set_error_locked(netins, 0, NULL);
     }
     netins->bound = 0;
+    netins->payload_metrics_enabled = 0;
     netins->engine = NULL;
     memset(&netins->cid, 0, sizeof(netins->cid));
     pthread_mutex_unlock(&netins->lock);
 
+    if (payload_metrics_enabled) {
+        (void)netins_udp_transport_payload_metrics_set_enabled(
+            metrics_engine, &metrics_cid, 0);
+    }
+    netins_udp_observer_unregister(netins);
+    return NETINS_UDP_OK;
+}
+
+int
+netins_udp_observer_abandon(netins_udp_observer_t *netins, int conn_error)
+{
+    if (netins == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->lock);
+    int keep_error = conn_error != 0
+        || netins->snapshot.info.connection_state == NETINS_UDP_STATE_ERROR
+        || netins->snapshot.info.conn_error != 0;
+    if (conn_error != 0) {
+        netins->snapshot.info.conn_error = conn_error;
+    }
+    netins->snapshot.info.connection_state = keep_error
+        ? NETINS_UDP_STATE_ERROR : NETINS_UDP_STATE_CLOSED;
+    if (keep_error) {
+        int final_error = netins->snapshot.info.conn_error != 0
+            ? netins->snapshot.info.conn_error : conn_error;
+        char message[128];
+        snprintf(message, sizeof(message),
+            "XQUIC owner destroyed before observer detach: %d",
+            final_error);
+        netins_udp_observer_set_error_locked(netins, final_error, message);
+    } else {
+        netins_udp_observer_set_error_locked(netins, 0, NULL);
+    }
+    netins->bound = 0;
+    netins->payload_metrics_enabled = 0;
+    netins->engine = NULL;
+    memset(&netins->cid, 0, sizeof(netins->cid));
+    pthread_mutex_unlock(&netins->lock);
+
+    /*
+     * The engine is no longer alive, so it is intentionally unsafe to clear
+     * the per-connection gate here. Engine destruction reclaimed that field.
+     */
     netins_udp_observer_unregister(netins);
     return NETINS_UDP_OK;
 }

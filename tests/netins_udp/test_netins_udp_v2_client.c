@@ -69,6 +69,16 @@ static int g_close_requested;
 static int g_block_start;
 static int g_start_entered;
 static int g_start_continue;
+static int g_block_get_state;
+static int g_get_state_entered;
+static int g_get_state_continue;
+static int g_pending_resolvers;
+
+int
+netins_udp_v2_transport_has_pending_resolvers(void)
+{
+    return g_pending_resolvers;
+}
 
 int
 netins_udp_v2_transport_client_create(
@@ -152,7 +162,17 @@ int
 netins_udp_v2_transport_client_get_state(
     netins_udp_v2_transport_client_t *client)
 {
-    return client->state;
+    int state = client->state;
+    pthread_mutex_lock(&g_wait_lock);
+    if (g_block_get_state) {
+        g_get_state_entered = 1;
+        pthread_cond_broadcast(&g_wait_cond);
+        while (!g_get_state_continue) {
+            pthread_cond_wait(&g_wait_cond, &g_wait_lock);
+        }
+    }
+    pthread_mutex_unlock(&g_wait_lock);
+    return state;
 }
 
 int
@@ -486,6 +506,10 @@ set_http3_test_options(netins_udp_t *client)
 
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     tls.verify_peer = 0;
+    strcpy(tls.server_name, "bad\rname");
+    assert(netins_udp_set_opt(client, NETINS_UDP_OPT_TLS,
+        &tls, sizeof(tls)) == NETINS_UDP_ERROR);
+    assert(errno == EPROTO);
     strcpy(tls.server_name, "test.example");
     assert(netins_udp_set_opt(client, NETINS_UDP_OPT_TLS,
         &tls, sizeof(tls)) == NETINS_UDP_OK);
@@ -517,6 +541,11 @@ typedef struct accept_thread_result_s {
     int error_code;
 } accept_thread_result_t;
 
+typedef struct state_thread_result_s {
+    netins_udp_t *connection;
+    int state;
+} state_thread_result_t;
+
 static void *
 connect_thread_main(void *argument)
 {
@@ -534,6 +563,15 @@ accept_thread_main(void *argument)
     thread_result->connection = netins_udp_accept(
         thread_result->listener, NULL, NULL);
     thread_result->error_code = errno;
+    return NULL;
+}
+
+static void *
+state_thread_main(void *argument)
+{
+    state_thread_result_t *thread_result = argument;
+    thread_result->state =
+        netins_udp_get_state(thread_result->connection);
     return NULL;
 }
 
@@ -556,6 +594,22 @@ main(void)
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_NEW);
     assert(netins_udp_cleanup() == NETINS_UDP_ERROR);
     assert(errno == EBUSY);
+    assert(netins_udp_get_path_count(client, NULL) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_snapshot(client, NULL) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_info(client, NULL) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_statis(client, NULL) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_path_statis(client, 0, NULL)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_close_reason(client, NULL)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    assert(netins_udp_get_events(client, NULL) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
 
     size_t option_len = 0;
     assert(netins_udp_get_opt(client, NETINS_UDP_OPT_APP_PROTOCOL,
@@ -568,13 +622,28 @@ main(void)
     assert(errno == ENOBUFS);
     assert(option_len == sizeof(int));
 
+    /*
+     * set_opt receives an untyped byte buffer. It must not require natural
+     * alignment, especially on the AArch64 delivery target.
+     */
+    unsigned char unaligned_timeout[sizeof(uint32_t) + 1];
+    uint32_t unaligned_timeout_value = 4321;
+    memcpy(unaligned_timeout + 1, &unaligned_timeout_value,
+        sizeof(unaligned_timeout_value));
+    assert(netins_udp_set_opt(client,
+        NETINS_UDP_OPT_CONNECT_TIMEOUT_MS, unaligned_timeout + 1,
+        sizeof(unaligned_timeout_value)) == NETINS_UDP_OK);
+
     netins_udp_interfaces_t interfaces =
         NETINS_UDP_INTERFACES_INITIALIZER;
     interfaces.interface_count = 2;
     strcpy(interfaces.names[0], "rmnet_data0");
     strcpy(interfaces.names[1], "usb0");
+    unsigned char unaligned_interfaces[
+        sizeof(netins_udp_interfaces_t) + 1];
+    memcpy(unaligned_interfaces + 1, &interfaces, sizeof(interfaces));
     assert(netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
-        &interfaces, sizeof(interfaces)) == NETINS_UDP_OK);
+        unaligned_interfaces + 1, sizeof(interfaces)) == NETINS_UDP_OK);
     set_http3_test_options(client);
 
     uint32_t connect_timeout_ms = 1234;
@@ -653,10 +722,53 @@ main(void)
     assert(netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
         &interfaces, sizeof(interfaces)) == NETINS_UDP_ERROR);
     assert(errno == EBUSY);
+
+    /*
+     * Force get_state() to hold an older CONNECTED transport sample while
+     * shutdown() advances the public handle to CLOSING.  The stale sample
+     * must not reopen the handle.
+     */
+    pthread_mutex_lock(&g_wait_lock);
+    g_block_get_state = 1;
+    g_get_state_entered = 0;
+    g_get_state_continue = 0;
+    pthread_mutex_unlock(&g_wait_lock);
+    state_thread_result_t state_thread_result = {
+        .connection = client,
+        .state = NETINS_UDP_STATE_ERROR,
+    };
+    pthread_t state_thread;
+    assert(pthread_create(&state_thread, NULL, state_thread_main,
+        &state_thread_result) == 0);
+    pthread_mutex_lock(&g_wait_lock);
+    while (!g_get_state_entered) {
+        pthread_cond_wait(&g_wait_cond, &g_wait_lock);
+    }
+    pthread_mutex_unlock(&g_wait_lock);
     assert(netins_udp_shutdown(client, 77) == NETINS_UDP_OK);
+    pthread_mutex_lock(&g_wait_lock);
+    g_get_state_continue = 1;
+    pthread_cond_broadcast(&g_wait_cond);
+    pthread_mutex_unlock(&g_wait_lock);
+    assert(pthread_join(state_thread, NULL) == 0);
+    assert(state_thread_result.state == NETINS_UDP_STATE_CLOSING);
+    pthread_mutex_lock(&g_wait_lock);
+    g_block_get_state = 0;
+    pthread_mutex_unlock(&g_wait_lock);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_CLOSING);
     netins_udp_close_reason_t close_reason =
         NETINS_UDP_CLOSE_REASON_INITIALIZER;
+    assert(netins_udp_get_close_reason(client, &close_reason)
+        == NETINS_UDP_OK);
+    assert(close_reason.source == NETINS_UDP_CLOSE_LOCAL);
+    assert(close_reason.application_error == 77);
+    g_last_client->state = NETINS_UDP_V2_TRANSPORT_ERROR;
+    g_last_client->error_code = ECONNRESET;
+    strcpy(g_last_client->error_message,
+        "transport failed after local shutdown");
+    assert(netins_udp_get_state(client) == NETINS_UDP_STATE_ERROR);
+    close_reason =
+        (netins_udp_close_reason_t)NETINS_UDP_CLOSE_REASON_INITIALIZER;
     assert(netins_udp_get_close_reason(client, &close_reason)
         == NETINS_UDP_OK);
     assert(close_reason.source == NETINS_UDP_CLOSE_LOCAL);
@@ -717,7 +829,33 @@ main(void)
     assert(errno == EINPROGRESS);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_CONNECTING);
     g_last_client->state = NETINS_UDP_V2_TRANSPORT_CONNECTED;
+    assert(netins_udp_get_last_error_code(client) == 0);
     assert(netins_udp_get_state(client) == NETINS_UDP_STATE_CONNECTED);
+    netins_udp_close(client);
+    assert(netins_udp_cleanup() == NETINS_UDP_OK);
+
+    /*
+     * Error queries must synchronize an asynchronous transport failure on
+     * their own; callers are not required to call get_state/get_events first.
+     */
+    assert(netins_udp_init() == NETINS_UDP_OK);
+    client = netins_udp_new(NETINS_UDP_TYPE_QUIC);
+    assert(client != NULL);
+    set_http3_test_options(client);
+    nonblock = 1;
+    assert(netins_udp_set_opt(client, NETINS_UDP_OPT_NONBLOCK,
+        &nonblock, sizeof(nonblock)) == NETINS_UDP_OK);
+    assert(netins_udp_connect(client, "198.51.100.1", 443)
+        == NETINS_UDP_ERROR);
+    assert(errno == EINPROGRESS);
+    g_last_client->state = NETINS_UDP_V2_TRANSPORT_ERROR;
+    g_last_client->error_code = ECONNRESET;
+    strcpy(g_last_client->error_message, "asynchronous reset");
+    assert(netins_udp_get_last_error_code(client) == ECONNRESET);
+    char async_error_message[NETINS_UDP_ERROR_MSG_LEN];
+    assert(netins_udp_get_last_error_msg(client, async_error_message,
+        sizeof(async_error_message)) == NETINS_UDP_OK);
+    assert(strcmp(async_error_message, "asynchronous reset") == 0);
     netins_udp_close(client);
     assert(netins_udp_cleanup() == NETINS_UDP_OK);
 
@@ -794,6 +932,31 @@ main(void)
     netins_udp_close(client);
     assert(netins_udp_cleanup() == NETINS_UDP_OK);
 
+    /*
+     * A setup error can happen before a transport object exists.  The handle
+     * still promises public state/metadata copy-out until close.
+     */
+    assert(netins_udp_init() == NETINS_UDP_OK);
+    client = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
+    assert(client != NULL);
+    set_http3_test_options(client);
+    assert(netins_udp_connect(client, NULL, 443) == NETINS_UDP_ERROR);
+    assert(errno == EINVAL);
+    connection_info = (netins_udp_info_t)NETINS_UDP_INFO_INITIALIZER;
+    assert(netins_udp_get_info(client, &connection_info)
+        == NETINS_UDP_OK);
+    assert(connection_info.connection_id
+        == NETINS_UDP_INVALID_CONNECTION_ID);
+    assert(connection_info.requested_type == NETINS_UDP_TYPE_MPQUIC);
+    assert(connection_info.role == NETINS_UDP_ROLE_CLIENT);
+    assert(connection_info.state == NETINS_UDP_STATE_ERROR);
+    snapshot = (netins_udp_snapshot_t)NETINS_UDP_SNAPSHOT_INITIALIZER;
+    assert(netins_udp_get_snapshot(client, &snapshot) == NETINS_UDP_OK);
+    assert(snapshot.info.state == NETINS_UDP_STATE_ERROR);
+    assert(snapshot.path_count == 0);
+    netins_udp_close(client);
+    assert(netins_udp_cleanup() == NETINS_UDP_OK);
+
     assert(netins_udp_init() == NETINS_UDP_OK);
     client = netins_udp_new(NETINS_UDP_TYPE_QUIC);
     assert(client != NULL);
@@ -814,6 +977,13 @@ main(void)
     assert(netins_udp_cleanup() == NETINS_UDP_ERROR);
     assert(errno == EBUSY);
     netins_udp_v2_child_handle_release();
+    assert(netins_udp_cleanup() == NETINS_UDP_OK);
+
+    assert(netins_udp_init() == NETINS_UDP_OK);
+    g_pending_resolvers = 1;
+    assert(netins_udp_cleanup() == NETINS_UDP_ERROR);
+    assert(errno == EBUSY);
+    g_pending_resolvers = 0;
     assert(netins_udp_cleanup() == NETINS_UDP_OK);
 
     assert(netins_udp_init() == NETINS_UDP_OK);

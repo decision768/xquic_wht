@@ -158,11 +158,6 @@ xqc_mini_cli_h3_conn_create_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, vo
         && xqc_mini_cli_netins_udp_observer_bind(user_conn, cid) != XQC_OK)
     {
         printf("[netins_udp][client] disabled for this connection\n");
-        if (user_conn->ev_netins_udp_observer_refresh != NULL) {
-            event_del(user_conn->ev_netins_udp_observer_refresh);
-            event_free(user_conn->ev_netins_udp_observer_refresh);
-            user_conn->ev_netins_udp_observer_refresh = NULL;
-        }
         netins_udp_observer_close(user_conn->netins_udp_observer);
         user_conn->netins_udp_observer = NULL;
         user_conn->netins_udp_observer_detached = 1;

@@ -332,6 +332,11 @@ struct xqc_connection_s {
     uint64_t                        ack_flag;
     xqc_conn_flag_t                 conn_flag;
     xqc_conn_type_t                 conn_type;
+    /*
+     * Private NetIns accounting gate. Enabled only when a standalone NetIns
+     * API connection publishes de-duplicated per-path STREAM payload stats.
+     */
+    uint8_t                         netins_udp_payload_metrics_enabled;
 
     /* callback function and user_data to application layer */
     xqc_transport_callbacks_t       transport_cbs;

@@ -275,7 +275,9 @@ netins_udp_v2_transport_client_create(
 
     netins_udp_client_t *client = NULL;
     if (netins_udp_client_create(&legacy, &client) != NETINS_UDP_OK) {
-        errno = ENOMEM;
+        if (errno == 0) {
+            errno = EIO;
+        }
         return -1;
     }
     netins_udp_client_set_notify(client, config->notify,
@@ -447,6 +449,12 @@ netins_udp_v2_transport_client_close(
 }
 
 int
+netins_udp_v2_transport_has_pending_resolvers(void)
+{
+    return netins_udp_client_has_pending_resolvers();
+}
+
+int
 netins_udp_v2_transport_h3_request_open(
     netins_udp_v2_transport_client_t *client,
     const netins_udp_v2_transport_h3_config_t *config,
@@ -483,7 +491,9 @@ netins_udp_v2_transport_h3_request_open(
     if (netins_udp_client_h3_request_open(client, &internal,
             out_request) != NETINS_UDP_OK)
     {
-        errno = EIO;
+        if (errno == 0) {
+            errno = EIO;
+        }
         return -1;
     }
     return 0;
@@ -513,7 +523,12 @@ netins_udp_v2_transport_h3_request_send(
     } else if (result == NETINS_UDP_BUFFER_TOO_SMALL) {
         errno = ENOBUFS;
     } else {
-        errno = EIO;
+        netins_udp_client_h3_info_t info;
+        memset(&info, 0, sizeof(info));
+        errno = netins_udp_client_h3_request_get_info(request, &info)
+                == NETINS_UDP_OK
+                && info.stream_system_error != 0
+            ? info.stream_system_error : EIO;
     }
     return -1;
 }
@@ -542,7 +557,12 @@ netins_udp_v2_transport_h3_request_recv(
     } else if (result == NETINS_UDP_BUFFER_TOO_SMALL) {
         errno = ENOBUFS;
     } else {
-        errno = EIO;
+        netins_udp_client_h3_info_t info;
+        memset(&info, 0, sizeof(info));
+        errno = netins_udp_client_h3_request_get_info(request, &info)
+                == NETINS_UDP_OK
+                && info.stream_system_error != 0
+            ? info.stream_system_error : EIO;
     }
     return -1;
 }
@@ -572,6 +592,7 @@ netins_udp_v2_transport_h3_request_get_info(
     out->send_finished = internal.send_finished;
     out->receive_finished = internal.receive_finished;
     out->stream_error = internal.stream_error;
+    out->stream_system_error = internal.stream_system_error;
     out->bytes_accepted = internal.bytes_accepted;
     out->bytes_delivered = internal.bytes_delivered;
     snprintf(out->request_authority, sizeof(out->request_authority),

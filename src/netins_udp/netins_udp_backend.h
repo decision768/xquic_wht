@@ -11,9 +11,9 @@
 /*
  * Shared host adapter used by mini and by standalone NetIns objects.
  *
- * XQUIC engine execution remains owned by the host event loop.  This backend
- * centralizes the lifecycle, path metadata and bounded/fair RX policy so the
- * two hosts do not acquire different externally visible semantics.
+ * XQUIC engine/socket/connection execution remains owned by each host. This
+ * adapter centralizes observer lifecycle calls, path metadata helpers and the
+ * bounded/fair RX policy; it does not replace either host's event loop.
  */
 #define NETINS_UDP_BACKEND_RX_BATCH_CAPACITY 256U
 
@@ -30,7 +30,8 @@ uint32_t netins_udp_backend_rx_packet_limit(
 size_t netins_udp_backend_next_path_start(size_t current, size_t path_capacity);
 
 int netins_udp_backend_connection_bind(netins_udp_observer_t *observer,
-    xqc_engine_t *engine, const xqc_cid_t *cid, netins_udp_role_t role);
+    xqc_engine_t *engine, const xqc_cid_t *cid, netins_udp_role_t role,
+    int enable_payload_metrics);
 int netins_udp_backend_connection_update_cid(netins_udp_observer_t *observer,
     const xqc_cid_t *cid);
 int netins_udp_backend_connection_refresh(netins_udp_observer_t *observer);
@@ -38,6 +39,8 @@ int netins_udp_backend_connection_handshake_finished(
     netins_udp_observer_t *observer);
 int netins_udp_backend_connection_closing(netins_udp_observer_t *observer);
 int netins_udp_backend_connection_closed(netins_udp_observer_t *observer,
+    int conn_error);
+int netins_udp_backend_connection_abandoned(netins_udp_observer_t *observer,
     int conn_error);
 int netins_udp_backend_connection_error(netins_udp_observer_t *observer,
     int error_code, const char *error_message);

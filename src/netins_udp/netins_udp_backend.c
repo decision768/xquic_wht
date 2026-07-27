@@ -41,9 +41,11 @@ netins_udp_backend_next_path_start(size_t current, size_t path_capacity)
 
 int
 netins_udp_backend_connection_bind(netins_udp_observer_t *observer,
-    xqc_engine_t *engine, const xqc_cid_t *cid, netins_udp_role_t role)
+    xqc_engine_t *engine, const xqc_cid_t *cid, netins_udp_role_t role,
+    int enable_payload_metrics)
 {
-    return netins_udp_observer_bind(observer, engine, cid, role);
+    return netins_udp_observer_bind(observer, engine, cid, role,
+        enable_payload_metrics);
 }
 
 int
@@ -77,6 +79,13 @@ netins_udp_backend_connection_closed(netins_udp_observer_t *observer,
     int conn_error)
 {
     return netins_udp_observer_mark_closed(observer, conn_error);
+}
+
+int
+netins_udp_backend_connection_abandoned(netins_udp_observer_t *observer,
+    int conn_error)
+{
+    return netins_udp_observer_abandon(observer, conn_error);
 }
 
 int

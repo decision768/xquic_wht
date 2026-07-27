@@ -16,8 +16,10 @@ src/netins_udp/netins_udp_legacy.h
 ```
 
 该头文件不安装，其符号不进入 `libxquic.so` 的全局导出表，不构成第三方 ABI。
-静态库内保留实现是为了让 mini 和统一 API 共用同一 backend，而不是维护两套
-对外接口。
+静态库内保留实现是为了让 mini 和统一 API 共享 observer 生命周期适配、路径
+元数据和有界/公平 RX 策略，而不是维护两套对外接口。mini 与独立 API backend
+仍分别拥有各自既有的 engine、socket、event loop 和连接/request 生命周期；
+公共 adapter 不接管这些对象，也不会为 mini 增加第二个 UDP 接收者。
 
 ## 2. 分层
 
@@ -59,6 +61,15 @@ NetIns backend adapters
 引用，因此父连接开始关闭后仍可安全查询并 close。父连接 close 会中止并
 detach 子对象，但不会替应用释放子对象地址。
 
+连接级运行时选项使用明确的快照边界：request 在 open/accept 时复制
+`NONBLOCK` 和 send/recv/close timeout，后续父对象修改不追溯到既有 request；
+accepted connection 在 accept 时继承 listener 选项，此后与 listener 独立。
+这样避免并发中的半次调用改变阻塞策略，也不要求父对象反向持有公开子句柄。
+
+端点建立可能在底层 transport 分配前失败。此时公共对象仍保留 ERROR 状态和
+配置元数据，info/snapshot 返回空 transport 统计，保证调用方始终能够完成
+“查询失败原因—记录状态—close”的生命周期。
+
 listener close：
 
 - 停止接收新连接；
@@ -76,9 +87,13 @@ listener close：
 
 - client request：headers、请求 body、响应 body；
 - server request：请求 accept、请求 body、response headers、响应 body；
+- 公共 POST 不继承 mini 的 `x-stream-*` 私有头；空 authority 按 HTTPS
+  authority 规则补全主机、IPv6 方括号和非默认端口；
 - send/recv 支持部分完成、超时和非阻塞；
 - 服务端公开关闭 request 后，未读大 POST 进入丢弃式 drain；
-- 每连接及全 server 有发送/接收总预算，防止并发 request 无界占用内存。
+- client 以每 request 预留量和每连接发送/接收总预算共同限制并发队列；
+- server 以每 request、每 accepted connection 和全 server 三级发送/接收
+  总预算限制并发队列，防止无界占用内存。
 
 ## 5. 通知
 
@@ -103,6 +118,10 @@ notifier 使用 eventfd/pipe，仅作为 readiness 唤醒，不承载网络数�
   proxy、inflight 和区间速率；
 - path statistics 描述稳定 path index、地址、接口、RTT、CWND 和逐路径流量；
 - request info 单独统计 HTTP body 字节。
+
+逐路径唯一发送字节归属于首次发送路径，逐路径唯一接收字节归属于提供新消费
+stream offset 的保留副本所在路径。关闭原因采用首次终止原因冻结语义，后续
+只能补充尚未记录的原始 transport error，不能改写已经公开的来源。
 
 path index 在连接生命周期内只分配、不复用，避免路径关闭和重建后第三方把同一
 数组位置误认为另一条路径。超过公开上限时通过 `path_table_truncated` 报告。

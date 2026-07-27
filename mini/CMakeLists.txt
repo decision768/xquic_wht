@@ -1,6 +1,31 @@
 ### hq mini client/server ###
-    set(ZLOG_INCLUDE_DIR "/home/admin123/zlog-1.2.18/src")
-    set(ZLOG_STATIC_LIB  "/home/admin123/zlog-1.2.18/build_aarch64/lib/libzlog.a")
+    set(XQC_ZLOG_ROOT_X86_64
+        "/data/quic/zlog-1.2.18"
+        CACHE PATH "zlog root for native Linux x86_64 mini builds")
+    set(XQC_ZLOG_ROOT_AARCH64
+        "/home/admin123/zlog-1.2.18"
+        CACHE PATH "zlog root for Linux AArch64 mini builds")
+
+    if(NOT ZLOG_INCLUDE_DIR OR NOT ZLOG_STATIC_LIB)
+        if(XQC_LINUX_ARCH STREQUAL "aarch64")
+            set(_xqc_zlog_root "${XQC_ZLOG_ROOT_AARCH64}")
+            set(_xqc_zlog_build_dir "build_aarch64")
+        else()
+            set(_xqc_zlog_root "${XQC_ZLOG_ROOT_X86_64}")
+            set(_xqc_zlog_build_dir "build_x86_64")
+        endif()
+        if(NOT ZLOG_INCLUDE_DIR)
+            set(ZLOG_INCLUDE_DIR "${_xqc_zlog_root}/src")
+        endif()
+        if(NOT ZLOG_STATIC_LIB)
+            set(ZLOG_STATIC_LIB
+                "${_xqc_zlog_root}/${_xqc_zlog_build_dir}/lib/libzlog.a")
+        endif()
+        unset(_xqc_zlog_root)
+        unset(_xqc_zlog_build_dir)
+    endif()
+    message(STATUS "XQUIC mini zlog include: ${ZLOG_INCLUDE_DIR}")
+    message(STATUS "XQUIC mini zlog library: ${ZLOG_STATIC_LIB}")
     set(
         HQ_SOURCES
         "../demo/xqc_hq_ctx.c"

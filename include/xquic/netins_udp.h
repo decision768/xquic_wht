@@ -299,6 +299,12 @@ typedef struct netins_udp_path_statis_s {
     char interface_name[NETINS_UDP_INTERFACE_NAME_LEN];
     char local_address[NETINS_UDP_ADDRESS_LEN];
     char peer_address[NETINS_UDP_ADDRESS_LEN];
+    /*
+     * Unique STREAM payload attribution: sent bytes belong to the path of the
+     * original transmission; received bytes belong to the retained copy that
+     * supplies the newly consumed stream offsets. Retransmission/reinjection
+     * duplicates are not added again.
+     */
     uint64_t bytes_sent;
     uint64_t bytes_received;
     uint64_t bytes_acked;
@@ -361,6 +367,10 @@ typedef struct netins_udp_h3_request_config_s {
     uint32_t api_version;
     char method[NETINS_UDP_METHOD_LEN];
     char path[NETINS_UDP_REQUEST_PATH_LEN];
+    /*
+     * HTTP :authority. When empty, the client uses its TLS server name (or
+     * connect host) and includes a non-default HTTPS port automatically.
+     */
     char authority[NETINS_UDP_SERVER_NAME_LEN];
     char content_type[NETINS_UDP_CONTENT_TYPE_LEN];
     uint64_t content_length;
@@ -422,7 +432,8 @@ typedef struct netins_udp_h3_request_info_s {
 NETINS_UDP_PUBLIC int netins_udp_init(void);
 /*
  * Releases one initialization reference. The final cleanup fails with EBUSY
- * while public handles still exist.
+ * while public handles or asynchronous DNS resolver tasks still exist. Close
+ * all handles and retry cleanup after the resolver completes.
  */
 NETINS_UDP_PUBLIC int netins_udp_cleanup(void);
 /* Returns the ABI version implemented by the linked NetIns UDP library. */
@@ -451,6 +462,10 @@ NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *netins);
  * Options may be set in NEW state. Runtime options are limited to NONBLOCK,
  * send/receive/close timeouts, plus ACCEPT_TIMEOUT_MS on a listener.
  * Immutable options fail with EBUSY after connect/listen begins.
+ * Runtime values are captured when a child HTTP/3 request is opened/accepted;
+ * changing its parent later affects subsequent child handles only. Accepted
+ * connections likewise inherit listener runtime values at accept time and are
+ * independently configurable afterward.
  *
  * get_opt uses value_len as an in/out byte count. value may be NULL to query
  * the required size. A short buffer fails with ENOBUFS after storing the
@@ -465,9 +480,13 @@ NETINS_UDP_PUBLIC void netins_udp_tls_config_init(
     netins_udp_tls_config_t *config);
 
 /*
- * Blocking connect returns after the QUIC handshake and application protocol
- * setup complete. Nonblocking connect returns -1/EINPROGRESS and completion is
- * reported through state/events.
+ * Blocking connect returns after DNS, the QUIC handshake and application
+ * protocol setup complete. Nonblocking connect performs DNS and transport
+ * startup asynchronously, returns -1/EINPROGRESS, and reports completion
+ * through state/events. CONNECT_TIMEOUT_MS covers the complete establishment
+ * sequence in both modes. If setup fails before a transport object exists,
+ * the handle remains valid for state/info/snapshot/error queries and close;
+ * transport counters and paths are reported as zero/empty.
  */
 NETINS_UDP_PUBLIC int netins_udp_connect(netins_udp_t *netins,
     const char *host, int port);
@@ -503,14 +522,22 @@ NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *netins,
  * with its headers. For a non-empty body, FIN is valid only on the call that
  * accepts the final declared content-length bytes. If content_length is
  * NETINS_UDP_CONTENT_LENGTH_UNKNOWN, Content-Length is omitted and FIN defines
- * the body end. Custom header names must be lowercase, must not start with ':',
+ * the body end. The API never injects legacy x-stream-* fields; applications
+ * that need them must add them explicitly. Custom header names must be
+ * lowercase, must not start with ':',
  * and cannot replace headers managed by the library (content-length,
- * content-type, host or pseudo-headers). A finite blocking timeout expires
- * with ETIMEDOUT; nonblocking lack of progress returns EAGAIN. Server request
- * accept uses the accepted connection's NONBLOCK and RECV_TIMEOUT_MS options.
+ * content-type, host or pseudo-headers). HTTP/3 connection-specific fields are
+ * rejected; TE is accepted only with the value "trailers". A finite blocking
+ * timeout expires with ETIMEDOUT; nonblocking lack of progress returns EAGAIN.
+ * Server request accept uses the accepted connection's NONBLOCK and
+ * RECV_TIMEOUT_MS options.
  * set_response is single-shot, accepts one final status from 200 through 599,
- * and must succeed before a server response body is sent. Applications own
- * every accepted request handle independently and must close it even after
+ * and must succeed before a server response body is sent. Responses to HEAD,
+ * 204, 205 or 304 have no body: 204 omits Content-Length, 205
+ * requires Content-Length 0, and 304 may advertise a representation length
+ * but still forbids DATA. Sending body bytes for these cases fails with
+ * EOPNOTSUPP. Applications own every accepted request handle independently
+ * and must close it even after
  * its parent connection has closed. Closing a server request flushes a
  * response whose complete body and FIN have already been accepted by send;
  * an incomplete response is canceled.

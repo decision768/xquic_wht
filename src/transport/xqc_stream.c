@@ -1374,7 +1374,9 @@ static void
 xqc_stream_record_unique_payload_recv(xqc_stream_t *stream,
     const xqc_stream_frame_t *stream_frame, size_t bytes)
 {
-    if (bytes == 0) {
+    if (bytes == 0
+        || !stream->stream_conn->netins_udp_payload_metrics_enabled)
+    {
         return;
     }
 

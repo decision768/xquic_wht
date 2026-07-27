@@ -114,9 +114,12 @@ netins_udp_v2_set_close_reason_locked(netins_udp_t *netins, int source,
     int system_error, uint64_t transport_error,
     uint64_t application_error, const char *message)
 {
-    if (netins->close_reason.source != NETINS_UDP_CLOSE_NONE
-        && source != NETINS_UDP_CLOSE_LOCAL)
-    {
+    /*
+     * The first terminal cause is the stable public close reason.  A later
+     * transport snapshot may add the raw QUIC error, but must not replace a
+     * local shutdown, timeout, peer close, or earlier network error.
+     */
+    if (netins->close_reason.source != NETINS_UDP_CLOSE_NONE) {
         if (transport_error != 0
             && netins->close_reason.transport_error == 0)
         {
@@ -206,16 +209,41 @@ netins_udp_v2_end_call(netins_udp_t *netins)
 }
 
 static int
-netins_udp_v2_scalar_valid(const void *value, size_t value_len,
-    size_t expected)
+netins_udp_v2_scalar_copy(const void *value, size_t value_len,
+    void *out, size_t expected)
 {
-    return value != NULL && value_len == expected;
+    if (value == NULL || out == NULL || value_len != expected) {
+        return 0;
+    }
+    /*
+     * The public option argument is a void pointer and therefore does not
+     * promise natural alignment. Copy before interpreting it so packed
+     * protocol adapters remain valid on strict-alignment targets.
+     */
+    memcpy(out, value, expected);
+    return 1;
 }
 
 static int
 netins_udp_v2_fixed_string_valid(const char *value, size_t capacity)
 {
     return value != NULL && memchr(value, '\0', capacity) != NULL;
+}
+
+static int
+netins_udp_v2_host_text_valid(const char *value, size_t capacity)
+{
+    if (!netins_udp_v2_fixed_string_valid(value, capacity)) {
+        return 0;
+    }
+    for (const unsigned char *cursor = (const unsigned char *)value;
+         *cursor != '\0'; ++cursor)
+    {
+        if (*cursor <= 0x20 || *cursor == 0x7f) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int
@@ -364,7 +392,8 @@ netins_udp_cleanup(void)
         return NETINS_UDP_ERROR;
     }
     if (g_netins_udp_v2_init_refs == 1
-        && g_netins_udp_v2_handle_count != 0)
+        && (g_netins_udp_v2_handle_count != 0
+            || netins_udp_v2_transport_has_pending_resolvers()))
     {
         pthread_mutex_unlock(&g_netins_udp_v2_lock);
         errno = EBUSY;
@@ -476,12 +505,14 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
 
     switch (option) {
     case NETINS_UDP_OPT_NONBLOCK: {
-        if (!netins_udp_v2_scalar_valid(value, value_len, sizeof(int))) {
+        int enabled = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &enabled,
+                sizeof(enabled)))
+        {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "NONBLOCK requires an int");
             break;
         }
-        int enabled = *(const int *)value;
         if (enabled != 0 && enabled != 1) {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "NONBLOCK must be 0 or 1");
@@ -496,14 +527,14 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
     case NETINS_UDP_OPT_RECV_TIMEOUT_MS:
     case NETINS_UDP_OPT_CLOSE_TIMEOUT_MS:
     case NETINS_UDP_OPT_IDLE_TIMEOUT_MS: {
-        if (!netins_udp_v2_scalar_valid(value, value_len,
-                sizeof(uint32_t)))
+        uint32_t timeout = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &timeout,
+                sizeof(timeout)))
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "timeout option requires uint32_t");
             break;
         }
-        uint32_t timeout = *(const uint32_t *)value;
         if ((option == NETINS_UDP_OPT_CONNECT_TIMEOUT_MS
                 || option == NETINS_UDP_OPT_CLOSE_TIMEOUT_MS)
             && timeout == 0)
@@ -531,41 +562,43 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
     }
     case NETINS_UDP_OPT_KERNEL_SNDBUF:
     case NETINS_UDP_OPT_KERNEL_RCVBUF: {
-        if (!netins_udp_v2_scalar_valid(value, value_len, sizeof(int))
-            || *(const int *)value <= 0)
+        int socket_buffer = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &socket_buffer,
+                sizeof(socket_buffer))
+            || socket_buffer <= 0)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "kernel socket buffer requires a positive int");
             break;
         }
         if (option == NETINS_UDP_OPT_KERNEL_SNDBUF) {
-            netins->kernel_sndbuf = *(const int *)value;
+            netins->kernel_sndbuf = socket_buffer;
         } else {
-            netins->kernel_rcvbuf = *(const int *)value;
+            netins->kernel_rcvbuf = socket_buffer;
         }
         break;
     }
     case NETINS_UDP_OPT_INTERFACES: {
-        if (!netins_udp_v2_scalar_valid(value, value_len,
-                sizeof(netins_udp_interfaces_t)))
+        netins_udp_interfaces_t interfaces;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &interfaces,
+                sizeof(interfaces)))
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "INTERFACES requires netins_udp_interfaces_t");
             break;
         }
-        const netins_udp_interfaces_t *interfaces = value;
-        if (interfaces->struct_size != sizeof(*interfaces)
-            || interfaces->api_version != NETINS_UDP_API_VERSION
-            || interfaces->interface_count > NETINS_UDP_MAX_PATHS)
+        if (interfaces.struct_size != sizeof(interfaces)
+            || interfaces.api_version != NETINS_UDP_API_VERSION
+            || interfaces.interface_count > NETINS_UDP_MAX_PATHS)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EPROTO,
                 "INTERFACES structure version or count is invalid");
             break;
         }
-        for (uint32_t i = 0; i < interfaces->interface_count; ++i) {
-            if (!netins_udp_v2_fixed_string_valid(interfaces->names[i],
-                    sizeof(interfaces->names[i]))
-                || interfaces->names[i][0] == '\0')
+        for (uint32_t i = 0; i < interfaces.interface_count; ++i) {
+            if (!netins_udp_v2_fixed_string_valid(interfaces.names[i],
+                    sizeof(interfaces.names[i]))
+                || interfaces.names[i][0] == '\0')
             {
                 result = netins_udp_v2_set_option_error_locked(netins,
                     EINVAL, "interface names must be nonempty strings");
@@ -573,17 +606,19 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
             }
         }
         if (result == NETINS_UDP_OK) {
-            netins->interfaces = *interfaces;
+            netins->interfaces = interfaces;
         }
         break;
     }
     case NETINS_UDP_OPT_APP_PROTOCOL: {
-        if (!netins_udp_v2_scalar_valid(value, value_len, sizeof(int))) {
+        int protocol = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &protocol,
+                sizeof(protocol)))
+        {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "APP_PROTOCOL requires an int");
             break;
         }
-        int protocol = *(const int *)value;
         if (protocol != NETINS_UDP_APP_HTTP3)
         {
             result = netins_udp_v2_set_option_error_locked(netins,
@@ -595,69 +630,76 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
         break;
     }
     case NETINS_UDP_OPT_TLS: {
-        if (!netins_udp_v2_scalar_valid(value, value_len,
-                sizeof(netins_udp_tls_config_t)))
+        netins_udp_tls_config_t tls;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &tls,
+                sizeof(tls)))
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "TLS requires netins_udp_tls_config_t");
             break;
         }
-        const netins_udp_tls_config_t *tls = value;
-        if (tls->struct_size != sizeof(*tls)
-            || tls->api_version != NETINS_UDP_API_VERSION
-            || (tls->verify_peer != 0 && tls->verify_peer != 1)
-            || (tls->require_client_certificate != 0
-                && tls->require_client_certificate != 1)
-            || !netins_udp_v2_fixed_string_valid(tls->server_name,
-                sizeof(tls->server_name))
-            || !netins_udp_v2_fixed_string_valid(tls->certificate_file,
-                sizeof(tls->certificate_file))
-            || !netins_udp_v2_fixed_string_valid(tls->private_key_file,
-                sizeof(tls->private_key_file))
-            || !netins_udp_v2_fixed_string_valid(tls->ca_file,
-                sizeof(tls->ca_file)))
+        if (tls.struct_size != sizeof(tls)
+            || tls.api_version != NETINS_UDP_API_VERSION
+            || (tls.verify_peer != 0 && tls.verify_peer != 1)
+            || (tls.require_client_certificate != 0
+                && tls.require_client_certificate != 1)
+            || !netins_udp_v2_fixed_string_valid(tls.server_name,
+                sizeof(tls.server_name))
+            || !netins_udp_v2_host_text_valid(tls.server_name,
+                sizeof(tls.server_name))
+            || !netins_udp_v2_fixed_string_valid(tls.certificate_file,
+                sizeof(tls.certificate_file))
+            || !netins_udp_v2_fixed_string_valid(tls.private_key_file,
+                sizeof(tls.private_key_file))
+            || !netins_udp_v2_fixed_string_valid(tls.ca_file,
+                sizeof(tls.ca_file)))
         {
             result = netins_udp_v2_set_option_error_locked(netins, EPROTO,
                 "TLS structure is invalid");
             break;
         }
-        netins->tls = *tls;
+        netins->tls = tls;
         break;
     }
     case NETINS_UDP_OPT_INITIAL_CWND_PACKETS: {
-        if (!netins_udp_v2_scalar_valid(value, value_len,
-                sizeof(uint32_t))
-            || *(const uint32_t *)value == 0)
+        uint32_t initial_cwnd = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &initial_cwnd,
+                sizeof(initial_cwnd))
+            || initial_cwnd == 0)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "INITIAL_CWND_PACKETS requires a nonzero uint32_t");
             break;
         }
-        netins->initial_cwnd_packets = *(const uint32_t *)value;
+        netins->initial_cwnd_packets = initial_cwnd;
         break;
     }
     case NETINS_UDP_OPT_SCHEDULER: {
-        if (!netins_udp_v2_scalar_valid(value, value_len, sizeof(int))
-            || *(const int *)value < NETINS_UDP_SCHEDULER_DEFAULT
-            || *(const int *)value > NETINS_UDP_SCHEDULER_ADAPTIVE)
+        int scheduler = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len, &scheduler,
+                sizeof(scheduler))
+            || scheduler < NETINS_UDP_SCHEDULER_DEFAULT
+            || scheduler > NETINS_UDP_SCHEDULER_ADAPTIVE)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "unknown scheduler");
             break;
         }
-        netins->scheduler = *(const int *)value;
+        netins->scheduler = scheduler;
         break;
     }
     case NETINS_UDP_OPT_CONGESTION_CONTROL: {
-        if (!netins_udp_v2_scalar_valid(value, value_len, sizeof(int))
-            || *(const int *)value < NETINS_UDP_CC_DEFAULT
-            || *(const int *)value > NETINS_UDP_CC_RENO)
+        int congestion_control = 0;
+        if (!netins_udp_v2_scalar_copy(value, value_len,
+                &congestion_control, sizeof(congestion_control))
+            || congestion_control < NETINS_UDP_CC_DEFAULT
+            || congestion_control > NETINS_UDP_CC_RENO)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "unknown congestion controller");
             break;
         }
-        netins->congestion_control = *(const int *)value;
+        netins->congestion_control = congestion_control;
         break;
     }
     default:
@@ -829,6 +871,10 @@ netins_udp_v2_prepare_transport_config(netins_udp_t *netins,
         return netins_udp_v2_fail(netins, ENAMETOOLONG,
             "host is too long for the current transport backend");
     }
+    if (!netins_udp_v2_host_text_valid(host, host_len + 1)) {
+        return netins_udp_v2_fail(netins, EINVAL,
+            "host contains whitespace or control characters");
+    }
 
     pthread_mutex_lock(&netins->lock);
     if (netins->app_protocol != NETINS_UDP_APP_HTTP3) {
@@ -959,6 +1005,36 @@ netins_udp_connect(netins_udp_t *netins, const char *host, int port)
     }
 
     if (nonblock) {
+        int transport_state =
+            netins_udp_v2_transport_client_get_state(transport);
+        if (transport_state == NETINS_UDP_V2_TRANSPORT_CONNECTED) {
+            pthread_mutex_lock(&netins->lock);
+            if (!netins->closing) {
+                netins->state = NETINS_UDP_STATE_CONNECTED;
+                netins_udp_v2_set_error_locked(netins, 0, NULL);
+            }
+            pthread_mutex_unlock(&netins->lock);
+            netins_udp_v2_end_call(netins);
+            return NETINS_UDP_OK;
+        }
+        if (transport_state == NETINS_UDP_V2_TRANSPORT_ERROR
+            || transport_state == NETINS_UDP_V2_TRANSPORT_CLOSED)
+        {
+            netins_udp_v2_sync_transport_error(netins, transport);
+            int error_code = netins_udp_v2_transport_client_get_last_error_code(
+                transport);
+            if (error_code == 0) {
+                error_code = ECONNABORTED;
+            }
+            pthread_mutex_lock(&netins->lock);
+            if (!netins->closing) {
+                netins->state = NETINS_UDP_STATE_ERROR;
+            }
+            pthread_mutex_unlock(&netins->lock);
+            errno = error_code;
+            netins_udp_v2_end_call(netins);
+            return NETINS_UDP_ERROR;
+        }
         pthread_mutex_lock(&netins->lock);
         netins_udp_v2_set_error_locked(netins, EINPROGRESS,
             "connection establishment is in progress");
@@ -1015,6 +1091,10 @@ netins_udp_v2_prepare_server_config(netins_udp_t *netins,
     if (host_len >= NETINS_UDP_V2_TRANSPORT_HOST_LEN) {
         return netins_udp_v2_fail(netins, ENAMETOOLONG,
             "listen host is too long for the server backend");
+    }
+    if (!netins_udp_v2_host_text_valid(bind_host, host_len + 1)) {
+        return netins_udp_v2_fail(netins, EINVAL,
+            "listen host contains whitespace or control characters");
     }
 
     pthread_mutex_lock(&netins->lock);
@@ -1341,13 +1421,15 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
     return NETINS_UDP_OK;
 }
 
-int
-netins_udp_get_state(netins_udp_t *netins)
+/*
+ * Refreshes state for a caller that already owns an active-call reference.
+ * Calling the public get_state() from another public API would repeat the
+ * closing check: close could start between those checks and incorrectly turn
+ * an otherwise valid in-flight snapshot into NETINS_UDP_STATE_ERROR.
+ */
+static int
+netins_udp_v2_refresh_state(netins_udp_t *netins)
 {
-    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
-        return NETINS_UDP_STATE_ERROR;
-    }
-
     pthread_mutex_lock(&netins->lock);
     int state = netins->state;
     int role = netins->role;
@@ -1412,6 +1494,19 @@ netins_udp_get_state(netins_udp_t *netins)
         }
         pthread_mutex_lock(&netins->lock);
         if (!netins->closing && netins->state != NETINS_UDP_STATE_ERROR) {
+            /*
+             * shutdown() may have moved the public handle to CLOSING while
+             * the transport state query above was in progress.  Re-check the
+             * live public state before committing the sampled transport
+             * value; an older CONNECTED sample must never reopen a closing
+             * handle.
+             */
+            if (netins->state == NETINS_UDP_STATE_CLOSING
+                && (next_state == NETINS_UDP_STATE_CONNECTING
+                    || next_state == NETINS_UDP_STATE_CONNECTED))
+            {
+                next_state = NETINS_UDP_STATE_CLOSING;
+            }
             if (next_state == NETINS_UDP_STATE_CLOSED
                 && netins->close_reason.source == NETINS_UDP_CLOSE_NONE)
             {
@@ -1422,6 +1517,16 @@ netins_udp_get_state(netins_udp_t *netins)
             if (netins->state != next_state) {
                 if (next_state == NETINS_UDP_STATE_CONNECTED) {
                     notify_events |= NETINS_UDP_EVENT_CONNECTED;
+                    /*
+                     * A nonblocking connect reports EINPROGRESS while the
+                     * transport is being established.  Completing that
+                     * asynchronous operation successfully must clear the
+                     * provisional error; otherwise a direct error query
+                     * after CONNECTED would still report EINPROGRESS.
+                     */
+                    if (netins->state == NETINS_UDP_STATE_CONNECTING) {
+                        netins_udp_v2_set_error_locked(netins, 0, NULL);
+                    }
                 } else if (next_state == NETINS_UDP_STATE_CLOSED) {
                     notify_events |= NETINS_UDP_EVENT_CLOSED;
                 } else if (next_state == NETINS_UDP_STATE_ERROR) {
@@ -1437,6 +1542,17 @@ netins_udp_get_state(netins_udp_t *netins)
     if (notify_events != 0) {
         netins_udp_v2_notifier_signal(&netins->notifier, notify_events);
     }
+    return state;
+}
+
+int
+netins_udp_get_state(netins_udp_t *netins)
+{
+    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
+        return NETINS_UDP_STATE_ERROR;
+    }
+
+    int state = netins_udp_v2_refresh_state(netins);
     netins_udp_v2_end_call(netins);
     return state;
 }
@@ -1487,7 +1603,7 @@ static int
 netins_udp_v2_build_snapshot(netins_udp_t *netins,
     netins_udp_snapshot_t *out)
 {
-    int state = netins_udp_get_state(netins);
+    int state = netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     int requested_type = netins->requested_type;
     int role = netins->role;
@@ -1514,10 +1630,11 @@ netins_udp_v2_build_snapshot(netins_udp_t *netins,
             netins_udp_v2_transport_server_connection_get_snapshot(
                 accepted_transport, &transport) == 0;
     }
-    if ((role == NETINS_UDP_ROLE_CLIENT
-            || role == NETINS_UDP_ROLE_ACCEPTED)
-        && !have_transport_snapshot
-        && state != NETINS_UDP_STATE_NEW)
+    int transport_present =
+        (role == NETINS_UDP_ROLE_CLIENT && client_transport != NULL)
+        || (role == NETINS_UDP_ROLE_ACCEPTED
+            && accepted_transport != NULL);
+    if (transport_present && !have_transport_snapshot)
     {
         return netins_udp_v2_fail(netins,
             errno != 0 ? errno : EIO,
@@ -1639,16 +1756,14 @@ netins_udp_is_multipath(netins_udp_t *netins)
 int
 netins_udp_get_path_count(netins_udp_t *netins, uint32_t *out_count)
 {
-    if (out_count == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "path count output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out_count == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "path count output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     netins_udp_snapshot_t snapshot;
     int result = netins_udp_v2_build_snapshot(netins, &snapshot);
@@ -1662,16 +1777,14 @@ netins_udp_get_path_count(netins_udp_t *netins, uint32_t *out_count)
 int
 netins_udp_get_snapshot(netins_udp_t *netins, netins_udp_snapshot_t *out)
 {
-    if (out == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "snapshot output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "snapshot output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     if (netins_udp_v2_validate_output(netins, out->struct_size,
             out->api_version, sizeof(*out), "snapshot") != NETINS_UDP_OK)
@@ -1691,16 +1804,14 @@ netins_udp_get_snapshot(netins_udp_t *netins, netins_udp_snapshot_t *out)
 int
 netins_udp_get_info(netins_udp_t *netins, netins_udp_info_t *out)
 {
-    if (out == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "info output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "info output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     if (netins_udp_v2_validate_output(netins, out->struct_size,
             out->api_version, sizeof(*out), "info") != NETINS_UDP_OK)
@@ -1720,16 +1831,14 @@ netins_udp_get_info(netins_udp_t *netins, netins_udp_info_t *out)
 int
 netins_udp_get_statis(netins_udp_t *netins, netins_udp_statis_t *out)
 {
-    if (out == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "statistics output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "statistics output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     if (netins_udp_v2_validate_output(netins, out->struct_size,
             out->api_version, sizeof(*out), "statistics")
@@ -1751,16 +1860,14 @@ int
 netins_udp_get_path_statis(netins_udp_t *netins, size_t path_index,
     netins_udp_path_statis_t *out)
 {
-    if (out == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "path statistics output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "path statistics output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     if (netins_udp_v2_validate_output(netins, out->struct_size,
             out->api_version, sizeof(*out), "path statistics")
@@ -1786,16 +1893,14 @@ int
 netins_udp_get_close_reason(netins_udp_t *netins,
     netins_udp_close_reason_t *out)
 {
-    if (out == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "close reason output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
+    }
+    if (out == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "close reason output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
     }
     if (netins_udp_v2_validate_output(netins, out->struct_size,
             out->api_version, sizeof(*out), "close reason")
@@ -1804,7 +1909,7 @@ netins_udp_get_close_reason(netins_udp_t *netins,
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
-    (void)netins_udp_get_state(netins);
+    (void)netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     *out = netins->close_reason;
     pthread_mutex_unlock(&netins->lock);
@@ -1830,18 +1935,16 @@ netins_udp_get_fd(netins_udp_t *netins)
 int
 netins_udp_get_events(netins_udp_t *netins, uint32_t *out_events)
 {
-    if (out_events == NULL) {
-        if (netins != NULL) {
-            return netins_udp_v2_fail(netins, EINVAL,
-                "event output must not be NULL");
-        }
-        errno = EINVAL;
-        return NETINS_UDP_ERROR;
-    }
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
     }
-    (void)netins_udp_get_state(netins);
+    if (out_events == NULL) {
+        int result = netins_udp_v2_fail(netins, EINVAL,
+            "event output must not be NULL");
+        netins_udp_v2_end_call(netins);
+        return result;
+    }
+    (void)netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     int role = netins->role;
     netins_udp_v2_transport_client_t *client_transport =
@@ -1896,6 +1999,12 @@ netins_udp_get_last_error_code(netins_udp_t *netins)
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return EBADF;
     }
+    /*
+     * Asynchronous transport failures may be the reason the caller is asking
+     * for the error in the first place. Synchronize them here instead of
+     * requiring a preceding get_state()/get_events() call.
+     */
+    (void)netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     int error_code = netins->last_error_code;
     pthread_mutex_unlock(&netins->lock);
@@ -1914,6 +2023,7 @@ netins_udp_get_last_error_msg(netins_udp_t *netins,
     if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
         return NETINS_UDP_ERROR;
     }
+    (void)netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     snprintf(buffer, buffer_len, "%s", netins->last_error_msg);
     pthread_mutex_unlock(&netins->lock);

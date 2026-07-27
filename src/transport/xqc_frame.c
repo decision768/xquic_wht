@@ -458,9 +458,11 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
         xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_parse_stream_frame error|ret:%d|stream_id:%ui|", ret, stream_id);
         goto error;
     }
-    stream_frame->recv_path_id = packet_in->pi_path_id;
-    stream_frame->recv_reinjected =
-        (packet_in->pi_flag & XQC_PIF_REINJECTED_REPLICA) != 0;
+    if (conn->netins_udp_payload_metrics_enabled) {
+        stream_frame->recv_path_id = packet_in->pi_path_id;
+        stream_frame->recv_reinjected =
+            (packet_in->pi_flag & XQC_PIF_REINJECTED_REPLICA) != 0;
+    }
 
     stream_type = xqc_get_stream_type(stream_id);
 
@@ -622,6 +624,18 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
     else if (stream->stream_data_in.next_read_offset < stream->stream_data_in.merged_offset_end) {
         xqc_log(conn->log, XQC_LOG_DEBUG, "|xqc_stream_ready_to_read part recvd|");
         xqc_stream_ready_to_read(stream);
+    }
+
+    /*
+     * Preserve the public xqc_h3_request_get_stats() accounting contract.
+     * NetIns keeps its deduplicated application-payload counters separately;
+     * those private counters must not replace this legacy per-path field.
+     */
+    if (!(packet_in->pi_flag & XQC_PIF_FEC_RECOVERED)
+        && packet_in->pi_path_id < XQC_MAX_PATHS_COUNT)
+    {
+        stream->paths_info[packet_in->pi_path_id]
+            .path_recv_effective_bytes += stream_frame->data_length;
     }
 
     xqc_log(conn->log, XQC_LOG_DEBUG, "|stream_length:%ui|merged_offset_end:%ui|stream_id:%ui|",

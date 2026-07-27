@@ -30,13 +30,33 @@ Documentation:
 Typical build:
 
 ```sh
-cmake -S . -B build \
-  -DSSL_TYPE=openssl \
-  -DSSL_PATH=/path/to/openssl \
+cmake -S . -B build-linux-x86_64 \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/linux-x86_64.cmake \
   -DNETINS_UDP_BUILD_TESTS=ON
-cmake --build build -j
-cmake --install build --prefix /opt/netins-udp
+cmake --build build-linux-x86_64 -j
+cmake --install build-linux-x86_64 --prefix /opt/netins-udp
 ```
+
+The root build supports both native Linux x86_64 and the SIM8810 AArch64
+cross toolchain. It auto-enables the historical SIM8810 toolchain only when
+its configured SDK and compiler paths exist. A different SIM8810 installation
+can be selected without editing CMake:
+
+```sh
+cmake -S . -B build-aarch64 \
+  -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/sim8810-aarch64.cmake \
+  -DXQC_SIM8810_SDK_ROOT=/path/to/SIM8810_SDK \
+  -DXQC_SIM8810_TOOLCHAIN_DIR=/path/to/aarch64-oe-linux/compiler-directory \
+  -DSSL_PATH=/path/to/aarch64/Tongsuo \
+  -DLIBEVENT_ROOT=/path/to/aarch64/libevent
+cmake --build build-aarch64 -j
+```
+
+The two toolchain files provide an explicit one-file-to-one-architecture
+mapping. The existing `XQC_USE_SIM8810_TOOLCHAIN` switch remains available for
+backward-compatible builds that do not pass `CMAKE_TOOLCHAIN_FILE`. When mini
+programs are enabled, `ZLOG_INCLUDE_DIR` and `ZLOG_STATIC_LIB` can be supplied
+to override the architecture-specific defaults.
 
 A consumer links `libxquic` plus the platform libraries required by the XQUIC
 build:

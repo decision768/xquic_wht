@@ -15,7 +15,6 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define XQC_MINI_NETINS_UDP_REFRESH_US 500000
 #define CLIENT_PATH_FAILOVER_PTO        2
 
 struct xqc_mini_cli_rx_batch_s {
@@ -83,39 +82,6 @@ xqc_mini_cli_netins_udp_observer_update_metadata(xqc_mini_cli_user_conn_t *user_
     }
 }
 
-static void
-xqc_mini_cli_netins_udp_observer_refresh_cb(evutil_socket_t fd, short what, void *arg)
-{
-    (void)fd;
-    (void)what;
-    xqc_mini_cli_user_conn_t *user_conn = arg;
-    if (user_conn == NULL || user_conn->netins_udp_observer == NULL
-        || user_conn->h3_conn == NULL)
-    {
-        return;
-    }
-
-    xqc_mini_cli_netins_udp_observer_update_metadata(user_conn);
-    if (netins_udp_backend_connection_refresh(
-            user_conn->netins_udp_observer) != NETINS_UDP_OK
-        || user_conn->netins_udp_observer_reported_multipath)
-    {
-        return;
-    }
-
-    netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
-    if (netins_udp_observer_get_snapshot(user_conn->netins_udp_observer, &snapshot)
-        == NETINS_UDP_OK && snapshot.path_count > 1)
-    {
-        user_conn->netins_udp_observer_reported_multipath = 1;
-        printf("[netins_udp][client] multipath connection_id=%" PRIu64
-               " paths=%u active=%u available=%u\n",
-            snapshot.info.connection_id, snapshot.path_count,
-            snapshot.info.active_path_count,
-            snapshot.info.available_path_count);
-    }
-}
-
 int
 xqc_mini_cli_netins_udp_observer_bind(xqc_mini_cli_user_conn_t *user_conn,
     const xqc_cid_t *cid)
@@ -128,7 +94,7 @@ xqc_mini_cli_netins_udp_observer_bind(xqc_mini_cli_user_conn_t *user_conn,
 
     if (netins_udp_backend_connection_bind(user_conn->netins_udp_observer,
         user_conn->ctx->engine, cid,
-        NETINS_UDP_ROLE_CLIENT) != NETINS_UDP_OK)
+        NETINS_UDP_ROLE_CLIENT, 0) != NETINS_UDP_OK)
     {
         char error_message[NETINS_UDP_ERROR_MSG_LEN];
         (void)netins_udp_observer_get_last_error_msg(user_conn->netins_udp_observer,
@@ -138,17 +104,6 @@ xqc_mini_cli_netins_udp_observer_bind(xqc_mini_cli_user_conn_t *user_conn,
     }
 
     xqc_mini_cli_netins_udp_observer_update_metadata(user_conn);
-    if (user_conn->ev_netins_udp_observer_refresh != NULL) {
-        struct timeval interval = {0, XQC_MINI_NETINS_UDP_REFRESH_US};
-        if (event_add(user_conn->ev_netins_udp_observer_refresh, &interval) != 0) {
-            (void)netins_udp_backend_connection_error(
-                user_conn->netins_udp_observer, EIO,
-                "failed to start client netins UDP refresh timer");
-            (void)netins_udp_backend_connection_closed(
-                user_conn->netins_udp_observer, EIO);
-            return XQC_ERROR;
-        }
-    }
 
     netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
     if (netins_udp_observer_get_info(user_conn->netins_udp_observer, &info) == NETINS_UDP_OK) {
@@ -192,9 +147,6 @@ xqc_mini_cli_netins_udp_observer_connection_closed(
         || user_conn->netins_udp_observer_detached)
     {
         return;
-    }
-    if (user_conn->ev_netins_udp_observer_refresh != NULL) {
-        event_del(user_conn->ev_netins_udp_observer_refresh);
     }
     xqc_mini_cli_netins_udp_observer_update_metadata(user_conn);
     (void)netins_udp_backend_connection_closed(
@@ -3131,14 +3083,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->netins_udp_observer = netins_udp_observer_new();
     if (user_conn->netins_udp_observer == NULL) {
         printf("[netins_udp][client] disabled: observer allocation failed\n");
-    } else {
-        user_conn->ev_netins_udp_observer_refresh = event_new(ctx->eb, -1,
-            EV_PERSIST, xqc_mini_cli_netins_udp_observer_refresh_cb, user_conn);
-        if (user_conn->ev_netins_udp_observer_refresh == NULL) {
-            printf("[netins_udp][client] disabled: refresh timer allocation failed\n");
-            netins_udp_observer_close(user_conn->netins_udp_observer);
-            user_conn->netins_udp_observer = NULL;
-        }
     }
     user_conn->rx_next_path_index = 0;
     user_conn->rx_arbiter_running = 0;
@@ -3403,11 +3347,6 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         event_del(user_conn->ev_path_retry);
         event_free(user_conn->ev_path_retry);
         user_conn->ev_path_retry = NULL;
-    }
-    if (user_conn->ev_netins_udp_observer_refresh != NULL) {
-        event_del(user_conn->ev_netins_udp_observer_refresh);
-        event_free(user_conn->ev_netins_udp_observer_refresh);
-        user_conn->ev_netins_udp_observer_refresh = NULL;
     }
     if (user_conn->netins_udp_observer != NULL) {
         if (!user_conn->netins_udp_observer_detached && user_conn->h3_conn != NULL

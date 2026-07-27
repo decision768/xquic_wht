@@ -14,6 +14,19 @@
 #include "netins_udp_transport_metrics.h"
 
 static netins_udp_transport_metrics_t g_mock_metrics;
+static int g_payload_metrics_enabled;
+static unsigned g_payload_metrics_set_calls;
+
+int
+netins_udp_transport_payload_metrics_set_enabled(xqc_engine_t *engine,
+    const xqc_cid_t *cid, int enabled)
+{
+    (void)engine;
+    (void)cid;
+    g_payload_metrics_enabled = enabled != 0;
+    g_payload_metrics_set_calls++;
+    return 0;
+}
 
 int
 netins_udp_transport_metrics_collect(xqc_engine_t *engine,
@@ -132,7 +145,9 @@ main(void)
     xqc_cid_t cid;
     memset(&cid, 0, sizeof(cid));
     assert(netins_udp_observer_bind(host, (xqc_engine_t *)(uintptr_t)1, &cid,
-        NETINS_UDP_ROLE_CLIENT) == NETINS_UDP_OK);
+        NETINS_UDP_ROLE_CLIENT, 1) == NETINS_UDP_OK);
+    assert(g_payload_metrics_enabled == 1);
+    assert(g_payload_metrics_set_calls == 1);
     xqc_cid_t updated_cid;
     memset(&updated_cid, 0, sizeof(updated_cid));
     assert(netins_udp_observer_update_cid(host, &updated_cid) == NETINS_UDP_OK);
@@ -228,6 +243,8 @@ main(void)
     assert(reader.failed == 0);
 
     assert(netins_udp_observer_mark_closed(host, 0) == NETINS_UDP_OK);
+    assert(g_payload_metrics_enabled == 0);
+    assert(g_payload_metrics_set_calls == 2);
     assert(netins_udp_observer_list_connections(NULL, 0, &connection_count)
         == NETINS_UDP_OK);
     assert(connection_count == 0);

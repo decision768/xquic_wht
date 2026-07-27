@@ -357,7 +357,6 @@ typedef struct xqc_mini_cli_user_conn_s {
 
     struct event            *ev_timeout;
     struct event            *ev_path_retry;
-    struct event            *ev_netins_udp_observer_refresh;
     netins_udp_observer_t   *netins_udp_observer;
     int                     netins_udp_observer_detached;
     int                     netins_udp_observer_reported_multipath;

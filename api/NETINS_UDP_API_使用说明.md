@@ -70,7 +70,9 @@ int netins_udp_cleanup(void);
 
 `netins_udp_init()` 是线程安全、引用计数的。每次成功初始化都应有一次
 `netins_udp_cleanup()`。最后一次 cleanup 时仍有连接、listener、accepted
-connection 或 request 对象，会返回 -1 并置 `errno=EBUSY`。
+connection、request 对象，或已经与对象脱离但尚未退出的异步 DNS 解析线程，
+会返回 -1 并置 `errno=EBUSY`。关闭所有对象后若仍返回 `EBUSY`，应等待解析
+结束并重试 cleanup，不能在此之前卸载动态库。
 
 推荐顺序：
 
@@ -123,7 +125,7 @@ int netins_udp_get_opt(netins_udp_t *obj, int option,
 | 选项 | 值类型 | 默认值 | 说明 |
 |---|---:|---:|---|
 | `NETINS_UDP_OPT_NONBLOCK` | `int` | 0 | 0 阻塞，1 非阻塞 |
-| `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | 20000 | 阻塞连接超时，不得为 0 |
+| `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | 20000 | 完整连接建立超时（含 DNS、socket/engine 初始化和握手），不得为 0 |
 | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` | `uint32_t` | 0 | accept 超时，0 表示无限等待 |
 | `NETINS_UDP_OPT_SEND_TIMEOUT_MS` | `uint32_t` | 0 | request send 超时，0 表示无限等待 |
 | `NETINS_UDP_OPT_RECV_TIMEOUT_MS` | `uint32_t` | 0 | request recv/accept 超时，0 表示无限等待 |
@@ -148,6 +150,22 @@ int netins_udp_get_opt(netins_udp_t *obj, int option,
 
 连接开始后修改其他选项返回 `EBUSY`。`get_opt()` 中的 `value_len` 是输入/输出
 参数；`value=NULL` 可先查询所需长度，缓冲区过小返回 `ENOBUFS` 并写回长度。
+
+运行时选项采用“创建时快照”语义：已创建或已 accept 的 HTTP/3 request 保留其
+创建时的 `NONBLOCK`、发送/接收/关闭超时；父连接上的后续修改只作用于之后创建
+的 request。accepted connection 在 accept 时继承 listener 的运行时选项，此后
+可独立修改；listener 的修改不追溯到已经返回给应用的 accepted connection。
+
+非阻塞 `connect()` 不在调用线程执行 DNS、socket 绑定、XQUIC engine 初始化或
+握手；这些工作由内部 worker 完成。成功立即完成时可直接返回 0，否则返回
+`-1/EINPROGRESS`，最终结果通过状态与通知获取。异步状态进入 `CONNECTED`
+时，建立阶段的临时 `EINPROGRESS` 会被清除；进入 `ERROR` 时，错误查询接口会
+直接同步底层失败原因，无需先调用状态接口。
+
+如果参数检查或底层创建在 transport 对象生成前失败，连接句柄仍可用于
+`get_state()`、`get_info()`、`get_snapshot()`、错误查询和 `close()`；此时连接
+ID 为无效值，路径和 transport 计数为空，不会因为缺少底层对象而让状态快照
+再次失败。
 
 接口名使用 Linux `SO_BINDTODEVICE` 时可能需要网络管理能力。listener 不接受
 `INTERFACES` 选项，因为 listener 只拥有一套共享 UDP 接收路径。
@@ -240,6 +258,11 @@ netins_udp_close(listener);
 
 ## 8. HTTP/3 请求和数据收发
 
+`authority` 为空时，客户端自动使用 TLS `server_name`（未设置则使用 connect
+host）生成 HTTP/3 `:authority`；HTTPS 非默认端口会自动追加，IPv6 字面量会
+使用方括号。API 不会自动加入 mini 传输协议的 `x-stream-*` 头；确有兼容需求时
+由调用方通过 `netins_udp_h3_request_config_add_header()` 显式添加。
+
 ### 8.1 客户端 GET
 
 ```c
@@ -325,6 +348,11 @@ if (netins_udp_h3_request_accept(connection, &request)
 应用提前响应或公开 close request 时，未读请求体由后端丢弃式 drain，不会让
 大 POST 因应用不再读取而永久卡住。
 
+HEAD 请求以及 204、205、304 响应没有响应 body。204 不在报文中发送
+`Content-Length`；205 必须将 `content_length` 设为 0；304 可以声明资源的
+表示长度，但仍不能发送 DATA。对这些响应调用 body send 会返回
+`EOPNOTSUPP`。
+
 ### 8.4 收发共同语义
 
 - send 允许部分成功，返回正数时必须继续发送余下数据。
@@ -334,12 +362,20 @@ if (netins_udp_h3_request_accept(connection, &request)
 - `NETINS_UDP_MSG_FIN` 仅用于 send。
 - 有限超时到期返回 `ETIMEDOUT`。
 - body 队列有界，应用线程不直接进入 XQUIC engine。
+- client 每个 request 默认预留 4 MiB 发送队列和 16 MiB 接收队列，每连接
+  总预算分别为 64 MiB 和 256 MiB；超过预算时新建 request 返回
+  `ENOBUFS`。
+- server 每个 request 的发送/接收预留各为 4 MiB；每 accepted connection
+  的发送/接收总预算各为 64 MiB，全 server 的发送/接收总预算各为
+  256 MiB。预算是并发 request 的最坏情况预留上限，不是立即实际分配量。
 - `bytes_sent/bytes_received` 在 request info 中只统计 HTTP body，不含 H3
   headers、QPACK 和 framing。
 - 每个 request 都必须独立 close，即使父连接已经关闭。
 
 自定义 header 名必须是小写、不能以 `:` 开头，也不能覆盖库管理的
-pseudo-header、`content-length`、`content-type` 或 `host`。
+pseudo-header、`content-length`、`content-type` 或 `host`。HTTP/3 禁止的
+`connection`、`proxy-connection`、`keep-alive`、`transfer-encoding` 和
+`upgrade` 会被拒绝；`te` 只允许值 `trailers`。
 
 ## 9. 状态、多路径和统计
 
@@ -370,6 +406,9 @@ netins_udp_get_snapshot(connection, &snapshot);
 
 - `bytes_sent/bytes_received`：去重后的 QUIC STREAM payload；不含 QUIC
   packet/frame 开销、重传和 reinjection 重复字节；
+- 逐路径 `bytes_sent` 归属于首次发送该唯一 payload 的路径；逐路径
+  `bytes_received` 归属于最终提供新消费 stream offset 的那份接收数据所在
+  路径。因此它们用于唯一应用数据归因，不等于逐路径线速流量；
 - 连接级 stream payload 在 HTTP/3 模式下包含 H3/QPACK/control stream；
 - `bytes_wire_sent/bytes_wire_received`：UDP 线速字节；
 - `bytes_lost`：编码后的重传字节代理值，不是精确丢失字节；
@@ -378,6 +417,11 @@ netins_udp_get_snapshot(connection, &snapshot);
 
 这些接口复用 NetIns 私有 observer，不修改 `xqc_conn_get_stats()` 的公共
 结构和原有语义。
+
+`close_reason` 采用“首次终止原因冻结”语义：本地 shutdown、超时、对端关闭
+或网络错误一旦成为关闭原因，后续 transport 状态不会改写其 source 和
+application error；后续观察到的原始 QUIC transport error 只会补充到尚为空
+的 `transport_error` 字段。
 
 ## 10. poll/epoll 通知
 
@@ -455,8 +499,8 @@ getter 将结果复制到调用方提供的结构体。通知 fd 和所有对象
 
 ```sh
 cmake -S . -B build \
-  -DSSL_TYPE=openssl \
-  -DSSL_PATH=/path/to/openssl \
+  -DSSL_TYPE=babassl \
+  -DSSL_PATH=/path/to/Tongsuo-or-BabaSSL \
   -DNETINS_UDP_BUILD_TESTS=ON \
   -DNETINS_UDP_BUILD_CONNECT_EXAMPLE=ON
 cmake --build build -j

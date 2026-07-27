@@ -974,7 +974,8 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_
     if (packet_out->po_frame_types & (XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_DATAGRAM)) {
         send_ctl->ctl_app_bytes_send += packet_out->po_enc_size;
     }
-    if (packet_out->po_origin == NULL
+    if (send_ctl->ctl_conn->netins_udp_payload_metrics_enabled
+        && packet_out->po_origin == NULL
         && !(packet_out->po_flag & XQC_POF_APP_PAYLOAD_COUNTED))
     {
         for (unsigned int i = 0; i < packet_out->po_stream_frames_idx; ++i) {

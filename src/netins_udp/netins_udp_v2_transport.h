@@ -183,7 +183,10 @@ typedef struct netins_udp_v2_transport_h3_info_s {
     int response_headers_ready;
     int send_finished;
     int receive_finished;
+    /* Raw XQUIC/H3 error retained for private diagnostics. */
     int stream_error;
+    /* Stable errno-style value exposed by the public wrapper. */
+    int stream_system_error;
     uint64_t bytes_accepted;
     uint64_t bytes_delivered;
     char request_method[NETINS_UDP_V2_TRANSPORT_METHOD_LEN];
@@ -233,6 +236,7 @@ void netins_udp_v2_transport_client_request_shutdown(
     netins_udp_v2_transport_client_t *client, uint64_t application_error);
 void netins_udp_v2_transport_client_close(
     netins_udp_v2_transport_client_t *client);
+int netins_udp_v2_transport_has_pending_resolvers(void);
 
 int netins_udp_v2_transport_server_create(
     const netins_udp_v2_transport_server_config_t *config,

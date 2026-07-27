@@ -55,6 +55,21 @@ netins_udp_transport_app_path_status(xqc_app_path_status_t status)
 }
 
 int
+netins_udp_transport_payload_metrics_set_enabled(xqc_engine_t *engine,
+    const xqc_cid_t *cid, int enabled)
+{
+    if (engine == NULL || cid == NULL) {
+        return -1;
+    }
+    xqc_connection_t *conn = xqc_engine_conns_hash_find(engine, cid, 's');
+    if (conn == NULL) {
+        return -1;
+    }
+    conn->netins_udp_payload_metrics_enabled = enabled != 0;
+    return 0;
+}
+
+int
 netins_udp_transport_metrics_collect(xqc_engine_t *engine,
     const xqc_cid_t *cid, netins_udp_transport_metrics_t *metrics)
 {
