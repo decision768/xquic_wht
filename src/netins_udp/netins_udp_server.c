@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -40,6 +41,7 @@
 #define NETINS_UDP_SERVER_RECV_BUDGET (256U * 1024U * 1024U)
 #define NETINS_UDP_SERVER_REFRESH_US       500000ULL
 #define NETINS_UDP_SERVER_POLL_MAX_MS      500
+#define NETINS_UDP_SERVER_PATH_FAILOVER_PTO 2U
 
 typedef struct netins_udp_server_buffer_s {
     struct netins_udp_server_buffer_s *next;
@@ -47,6 +49,16 @@ typedef struct netins_udp_server_buffer_s {
     size_t offset;
     unsigned char data[];
 } netins_udp_server_buffer_t;
+
+typedef struct netins_udp_server_rx_batch_s {
+    size_t slot_capacity;
+    unsigned char *storage;
+#if defined(__linux__)
+    struct mmsghdr messages[NETINS_UDP_SERVER_RX_BATCH_PACKETS];
+    struct iovec iovecs[NETINS_UDP_SERVER_RX_BATCH_PACKETS];
+    struct sockaddr_storage peers[NETINS_UDP_SERVER_RX_BATCH_PACKETS];
+#endif
+} netins_udp_server_rx_batch_t;
 
 struct netins_udp_server_request_s {
     pthread_mutex_t lock;
@@ -162,6 +174,7 @@ struct netins_udp_server_s {
     xqc_engine_t *engine;
     struct sockaddr_storage local_address;
     socklen_t local_address_len;
+    netins_udp_server_rx_batch_t *rx_batch;
     uint64_t next_wake_us;
     uint64_t last_refresh_us;
 
@@ -577,6 +590,7 @@ netins_udp_server_scheduler(int scheduler)
 {
     switch (scheduler) {
     case 0:
+        return &xqc_adaptive_scheduler_cb;
     case 1:
         return &xqc_minrtt_scheduler_cb;
     case 2:
@@ -593,6 +607,14 @@ netins_udp_server_scheduler(int scheduler)
         return &xqc_fastprobe_scheduler_cb;
     case 8:
         return &xqc_adaptive_scheduler_cb;
+    case 9:
+        return &xqc_fastprobe5_scheduler_cb;
+    case 10:
+        return &xqc_fastprobe10_scheduler_cb;
+    case 11:
+        return &xqc_fastprobe20_scheduler_cb;
+    case 12:
+        return &xqc_fastonly_scheduler_cb;
     default:
         return NULL;
     }
@@ -2276,13 +2298,22 @@ netins_udp_server_create_engine(netins_udp_v2_transport_server_t *server)
     settings.cong_ctrl_callback = *congestion_control;
     settings.cc_params.customize_on = 1;
     settings.cc_params.init_cwnd = server->config.initial_cwnd_packets;
+    settings.cc_params.bbr_enable_lt_bw = 1;
     settings.proto_version = XQC_VERSION_V1;
     settings.idle_time_out = server->config.idle_timeout_ms;
+    settings.init_idle_time_out = 60000;
     settings.spurious_loss_detect_on = 1;
     settings.scheduler_callback = *scheduler;
+    settings.scheduler_params.pto_cnt_thr =
+        NETINS_UDP_SERVER_PATH_FAILOVER_PTO;
     settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
+    settings.standby_path_probe_timeout = 1000;
     settings.adaptive_ack_frequency = 1;
+    settings.anti_amplification_limit = 4;
+    settings.recv_rate_bytes_per_sec = 0;
     settings.mp_ack_on_any_path = 0;
+    settings.mp_enable_reinjection = 1;
+    settings.mp_ping_on = 1;
     settings.enable_multipath = server->config.enable_multipath;
     settings.multipath_version = XQC_MULTIPATH_10;
     settings.init_recv_window = 64 * 1024 * 1024;
@@ -2371,17 +2402,87 @@ netins_udp_server_fail_runtime(netins_udp_v2_transport_server_t *server,
 }
 
 static int
+netins_udp_server_alloc_rx_batch(
+    netins_udp_v2_transport_server_t *server)
+{
+    netins_udp_server_rx_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        errno = ENOMEM;
+        return -1;
+    }
+    batch->slot_capacity = 65536U;
+    batch->storage = malloc(batch->slot_capacity
+        * NETINS_UDP_SERVER_RX_BATCH_PACKETS);
+    if (batch->storage == NULL) {
+        free(batch);
+        errno = ENOMEM;
+        return -1;
+    }
+#if defined(__linux__)
+    for (size_t i = 0; i < NETINS_UDP_SERVER_RX_BATCH_PACKETS; ++i) {
+        batch->iovecs[i].iov_base = batch->storage
+            + i * batch->slot_capacity;
+        batch->iovecs[i].iov_len = batch->slot_capacity;
+    }
+#endif
+    server->rx_batch = batch;
+    return 0;
+}
+
+static int
 netins_udp_server_receive_packets(
     netins_udp_v2_transport_server_t *server)
 {
-    unsigned char packet[65536];
+    if (server == NULL || server->rx_batch == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    netins_udp_server_rx_batch_t *batch = server->rx_batch;
     int processed = 0;
+
+#if defined(__linux__)
+    for (size_t i = 0; i < NETINS_UDP_SERVER_RX_BATCH_PACKETS; ++i) {
+        memset(&batch->messages[i].msg_hdr, 0,
+            sizeof(batch->messages[i].msg_hdr));
+        batch->messages[i].msg_hdr.msg_name = &batch->peers[i];
+        batch->messages[i].msg_hdr.msg_namelen =
+            sizeof(batch->peers[i]);
+        batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
+        batch->messages[i].msg_hdr.msg_iovlen = 1;
+        batch->messages[i].msg_len = 0;
+    }
+    int received;
+    do {
+        received = recvmmsg(server->socket_fd, batch->messages,
+            NETINS_UDP_SERVER_RX_BATCH_PACKETS, MSG_DONTWAIT, NULL);
+    } while (received < 0 && errno == EINTR);
+    if (received < 0) {
+        return errno == EAGAIN || errno == EWOULDBLOCK ? 0 : -1;
+    }
+    uint64_t receive_time_us = netins_udp_server_packet_time_us();
+    for (int i = 0; i < received; ++i) {
+        if (batch->messages[i].msg_len == 0) {
+            continue;
+        }
+        (void)xqc_engine_packet_process(server->engine,
+            batch->storage + (size_t)i * batch->slot_capacity,
+            batch->messages[i].msg_len,
+            (const struct sockaddr *)&server->local_address,
+            server->local_address_len,
+            (const struct sockaddr *)&batch->peers[i],
+            batch->messages[i].msg_hdr.msg_namelen,
+            receive_time_us, server);
+        processed++;
+    }
+#else
     while ((uint32_t)processed < NETINS_UDP_SERVER_RX_BATCH_PACKETS) {
         struct sockaddr_storage peer_address;
         socklen_t peer_address_len = sizeof(peer_address);
+        unsigned char *packet = batch->storage
+            + (size_t)processed * batch->slot_capacity;
         ssize_t received = recvfrom(server->socket_fd, packet,
-            sizeof(packet), 0, (struct sockaddr *)&peer_address,
-            &peer_address_len);
+            batch->slot_capacity, 0,
+            (struct sockaddr *)&peer_address, &peer_address_len);
         if (received < 0) {
             if (errno == EINTR) {
                 continue;
@@ -2402,7 +2503,31 @@ netins_udp_server_receive_packets(
             netins_udp_server_packet_time_us(), server);
         processed++;
     }
+#endif
     return processed;
+}
+
+static int
+netins_udp_server_connection_send_drained_locked(
+    netins_udp_v2_transport_server_connection_t *connection)
+{
+    for (netins_udp_v2_transport_server_request_t *request =
+             connection->requests;
+         request != NULL; request = request->all_next)
+    {
+        pthread_mutex_lock(&request->lock);
+        int terminal = request->stream_error != 0
+            || request->close_notified;
+        int request_drained = terminal
+            || (request->send_queue_bytes == 0
+                && (!request->send_fin_requested
+                    || request->send_finished));
+        pthread_mutex_unlock(&request->lock);
+        if (!request_drained) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void
@@ -2421,7 +2546,11 @@ netins_udp_server_drive_connection_closes(
              connection != NULL; connection = connection->all_next)
         {
             pthread_mutex_lock(&connection->lock);
-            if (connection->close_requested && !connection->close_sent) {
+            int send_drained =
+                netins_udp_server_connection_send_drained_locked(connection);
+            if (connection->close_requested && !connection->close_sent
+                && (connection->application_error != 0 || send_drained))
+            {
                 connection->close_sent = 1;
                 if (connection->state != NETINS_UDP_V2_TRANSPORT_ERROR
                     && connection->state != NETINS_UDP_V2_TRANSPORT_CLOSED)
@@ -2560,8 +2689,11 @@ netins_udp_server_poll_timeout_ms(
          connection != NULL; connection = connection->all_next)
     {
         pthread_mutex_lock(&connection->lock);
-        int close_pending =
-            connection->close_requested && !connection->close_sent;
+        int send_drained =
+            netins_udp_server_connection_send_drained_locked(connection);
+        int close_pending = connection->close_requested
+            && !connection->close_sent
+            && (connection->application_error != 0 || send_drained);
         pthread_mutex_unlock(&connection->lock);
         if (close_pending) {
             timeout_ms = 0;
@@ -2596,8 +2728,8 @@ netins_udp_server_thread_main(void *argument)
             break;
         }
 
-        netins_udp_server_drive_connection_closes(server);
         netins_udp_server_process_requests(server);
+        netins_udp_server_drive_connection_closes(server);
         uint64_t now_us = netins_udp_server_monotonic_us();
         int timeout_ms = netins_udp_server_poll_timeout_ms(server, now_us);
         struct pollfd descriptors[2] = {
@@ -2793,6 +2925,11 @@ netins_udp_server_destroy(netins_udp_v2_transport_server_t *server)
     if (server->wake_pipe[1] >= 0) {
         close(server->wake_pipe[1]);
     }
+    if (server->rx_batch != NULL) {
+        free(server->rx_batch->storage);
+        free(server->rx_batch);
+        server->rx_batch = NULL;
+    }
     pthread_cond_destroy(&server->accept_cond);
     pthread_mutex_destroy(&server->lock);
     free(server);
@@ -2854,7 +2991,8 @@ netins_udp_v2_transport_server_create(
         errno = init_error;
         return -1;
     }
-    if (pipe(server->wake_pipe) != 0
+    if (netins_udp_server_alloc_rx_batch(server) != 0
+        || pipe(server->wake_pipe) != 0
         || netins_udp_server_make_nonblocking(server->wake_pipe[0]) != 0
         || netins_udp_server_make_nonblocking(server->wake_pipe[1]) != 0
         || netins_udp_server_create_socket(server) != 0
@@ -3219,14 +3357,16 @@ netins_udp_v2_transport_server_connection_request_shutdown(
         }
         connection->close_requested = 1;
     }
-    for (netins_udp_v2_transport_server_request_t *request =
-             connection->requests;
-         request != NULL; request = request->all_next)
-    {
-        pthread_mutex_lock(&request->lock);
-        request->close_requested = 1;
-        pthread_cond_broadcast(&request->cond);
-        pthread_mutex_unlock(&request->lock);
+    if (application_error != 0) {
+        for (netins_udp_v2_transport_server_request_t *request =
+                 connection->requests;
+             request != NULL; request = request->all_next)
+        {
+            pthread_mutex_lock(&request->lock);
+            request->close_requested = 1;
+            pthread_cond_broadcast(&request->cond);
+            pthread_mutex_unlock(&request->lock);
+        }
     }
     pthread_cond_broadcast(&connection->state_cond);
     pthread_mutex_unlock(&connection->lock);

@@ -2,661 +2,51 @@
 
 ## 概述
 
-NetIns UDP 是基于 QUIC 和 Multipath QUIC 的网络连接库，提供客户端连接、
-服务端监听、HTTP/3 数据收发、多路径状态查询、连接统计、事件通知和日志回调。
+NetIns UDP 是基于 XQUIC 封装的 QUIC/多路径 QUIC 连接库。第三方程序通过
+统一的 C API 完成：
 
-应用程序只需包含公共头文件：
+- 初始化和释放运行环境；
+- 创建客户端或服务端对象；
+- 建立、监听和接受连接；
+- 可靠、有序地发送和接收数据；
+- 正常关闭连接；
+- 查询连接状态、多路径状态和逐路径统计；
+- 查询基础错误码。
+
+调用方只需要包含公共头文件：
 
 ```c
 #include <xquic/netins_udp.h>
 ```
 
-所有公共函数均使用 `netins_udp_xxx()` 命名。数据收发以 HTTP/3 request 为
-单位，支持 GET、POST、自定义请求头、请求体和响应体。
+常用调用链：
 
-## 目录
-
-1. [交付文件与链接方式](#交付文件与链接方式)
-2. [返回值与错误处理](#返回值与错误处理)
-3. [API 函数说明](#api-函数说明)
-4. [客户端示例](#客户端示例)
-5. [服务端示例](#服务端示例)
-6. [使用注意事项](#使用注意事项)
-
-## 交付文件与链接方式
-
-安装后的主要文件：
-
-- 头文件：`include/xquic/netins_udp.h`
-- 动态库：`lib/libxquic.so`
-- 静态库：`lib/libxquic.a`
-- 文档与示例：`${CMAKE_INSTALL_DOCDIR}/netins_udp`
-
-编译应用程序：
-
-```sh
-cc app.c -I/opt/netins-udp/include -L/opt/netins-udp/lib \
-  -lxquic -lssl -lcrypto -lpthread -ldl -lm
+```text
+客户端：init → new → set_opt → connect → send/recv → shutdown → close → cleanup
+服务端：init → new → set_opt → listen → accept → recv/send → shutdown → close → cleanup
 ```
 
-建议在程序启动时校验头文件与运行库版本：
+---
 
-```c
-if (netins_udp_get_api_version() != NETINS_UDP_API_VERSION) {
-    /* 头文件与运行库不匹配。 */
-    return -1;
-}
-```
+## 1. 返回值和错误处理
 
-所有带 `struct_size` 和 `api_version` 的公共结构体必须使用对应的
-`NETINS_UDP_*_INITIALIZER` 或初始化函数进行初始化。
+普通操作函数：
 
-## 返回值与错误处理
+- 成功：返回 `NETINS_UDP_OK`，值为 0；
+- 失败：返回 `NETINS_UDP_ERROR`，值为 -1。
 
-- 普通函数成功返回 `NETINS_UDP_OK`，失败返回 `NETINS_UDP_ERROR`。
-- 返回对象指针的函数失败时返回 `NULL`。
-- 数据收发函数成功时返回实际处理的字节数，失败返回 `-1`。
-- `recv` 返回 `0` 表示当前 HTTP body 已结束。
-- 失败时同步设置 `errno`。
-- 连接错误通过 `netins_udp_get_last_error_code()` 和
-  `netins_udp_get_last_error_msg()` 查询。
-- request 错误通过 `netins_udp_h3_request_get_last_error_code()` 和
-  `netins_udp_h3_request_get_last_error_msg()` 查询。
-- 连接关闭原因通过 `netins_udp_get_close_reason()` 查询。
+创建或接受对象的函数：
 
-错误码采用 errno 风格，常见值包括：
+- 成功：返回对象指针；
+- 失败：返回 `NULL`。
 
-| 错误码 | 说明 |
-|---|---|
-| `EINVAL` | 参数、结构体版本或调用对象不正确 |
-| `EALREADY` | 连接、监听或关闭操作已经开始 |
-| `EBUSY` | 当前状态不允许修改该选项 |
-| `EINPROGRESS` | 非阻塞连接正在建立 |
-| `EAGAIN` | 非阻塞操作暂时无法继续 |
-| `ETIMEDOUT` | 操作超时 |
-| `ENOTCONN` | 连接尚未建立或已经断开 |
-| `ENOBUFS` | 输出缓冲区或有界发送/接收队列不足 |
-| `EOPNOTSUPP` | 当前构建或协议不支持该功能 |
+数据收发函数：
 
-错误信息属于对象的最近一次调用结果。多个线程共享同一对象时，应在失败后立即
-复制错误码和错误文本。
+- 成功：返回实际收发字节数，可能小于请求长度；
+- `recv()` 返回 0：对端已经正常结束发送；
+- 失败：返回 -1。
 
-## API 函数说明
-
-### 1. 库初始化
-
-#### `netins_udp_init()`
-
-初始化 NetIns UDP 运行环境。
-
-```c
-int netins_udp_init(void);
-```
-
-该函数线程安全并采用引用计数。每次成功调用都必须对应一次
-`netins_udp_cleanup()`。
-
-返回值：
-
-- 成功：`NETINS_UDP_OK`
-- 失败：`NETINS_UDP_ERROR`
-
-#### `netins_udp_cleanup()`
-
-释放一次初始化引用。
-
-```c
-int netins_udp_cleanup(void);
-```
-
-最后一次 cleanup 前必须关闭全部 connection、listener、accepted connection
-和 HTTP/3 request。仍有对象或异步连接任务存在时函数返回
-`NETINS_UDP_ERROR`，并设置 `errno=EBUSY`。
-
-#### `netins_udp_get_api_version()`
-
-返回运行库实现的公共 API 版本。
-
-```c
-uint32_t netins_udp_get_api_version(void);
-```
-
-### 2. 连接对象管理
-
-#### `netins_udp_new()`
-
-创建未连接对象。
-
-```c
-netins_udp_t *netins_udp_new(int type);
-```
-
-参数：
-
-- `type`：
-  - `NETINS_UDP_TYPE_QUIC`：普通 QUIC
-  - `NETINS_UDP_TYPE_MPQUIC`：请求 Multipath QUIC
-
-返回值：
-
-- 成功：连接对象
-- 失败：`NULL`
-
-`NETINS_UDP_TYPE_MPQUIC` 表示请求启用多路径。连接建立后应通过
-`netins_udp_is_multipath()` 或 `netins_udp_get_snapshot()` 确认实际状态。
-
-#### `netins_udp_shutdown()`
-
-发起连接关闭，但不释放对象。
-
-```c
-int netins_udp_shutdown(netins_udp_t *netins,
-    uint64_t application_error);
-```
-
-调用后仍可查询最终状态、统计和关闭原因。listener 不支持该函数。
-
-#### `netins_udp_close()`
-
-关闭并释放对象。
-
-```c
-void netins_udp_close(netins_udp_t *netins);
-```
-
-`netins_udp_close(NULL)` 可以安全返回。非空指针在函数返回后立即失效，不得再次
-使用或重复关闭。
-
-每个 HTTP/3 request 必须单独调用 `netins_udp_h3_request_close()`。关闭父连接
-不会代替应用程序释放 request 对象。
-
-### 3. 连接选项
-
-#### `netins_udp_set_opt()`
-
-设置连接选项。
-
-```c
-int netins_udp_set_opt(netins_udp_t *netins, int option,
-    const void *value, size_t value_len);
-```
-
-#### `netins_udp_get_opt()`
-
-读取连接选项。
-
-```c
-int netins_udp_get_opt(netins_udp_t *netins, int option,
-    void *value, size_t *value_len);
-```
-
-`value_len` 是输入/输出参数。`value` 为 `NULL` 时只返回所需长度；缓冲区过小
-时函数返回 `NETINS_UDP_ERROR`，设置 `errno=ENOBUFS`，并写回所需长度。
-
-选项：
-
-| 选项 | 值类型 | 默认值 | 说明 |
-|---|---:|---:|---|
-| `NETINS_UDP_OPT_NONBLOCK` | `int` | 0 | 0 阻塞，1 非阻塞 |
-| `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | 20000 | 完整连接建立超时 |
-| `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` | `uint32_t` | 0 | accept 超时，0 表示无限等待 |
-| `NETINS_UDP_OPT_SEND_TIMEOUT_MS` | `uint32_t` | 0 | request send 超时 |
-| `NETINS_UDP_OPT_RECV_TIMEOUT_MS` | `uint32_t` | 0 | request recv/accept 超时 |
-| `NETINS_UDP_OPT_CLOSE_TIMEOUT_MS` | `uint32_t` | 1000 | 关闭等待时间 |
-| `NETINS_UDP_OPT_IDLE_TIMEOUT_MS` | `uint32_t` | 0 | QUIC 连接空闲超时 |
-| `NETINS_UDP_OPT_KERNEL_SNDBUF` | `int` | 16 MiB | UDP socket 发送缓冲区请求值 |
-| `NETINS_UDP_OPT_KERNEL_RCVBUF` | `int` | 16 MiB | UDP socket 接收缓冲区请求值 |
-| `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | 空 | 客户端使用的网络接口 |
-| `NETINS_UDP_OPT_APP_PROTOCOL` | `int` | HTTP/3 | 支持 `NETINS_UDP_APP_HTTP3` |
-| `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | 校验证书 | TLS 配置 |
-| `NETINS_UDP_OPT_INITIAL_CWND_PACKETS` | `uint32_t` | 100 | 初始拥塞窗口包数 |
-| `NETINS_UDP_OPT_SCHEDULER` | `int` | default | 多路径调度器 |
-| `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int` | default | 拥塞控制算法 |
-| `NETINS_UDP_OPT_LOG_LEVEL` | `int` | INFO | 日志回调阈值 |
-
-以下选项可以在连接或监听开始后修改：
-
-- `NETINS_UDP_OPT_NONBLOCK`
-- `NETINS_UDP_OPT_SEND_TIMEOUT_MS`
-- `NETINS_UDP_OPT_RECV_TIMEOUT_MS`
-- `NETINS_UDP_OPT_CLOSE_TIMEOUT_MS`
-- `NETINS_UDP_OPT_LOG_LEVEL`
-- listener 的 `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS`
-
-其他选项必须在 `netins_udp_connect()` 或 `netins_udp_listen()` 前设置。
-
-request 在创建时复制父连接的阻塞方式和超时配置。accepted connection 在
-accept 时复制 listener 的运行时配置。这些值采用创建时快照语义，后续修改父
-对象不会改变已经创建的子对象。
-
-#### `netins_udp_tls_config_init()`
-
-初始化 TLS 配置。
-
-```c
-void netins_udp_tls_config_init(netins_udp_tls_config_t *config);
-```
-
-也可以使用：
-
-```c
-netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
-```
-
-客户端常用字段：
-
-- `verify_peer`：是否校验服务端证书，默认 1。
-- `server_name`：证书校验名称和 TLS SNI。
-
-listener 必须设置：
-
-- `certificate_file`
-- `private_key_file`
-
-### 4. 日志回调
-
-#### `netins_udp_set_logger()`
-
-设置对象的日志回调。
-
-```c
-typedef void (*netins_udp_logger_cb)(int level,
-    const char *message);
-
-int netins_udp_set_logger(netins_udp_t *netins,
-    netins_udp_logger_cb logger);
-```
-
-日志级别：
-
-- `NETINS_UDP_LOG_LEVEL_DEBUG`
-- `NETINS_UDP_LOG_LEVEL_INFO`
-- `NETINS_UDP_LOG_LEVEL_WARN`
-- `NETINS_UDP_LOG_LEVEL_ERROR`
-
-默认未注册回调，因此库不会通过该接口输出日志。传入 `NULL` 可关闭回调。
-默认阈值为 INFO，可通过 `NETINS_UDP_OPT_LOG_LEVEL` 修改。
-
-日志仅用于低频生命周期和异常信息。RTT、CWND、inflight、路径流量和吞吐应
-通过统计接口读取。
-
-回调可能在 API 调用线程或库工作线程执行。`message` 只在本次回调期间有效。
-回调必须快速返回，不得阻塞，也不得使用同一句柄重入 NetIns UDP。
-
-accepted connection 在 accept 时继承 listener 的 logger 和日志级别，之后
-可以独立修改。
-
-示例：
-
-```c
-static void
-logger_callback(int level, const char *message)
-{
-    static const char *names[] = {
-        "DEBUG", "INFO", "WARN", "ERROR"
-    };
-    if (level >= 0 && level <= 3) {
-        fprintf(stderr, "[%s] %s\n", names[level], message);
-    }
-}
-
-netins_udp_set_logger(connection, logger_callback);
-```
-
-### 5. 客户端连接
-
-#### `netins_udp_connect()`
-
-建立客户端连接。
-
-```c
-int netins_udp_connect(netins_udp_t *netins,
-    const char *host, int port);
-```
-
-参数：
-
-- `netins`：由 `netins_udp_new()` 创建的对象
-- `host`：服务端 IP 地址或域名
-- `port`：服务端端口，范围 1～65535
-
-阻塞模式下，函数在 DNS、QUIC 握手和 HTTP/3 建立完成后返回。
-
-非阻塞模式下，尚未完成时返回 `NETINS_UDP_ERROR` 并设置
-`errno=EINPROGRESS`。应用程序应使用 `netins_udp_get_fd()`、
-`netins_udp_get_events()` 和 `netins_udp_get_state()` 等待最终结果。
-
-同一对象只能调用一次 connect，失败后仍应调用 `netins_udp_close()`。
-
-### 6. 服务端连接
-
-#### `netins_udp_listen()`
-
-启动 HTTP/3 listener。
-
-```c
-netins_udp_t *netins_udp_listen(netins_udp_t *netins,
-    const char *host, int port);
-```
-
-`host` 为 `NULL` 或空字符串时监听可用地址。调用前必须通过
-`NETINS_UDP_OPT_TLS` 配置证书和私钥。
-
-返回值：
-
-- 成功：返回输入的 listener 对象
-- 失败：返回 `NULL`
-
-失败后输入对象仍然有效，可查询错误并关闭。
-
-#### `netins_udp_accept()`
-
-接收客户端连接。
-
-```c
-netins_udp_t *netins_udp_accept(netins_udp_t *listener,
-    struct sockaddr *addr, socklen_t *addrlen);
-```
-
-返回的 accepted connection 是独立对象，必须单独关闭。关闭 listener 不会使
-已经返回的 accepted connection 指针失效。
-
-`addr` 和 `addrlen` 可用于获取对端地址；不需要时可同时传入 `NULL`。
-
-阻塞方式由 listener 的 `NONBLOCK` 和 `ACCEPT_TIMEOUT_MS` 控制。非阻塞且
-暂无连接时返回 `NULL`，并设置 `errno=EAGAIN`。
-
-### 7. HTTP/3 请求配置
-
-#### `netins_udp_h3_request_config_init()`
-
-初始化客户端请求配置。
-
-```c
-void netins_udp_h3_request_config_init(
-    netins_udp_h3_request_config_t *config);
-```
-
-默认值为 GET、路径 `/`、`application/octet-stream` 和空请求体。
-
-主要字段：
-
-- `method`：HTTP 方法
-- `path`：请求路径
-- `authority`：HTTP `:authority`，为空时使用 TLS server name
-- `content_type`：Content-Type
-- `content_length`：请求体长度
-
-长度未知时将 `content_length` 设置为
-`NETINS_UDP_CONTENT_LENGTH_UNKNOWN`。
-
-#### `netins_udp_h3_request_config_add_header()`
-
-添加自定义请求头。
-
-```c
-int netins_udp_h3_request_config_add_header(
-    netins_udp_h3_request_config_t *config,
-    const char *name, const char *value);
-```
-
-header 名必须为小写，不能以 `:` 开头，不能覆盖由库管理的 pseudo-header、
-`content-length`、`content-type` 和 `host`。
-
-#### `netins_udp_h3_response_config_init()`
-
-初始化服务端响应配置。
-
-```c
-void netins_udp_h3_response_config_init(
-    netins_udp_h3_response_config_t *config);
-```
-
-默认状态码为 200。
-
-#### `netins_udp_h3_response_config_add_header()`
-
-添加自定义响应头。
-
-```c
-int netins_udp_h3_response_config_add_header(
-    netins_udp_h3_response_config_t *config,
-    const char *name, const char *value);
-```
-
-### 8. HTTP/3 request 管理
-
-#### `netins_udp_h3_request_open()`
-
-在客户端连接上创建并发送 HTTP/3 请求头。
-
-```c
-int netins_udp_h3_request_open(netins_udp_t *netins,
-    const netins_udp_h3_request_config_t *config,
-    netins_udp_h3_request_t **out_request);
-```
-
-连接必须处于 `NETINS_UDP_STATE_CONNECTED`。
-
-#### `netins_udp_h3_request_accept()`
-
-在 accepted connection 上接收 HTTP/3 请求。
-
-```c
-int netins_udp_h3_request_accept(netins_udp_t *netins,
-    netins_udp_h3_request_t **out_request);
-```
-
-非阻塞且暂无请求时函数返回 `NETINS_UDP_ERROR`，并设置 `errno=EAGAIN`。
-
-#### `netins_udp_h3_request_set_response()`
-
-设置服务端响应头。
-
-```c
-int netins_udp_h3_request_set_response(
-    netins_udp_h3_request_t *request,
-    const netins_udp_h3_response_config_t *config);
-```
-
-每个 request 只能成功设置一次最终响应。状态码范围为 200～599，发送响应体前
-必须先成功调用该函数。
-
-HEAD、204、205 和 304 响应不发送 body。违反响应 body 规则时返回
-`EOPNOTSUPP`。
-
-#### `netins_udp_h3_request_close()`
-
-关闭并释放 request。
-
-```c
-void netins_udp_h3_request_close(
-    netins_udp_h3_request_t *request);
-```
-
-每个成功创建或接收的 request 都必须关闭。
-
-### 9. HTTP/3 数据收发
-
-#### `netins_udp_h3_request_send()`
-
-发送请求体或响应体。
-
-```c
-ssize_t netins_udp_h3_request_send(
-    netins_udp_h3_request_t *request,
-    const void *data, size_t length, int flags);
-```
-
-#### `netins_udp_h3_request_recv()`
-
-接收请求体或响应体。
-
-```c
-ssize_t netins_udp_h3_request_recv(
-    netins_udp_h3_request_t *request,
-    void *data, size_t length, int flags);
-```
-
-flags：
-
-- `NETINS_UDP_MSG_NONE`
-- `NETINS_UDP_MSG_DONTWAIT`：仅本次调用非阻塞
-- `NETINS_UDP_MSG_PEEK`：仅用于 recv
-- `NETINS_UDP_MSG_FIN`：仅用于 send，表示该方向 body 结束
-
-send 可能部分成功。返回正数但小于 `length` 时，应用程序必须继续发送剩余
-数据。recv 返回 0 表示 body 已结束。
-
-有限超时到期时返回 `NETINS_UDP_ERROR` 并设置 `errno=ETIMEDOUT`；非阻塞且
-暂无进展时返回 `NETINS_UDP_ERROR` 并设置 `errno=EAGAIN`。
-
-固定长度 body 的实际发送总字节数必须等于 `content_length`。长度未知时，
-最后一次发送必须使用 `NETINS_UDP_MSG_FIN`。
-
-### 10. Request 信息和错误
-
-#### `netins_udp_h3_request_get_info()`
-
-读取 request 状态和统计。
-
-```c
-int netins_udp_h3_request_get_info(
-    netins_udp_h3_request_t *request,
-    netins_udp_h3_request_info_t *out);
-```
-
-输出结构必须使用 `NETINS_UDP_H3_REQUEST_INFO_INITIALIZER` 初始化。
-
-主要字段：
-
-- `stream_id`
-- `response_status`
-- `request_headers_ready`
-- `response_headers_ready`
-- `send_finished`
-- `receive_finished`
-- `bytes_sent`
-- `bytes_received`
-- `peer_headers`
-
-`bytes_sent` 和 `bytes_received` 只统计 HTTP body，不包含 HTTP/3 framing、
-QPACK 和 headers。
-
-#### Request 错误查询
-
-```c
-int netins_udp_h3_request_get_last_error_code(
-    netins_udp_h3_request_t *request);
-
-int netins_udp_h3_request_get_last_error_msg(
-    netins_udp_h3_request_t *request,
-    char *buffer, size_t buffer_len);
-```
-
-### 11. 连接状态和统计
-
-#### `netins_udp_get_state()`
-
-返回连接状态。
-
-```c
-int netins_udp_get_state(netins_udp_t *netins);
-```
-
-状态值：
-
-- `NETINS_UDP_STATE_NEW`
-- `NETINS_UDP_STATE_CONNECTING`
-- `NETINS_UDP_STATE_LISTENING`
-- `NETINS_UDP_STATE_CONNECTED`
-- `NETINS_UDP_STATE_CLOSING`
-- `NETINS_UDP_STATE_CLOSED`
-- `NETINS_UDP_STATE_ERROR`
-
-#### `netins_udp_is_multipath()`
-
-查询连接是否实际启用多路径。
-
-```c
-int netins_udp_is_multipath(netins_udp_t *netins);
-```
-
-返回 1 表示已启用，0 表示未启用，失败返回 `NETINS_UDP_ERROR`。
-
-#### `netins_udp_get_path_count()`
-
-读取已观察到的路径数量。
-
-```c
-int netins_udp_get_path_count(netins_udp_t *netins,
-    uint32_t *out_count);
-```
-
-#### `netins_udp_get_info()`
-
-读取连接基本信息。
-
-```c
-int netins_udp_get_info(netins_udp_t *netins,
-    netins_udp_info_t *out);
-```
-
-输出结构必须使用 `NETINS_UDP_INFO_INITIALIZER` 初始化。
-
-#### `netins_udp_get_statis()`
-
-读取连接统计。
-
-```c
-int netins_udp_get_statis(netins_udp_t *netins,
-    netins_udp_statis_t *out);
-```
-
-输出结构必须使用 `NETINS_UDP_STATIS_INITIALIZER` 初始化。
-
-#### `netins_udp_get_path_statis()`
-
-读取指定路径统计。
-
-```c
-int netins_udp_get_path_statis(netins_udp_t *netins,
-    size_t path_index, netins_udp_path_statis_t *out);
-```
-
-`path_index` 是连接生命周期内稳定的路径槽位。输出结构必须使用
-`NETINS_UDP_PATH_STATIS_INITIALIZER` 初始化。
-
-#### `netins_udp_get_snapshot()`
-
-一次性读取连接、总统计、逐路径统计和关闭原因。
-
-```c
-int netins_udp_get_snapshot(netins_udp_t *netins,
-    netins_udp_snapshot_t *out);
-```
-
-输出结构必须使用 `NETINS_UDP_SNAPSHOT_INITIALIZER` 初始化。持续监控时推荐使用
-该函数，避免在不同时间分别读取多组统计。
-
-主要统计：
-
-- `bytes_sent` / `bytes_received`：去重后的 QUIC STREAM payload
-- `bytes_wire_sent` / `bytes_wire_received`：UDP 线速字节
-- `bytes_acked`
-- `bytes_lost`：重传字节代理值
-- `bytes_inflight`
-- `send_mbps` / `receive_mbps` / `acked_mbps`
-- `loss_rate`
-- 每条路径的 RTT、CWND、inflight、流量和状态
-
-逐路径 payload 统计不重复计算 retransmission 和 reinjection 数据，因此不等于
-网卡线速字节。需要线速统计时使用 `bytes_wire_sent` 和
-`bytes_wire_received`。
-
-### 12. 连接错误和关闭原因
-
-#### 连接错误查询
+失败后通过以下接口查询详细错误：
 
 ```c
 int netins_udp_get_last_error_code(netins_udp_t *netins);
@@ -665,91 +55,768 @@ int netins_udp_get_last_error_msg(netins_udp_t *netins,
     char *buffer, size_t buffer_len);
 ```
 
-#### `netins_udp_get_close_reason()`
+错误码采用 `errno` 风格，例如：
 
-读取连接关闭原因。
+- `EINVAL`：参数错误；
+- `ENOTCONN`：连接尚未建立；
+- `EAGAIN`：非阻塞模式下暂时不可操作；
+- `ETIMEDOUT`：操作超时；
+- `ECONNRESET`：连接被对端重置；
+- `EOPNOTSUPP`：当前配置不受支持。
 
-```c
-int netins_udp_get_close_reason(netins_udp_t *netins,
-    netins_udp_close_reason_t *out);
-```
-
-输出结构必须使用 `NETINS_UDP_CLOSE_REASON_INITIALIZER` 初始化。
-
-关闭来源：
-
-- `NETINS_UDP_CLOSE_LOCAL`
-- `NETINS_UDP_CLOSE_PEER`
-- `NETINS_UDP_CLOSE_TRANSPORT`
-- `NETINS_UDP_CLOSE_IDLE_TIMEOUT`
-- `NETINS_UDP_CLOSE_HANDSHAKE_TIMEOUT`
-- `NETINS_UDP_CLOSE_NETWORK_ERROR`
-- `NETINS_UDP_CLOSE_INTERNAL_ERROR`
-
-### 13. poll/epoll 通知
-
-#### Connection/listener 通知
+使用示例：
 
 ```c
-int netins_udp_get_fd(netins_udp_t *netins);
+char error_message[NETINS_UDP_ERROR_MSG_LEN] = {0};
 
-int netins_udp_get_events(netins_udp_t *netins,
-    uint32_t *out_events);
+if (netins_udp_connect(conn, host, port) != NETINS_UDP_OK) {
+    netins_udp_get_last_error_msg(conn, error_message,
+        sizeof(error_message));
+    fprintf(stderr, "connect failed: code=%d, message=%s\n",
+        netins_udp_get_last_error_code(conn), error_message);
+}
 ```
 
-#### Request 通知
+---
+
+## 2. 初始化和释放
+
+### `netins_udp_init()`
+
+初始化 NetIns UDP 运行环境。
 
 ```c
-int netins_udp_h3_request_get_fd(
-    netins_udp_h3_request_t *request);
-
-int netins_udp_h3_request_get_events(
-    netins_udp_h3_request_t *request,
-    uint32_t *out_events);
+int netins_udp_init(void);
 ```
 
-通知 fd 可加入 `poll` 或 `epoll`，只监听可读事件。该 fd 由库拥有，应用程序
-不得直接 read 或 close；收到可读通知后必须调用对应的 `get_events()`。
+程序使用其他 NetIns UDP API 前必须先调用该函数。
 
-事件：
+### `netins_udp_cleanup()`
 
-| 事件 | 适用对象 | 说明 |
-|---|---|---|
-| `NETINS_UDP_EVENT_CONNECTED` | client/connection | 连接建立 |
-| `NETINS_UDP_EVENT_ACCEPTABLE` | listener | 有连接可以 accept |
-| `NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE` | accepted connection | 有 request 可以接收 |
-| `NETINS_UDP_EVENT_READABLE` | request | body 可读 |
-| `NETINS_UDP_EVENT_WRITABLE` | request | body 可写 |
-| `NETINS_UDP_EVENT_PATH_CHANGED` | connection | 路径状态变化 |
-| `NETINS_UDP_EVENT_CLOSED` | connection | 连接关闭 |
-| `NETINS_UDP_EVENT_ERROR` | connection/request | 发生错误 |
+释放 NetIns UDP 运行环境。
 
-对于 `ACCEPTABLE`、`H3_REQUEST_ACCEPTABLE`、`READABLE` 和 `WRITABLE`，应用程序
-应持续处理，直到相应操作返回 `NETINS_UDP_ERROR` 并设置 `errno=EAGAIN`。
+```c
+int netins_udp_cleanup(void);
+```
 
-## 客户端示例
+调用前必须关闭所有 client、listener 和 accepted connection。若仍有对象未释放，
+函数返回 `NETINS_UDP_ERROR`，错误码为 `EBUSY`。
 
-以下示例建立 Multipath QUIC 连接并发送 GET 请求：
+### `netins_udp_get_api_version()`
+
+查询运行库的 API 版本。
+
+```c
+uint32_t netins_udp_get_api_version(void);
+```
+
+建议程序启动时检查头文件与库版本是否匹配：
+
+```c
+if (netins_udp_get_api_version() != NETINS_UDP_API_VERSION) {
+    fprintf(stderr, "NetIns UDP API version mismatch\n");
+    return -1;
+}
+```
+
+---
+
+## 3. 创建和释放连接对象
+
+### `netins_udp_new()`
+
+创建一个尚未连接的对象。
+
+```c
+netins_udp_t *netins_udp_new(int type);
+```
+
+`type` 可取：
+
+| 类型 | 说明 |
+|---|---|
+| `NETINS_UDP_TYPE_QUIC` | 普通单路径 QUIC |
+| `NETINS_UDP_TYPE_MPQUIC` | 请求启用多路径 QUIC |
+
+返回值：
+
+- 成功：返回连接对象；
+- 失败：返回 `NULL`，并设置 `errno`。
+
+`NETINS_UDP_TYPE_MPQUIC` 表示请求多路径，不代表连接建立后一定有两条活动路径。
+实际状态必须在建连后调用 `netins_udp_is_multipath()` 或
+`netins_udp_get_info()` 查询。
+
+### `netins_udp_close()`
+
+关闭并释放对象。
+
+```c
+void netins_udp_close(netins_udp_t *netins);
+```
+
+调用后对象指针立即失效，不得再次使用或重复关闭。
+`netins_udp_close(NULL)` 可以安全返回。
+
+---
+
+## 4. 常用连接选项
+
+连接选项通过以下函数设置：
+
+```c
+int netins_udp_set_opt(netins_udp_t *netins, int option,
+    const void *value, size_t value_len);
+```
+
+除特别说明外，应在 `connect()` 或 `listen()` 之前设置。
+
+### 4.1 配置客户端多路径网卡
+
+`netins_udp_interfaces_t` 是 NetIns UDP 定义的客户端网卡配置结构体，用来
+指定建立连接时可用于创建路径的本地网络接口。它不是连接对象，也不表示
+连接建立后的实际路径状态。
+
+公共结构定义如下：
+
+```c
+typedef struct netins_udp_interfaces_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint32_t interface_count;
+    uint32_t reserved32;
+    char names[NETINS_UDP_MAX_PATHS]
+              [NETINS_UDP_INTERFACE_NAME_LEN];
+    uint64_t reserved[4];
+} netins_udp_interfaces_t;
+```
+
+字段说明：
+
+| 字段 | 是否由调用方填写 | 说明 |
+|---|---:|---|
+| `struct_size` | 否 | 结构体大小，由初始化宏填写 |
+| `api_version` | 否 | 公共 API 版本，由初始化宏填写 |
+| `interface_count` | 是 | `names[]` 中有效的网卡名称数量 |
+| `reserved32` | 否 | 预留字段，必须保持为 0 |
+| `names[]` | 是 | Linux 本地网卡名称，按期望的路径顺序填写 |
+| `reserved[]` | 否 | 预留字段，必须保持为 0 |
+
+当前版本最多配置 `NETINS_UDP_MAX_PATHS`（8）个接口；每个接口名称的存储
+空间为 `NETINS_UDP_INTERFACE_NAME_LEN`（32）字节，其中包含字符串末尾的
+空字符。因此，有效名称最长为 31 个字符。
+
+必须使用 `NETINS_UDP_INTERFACES_INITIALIZER` 初始化结构体。初始化宏会填写
+`struct_size` 和 `api_version`，并将接口数量和预留字段初始化为 0：
+
+```c
+netins_udp_interfaces_t interfaces =
+    NETINS_UDP_INTERFACES_INITIALIZER;
+
+interfaces.interface_count = 2;
+snprintf(interfaces.names[0], sizeof(interfaces.names[0]),
+    "%s", "rmnet_data0");
+snprintf(interfaces.names[1], sizeof(interfaces.names[1]),
+    "%s", "usb0");
+
+if (netins_udp_set_opt(conn, NETINS_UDP_OPT_INTERFACES,
+        &interfaces, sizeof(interfaces)) != NETINS_UDP_OK)
+{
+    /* 处理错误 */
+}
+```
+
+`netins_udp_set_opt()` 会复制整个结构体和其中的网卡名称。函数成功返回后，
+调用方可以立即复用或释放原变量。
+
+接口顺序采用创建时配置：
+
+- path0：`rmnet_data0`；
+- path1：`usb0`。
+
+使用规则：
+
+- 该选项只适用于客户端，必须在 `netins_udp_connect()` 前设置；
+- listener 不接受该选项，设置时返回 `NETINS_UDP_ERROR`，错误码为
+  `EOPNOTSUPP`；
+- `interface_count` 不能超过 8，每个有效的 `names[i]` 都不能为空；
+- `interface_count=0` 或未设置该选项时，客户端使用系统默认路由；
+- 网卡名称只是指定客户端尝试创建路径时使用的接口，不保证对应路径一定建立
+  成功；
+- 连接建立后应调用 `netins_udp_is_multipath()`、
+  `netins_udp_get_path_count()` 和 `netins_udp_get_path_statis()` 确认实际
+  多路径状态。
+
+### 4.2 配置客户端证书校验
+
+```c
+netins_udp_tls_config_t tls =
+    NETINS_UDP_TLS_CONFIG_INITIALIZER;
+
+snprintf(tls.server_name, sizeof(tls.server_name),
+    "%s", "server.example.com");
+snprintf(tls.ca_file, sizeof(tls.ca_file),
+    "%s", "/opt/netins/certs/ca.pem");
+
+if (netins_udp_set_opt(conn, NETINS_UDP_OPT_TLS,
+        &tls, sizeof(tls)) != NETINS_UDP_OK)
+{
+    /* 处理错误 */
+}
+```
+
+客户端默认校验服务端证书。`ca_file` 为空时使用系统信任库。
+生产环境不建议关闭证书校验。
+
+### 4.3 配置服务端证书
+
+listener 在 `listen()` 前必须配置证书和私钥：
+
+```c
+netins_udp_tls_config_t tls =
+    NETINS_UDP_TLS_CONFIG_INITIALIZER;
+
+snprintf(tls.certificate_file, sizeof(tls.certificate_file),
+    "%s", "/opt/netins/certs/server.crt");
+snprintf(tls.private_key_file, sizeof(tls.private_key_file),
+    "%s", "/opt/netins/certs/server.key");
+
+if (netins_udp_set_opt(listener, NETINS_UDP_OPT_TLS,
+        &tls, sizeof(tls)) != NETINS_UDP_OK)
+{
+    /* 处理错误 */
+}
+```
+
+### 4.4 阻塞方式和超时
+
+常用选项：
+
+| 选项 | 值类型 | 默认值 | 说明 |
+|---|---:|---:|---|
+| `NETINS_UDP_OPT_NONBLOCK` | `int` | 0 | 0 阻塞，1 非阻塞 |
+| `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | 20000 | 建连超时 |
+| `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` | `uint32_t` | 0 | accept 超时；0 表示一直等待 |
+| `NETINS_UDP_OPT_SEND_TIMEOUT_MS` | `uint32_t` | 0 | 发送超时 |
+| `NETINS_UDP_OPT_RECV_TIMEOUT_MS` | `uint32_t` | 0 | 接收超时 |
+| `NETINS_UDP_OPT_CLOSE_TIMEOUT_MS` | `uint32_t` | 1000 | 关闭等待时间 |
+| `NETINS_UDP_OPT_IDLE_TIMEOUT_MS` | `uint32_t` | 0 | 连接空闲超时 |
+
+示例：
+
+```c
+uint32_t timeout_ms = 30000;
+
+netins_udp_set_opt(conn, NETINS_UDP_OPT_SEND_TIMEOUT_MS,
+    &timeout_ms, sizeof(timeout_ms));
+netins_udp_set_opt(conn, NETINS_UDP_OPT_RECV_TIMEOUT_MS,
+    &timeout_ms, sizeof(timeout_ms));
+```
+
+阻塞方式和收发超时在首次建立数据通道时采用创建时快照，因此应在第一次
+`send()` 或 `recv()` 之前完成配置。
+
+---
+
+## 5. 客户端建立连接
+
+### `netins_udp_connect()`
+
+连接指定服务器。
+
+```c
+int netins_udp_connect(netins_udp_t *netins,
+    const char *host, int port);
+```
+
+参数：
+
+- `netins`：通过 `netins_udp_new()` 创建的对象；
+- `host`：服务器 IP 地址或域名；
+- `port`：服务器端口，范围为 1～65535。
+
+阻塞模式下，函数在域名解析、QUIC 握手和连接初始化完成后返回。
+
+使用示例：
+
+```c
+netins_udp_t *conn =
+    netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
+if (conn == NULL) {
+    /* 处理错误 */
+}
+
+if (netins_udp_connect(conn, "192.0.2.10", 8443)
+    != NETINS_UDP_OK)
+{
+    /* 查询错误并关闭对象 */
+}
+```
+
+连接成功后可通过以下方式确认状态：
+
+```c
+if (netins_udp_get_state(conn) == NETINS_UDP_STATE_CONNECTED) {
+    printf("connected\n");
+}
+```
+
+---
+
+## 6. 服务端监听和接受连接
+
+### `netins_udp_listen()`
+
+开始监听。
+
+```c
+netins_udp_t *netins_udp_listen(netins_udp_t *netins,
+    const char *host, int port);
+```
+
+参数：
+
+- `netins`：通过 `netins_udp_new()` 创建的 listener 对象；
+- `host`：监听地址；传 `NULL` 或空字符串表示监听所有地址；
+- `port`：监听端口。
+
+返回值：
+
+- 成功：返回输入的 listener 对象；
+- 失败：返回 `NULL`。输入对象仍可用于查询错误和关闭。
+
+### `netins_udp_accept()`
+
+接受一个客户端连接。
+
+```c
+netins_udp_t *netins_udp_accept(netins_udp_t *listener,
+    struct sockaddr *addr, socklen_t *addrlen);
+```
+
+参数：
+
+- `listener`：监听对象；
+- `addr`、`addrlen`：可选，用于返回客户端地址；不需要时传 `NULL`。
+
+返回值：
+
+- 成功：返回一个新的 accepted connection；
+- 失败：返回 `NULL`。
+
+accepted connection 是独立对象，必须单独调用 `netins_udp_close()`。
+关闭 listener 不会使已经接受的连接立即失效。
+
+使用示例：
+
+```c
+netins_udp_t *listener =
+    netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
+if (listener == NULL) {
+    /* 处理错误 */
+}
+
+/* 先设置服务端证书 */
+
+if (netins_udp_listen(listener, NULL, 8443) == NULL) {
+    /* 查询错误并关闭 listener */
+}
+
+netins_udp_t *connection =
+    netins_udp_accept(listener, NULL, NULL);
+if (connection == NULL) {
+    /* 查询 listener 错误 */
+}
+```
+
+---
+
+## 7. 数据发送和接收
+
+NetIns UDP 的连接级数据接口提供可靠、有序的字节数据传输。调用方不需要处理
+底层 UDP 数据包，也不需要理解内部协议对象。
+
+### `netins_udp_send()`
+
+发送数据。
+
+```c
+ssize_t netins_udp_send(netins_udp_t *netins,
+    const void *data, size_t length, int flags);
+```
+
+返回值：
+
+- 大于 0：实际接收并排队的字节数；
+- 0：本次没有数据；
+- -1：发送失败。
+
+一次调用可能只接收部分数据，调用方必须根据返回值循环发送。
+
+常用 `flags`：
+
+| 标志 | 说明 |
+|---|---|
+| `NETINS_UDP_MSG_NONE` | 普通发送 |
+| `NETINS_UDP_MSG_DONTWAIT` | 本次调用使用非阻塞方式 |
+| `NETINS_UDP_MSG_FIN` | 当前数据发送完成后结束本端发送方向 |
+
+`NETINS_UDP_MSG_FIN` 不等于释放连接。发送 FIN 后仍然可以继续接收对端数据。
+
+完整发送示例：
+
+```c
+static int
+send_all(netins_udp_t *conn, const void *data, size_t length, int finish)
+{
+    const unsigned char *bytes = data;
+    size_t offset = 0;
+
+    while (offset < length) {
+        int flags = finish ? NETINS_UDP_MSG_FIN
+                           : NETINS_UDP_MSG_NONE;
+        ssize_t sent = netins_udp_send(conn, bytes + offset,
+            length - offset, flags);
+        if (sent < 0) {
+            return -1;
+        }
+        if (sent == 0) {
+            return -1;
+        }
+        offset += (size_t)sent;
+    }
+
+    if (finish && length == 0) {
+        return netins_udp_send(conn, NULL, 0,
+            NETINS_UDP_MSG_FIN) == 0 ? 0 : -1;
+    }
+    return 0;
+}
+```
+
+### `netins_udp_recv()`
+
+接收数据。
+
+```c
+ssize_t netins_udp_recv(netins_udp_t *netins,
+    void *data, size_t length, int flags);
+```
+
+返回值：
+
+- 大于 0：实际接收字节数；
+- 0：对端已经正常结束发送；
+- -1：接收失败。
+
+常用 `flags`：
+
+| 标志 | 说明 |
+|---|---|
+| `NETINS_UDP_MSG_NONE` | 普通接收 |
+| `NETINS_UDP_MSG_DONTWAIT` | 本次调用使用非阻塞方式 |
+| `NETINS_UDP_MSG_PEEK` | 查看数据但不从接收队列移除 |
+
+接收示例：
+
+```c
+unsigned char buffer[64 * 1024];
+
+for (;;) {
+    ssize_t received = netins_udp_recv(conn, buffer,
+        sizeof(buffer), NETINS_UDP_MSG_NONE);
+    if (received > 0) {
+        /* 处理 buffer[0..received-1] */
+        continue;
+    }
+    if (received == 0) {
+        /* 对端正常结束发送 */
+        break;
+    }
+    /* 查询并处理错误 */
+    break;
+}
+```
+
+### 数据边界和线程
+
+- 数据按发送顺序可靠交付；
+- 不保留每次 `send()` 的调用边界；
+- 一个发送线程和一个接收线程可以同时使用同一连接；
+- `send()` 返回正数后，调用方可以立即复用原输入缓冲区；
+- listener 不能调用 `send()` 或 `recv()`。
+
+### 发送文件或连续数据
+
+文件内容和普通内存数据使用同一组 `netins_udp_send()` /
+`netins_udp_recv()` 接口。发送端循环读取文件并调用 `send()`，接收端循环调用
+`recv()` 并写入文件即可。库内部自动使用聚合数据通道，调用方不需要创建额外
+的数据对象或设置并发数量。
+
+客户端未设置算法选项时默认使用 RAP 调度和 BBR 拥塞控制。如需显式选择，
+必须在 `netins_udp_connect()` 或 `netins_udp_listen()` 之前设置：
+
+```c
+int scheduler = NETINS_UDP_SCHEDULER_RAP;
+int cc = NETINS_UDP_CC_BBR;
+
+netins_udp_set_opt(conn, NETINS_UDP_OPT_SCHEDULER,
+    &scheduler, sizeof(scheduler));
+netins_udp_set_opt(conn, NETINS_UDP_OPT_CONGESTION_CONTROL,
+    &cc, sizeof(cc));
+```
+
+服务端需要改变发送侧算法时，对 listener 设置上述选项；后续接受的连接会
+继承 listener 的设置。
+
+---
+
+## 8. 关闭连接
+
+### `netins_udp_shutdown()`
+
+发起连接关闭，但不释放对象。
+
+```c
+int netins_udp_shutdown(netins_udp_t *netins,
+    uint64_t application_error);
+```
+
+正常关闭使用：
+
+```c
+netins_udp_shutdown(conn, 0);
+```
+
+`application_error=0` 时，库会结束发送方向，并在已经接收的待发送数据交给
+XQUIC 后关闭传输。非零值表示错误关闭。
+
+调用后仍可以查询最终连接状态，直到调用 `netins_udp_close()` 释放对象。
+
+### 推荐关闭顺序
+
+```c
+/* 1. 停止发起新的 send/recv */
+netins_udp_shutdown(conn, 0);
+
+/* 2. 如有需要，查询最终连接状态 */
+
+/* 3. 释放连接对象 */
+netins_udp_close(conn);
+
+/* 4. 所有对象关闭后释放运行环境 */
+netins_udp_cleanup();
+```
+
+对于服务端：
+
+1. 关闭所有 accepted connection；
+2. 关闭 listener；
+3. 调用 `netins_udp_cleanup()`。
+
+---
+
+## 9. 连接状态查询
+
+### `netins_udp_get_state()`
+
+```c
+int netins_udp_get_state(netins_udp_t *netins);
+```
+
+可能的状态：
+
+| 状态 | 说明 |
+|---|---|
+| `NETINS_UDP_STATE_NEW` | 对象已创建，尚未连接或监听 |
+| `NETINS_UDP_STATE_CONNECTING` | 正在建立连接 |
+| `NETINS_UDP_STATE_LISTENING` | 正在监听 |
+| `NETINS_UDP_STATE_CONNECTED` | 连接已建立 |
+| `NETINS_UDP_STATE_CLOSING` | 正在关闭 |
+| `NETINS_UDP_STATE_CLOSED` | 已关闭 |
+| `NETINS_UDP_STATE_ERROR` | 连接发生错误 |
+
+### `netins_udp_get_info()`
+
+```c
+int netins_udp_get_info(netins_udp_t *netins,
+    netins_udp_info_t *out);
+```
+
+输出结构必须使用初始化宏：
+
+```c
+netins_udp_info_t info = NETINS_UDP_INFO_INITIALIZER;
+
+if (netins_udp_get_info(conn, &info) == NETINS_UDP_OK) {
+    printf("state=%d paths=%u active_paths=%u multipath=%d\n",
+        info.state, info.path_count, info.active_path_count,
+        info.multipath_active);
+}
+```
+
+常用字段：
+
+- `state`：当前连接状态；
+- `handshake_finished`：握手是否完成；
+- `multipath_requested`：创建对象时是否请求多路径；
+- `multipath_active`：当前是否实际启用多路径；
+- `path_count`：连接生命周期中已记录的路径数量；
+- `active_path_count`：当前活动路径数量；
+- `local_address`、`peer_address`：连接地址。
+
+---
+
+## 10. 多路径和逐路径查询
+
+### `netins_udp_is_multipath()`
+
+查询当前连接是否实际启用多路径。
+
+```c
+int netins_udp_is_multipath(netins_udp_t *netins);
+```
+
+返回值：
+
+- 1：多路径已启用；
+- 0：当前不是多路径连接；
+- -1：查询失败。
+
+### `netins_udp_get_path_count()`
+
+查询路径数量。
+
+```c
+int netins_udp_get_path_count(netins_udp_t *netins,
+    uint32_t *out_count);
+```
+
+### `netins_udp_get_path_statis()`
+
+查询指定路径状态和统计。
+
+```c
+int netins_udp_get_path_statis(netins_udp_t *netins,
+    size_t path_index, netins_udp_path_statis_t *out);
+```
+
+使用示例：
+
+```c
+uint32_t path_count = 0;
+
+if (netins_udp_get_path_count(conn, &path_count)
+    == NETINS_UDP_OK)
+{
+    for (uint32_t i = 0; i < path_count; ++i) {
+        netins_udp_path_statis_t path =
+            NETINS_UDP_PATH_STATIS_INITIALIZER;
+
+        if (netins_udp_get_path_statis(conn, i, &path)
+            != NETINS_UDP_OK)
+        {
+            continue;
+        }
+
+        printf("path=%u interface=%s state=%d "
+               "sent=%llu recv=%llu srtt=%llu us "
+               "cwnd=%llu inflight=%llu\n",
+            path.path_index,
+            path.interface_name,
+            path.path_state,
+            (unsigned long long)path.bytes_sent,
+            (unsigned long long)path.bytes_received,
+            (unsigned long long)path.srtt_us,
+            (unsigned long long)path.cwnd_bytes,
+            (unsigned long long)path.bytes_inflight);
+    }
+}
+```
+
+路径状态：
+
+| 状态 | 说明 |
+|---|---|
+| `NETINS_UDP_PATH_INIT` | 路径初始化 |
+| `NETINS_UDP_PATH_VALIDATING` | 路径正在验证 |
+| `NETINS_UDP_PATH_ACTIVE` | 路径可用 |
+| `NETINS_UDP_PATH_CLOSING` | 路径正在关闭 |
+| `NETINS_UDP_PATH_CLOSED` | 路径已关闭 |
+| `NETINS_UDP_PATH_FAILED` | 路径失败 |
+
+常用路径字段：
+
+- `interface_name`：对应网卡名称；
+- `path_state`：路径状态；
+- `bytes_sent`、`bytes_received`：路径业务字节数；
+- `send_mbps`、`receive_mbps`：当前统计区间速率；
+- `srtt_us`、`latest_rtt_us`、`min_rtt_us`：路径 RTT；
+- `cwnd_bytes`：拥塞窗口；
+- `bytes_inflight`：在途字节数；
+- `cwnd_blocked`：是否受拥塞窗口限制；
+- `loss_rate`：丢包率统计。
+
+路径下标在一个连接生命周期内保持稳定，不会因为路径关闭和重新建立而复用。
+
+---
+
+## 11. 完整客户端示例
+
+下面的示例通过两张网卡建立多路径连接，发送一条消息并接收服务端响应。
 
 ```c
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+
 #include <xquic/netins_udp.h>
 
-int
-download_file(const char *host, int port, const char *server_name)
+static void
+print_error(const char *operation, netins_udp_t *conn)
 {
-    int result = -1;
-    netins_udp_t *client = NULL;
-    netins_udp_h3_request_t *request = NULL;
+    char message[NETINS_UDP_ERROR_MSG_LEN] = {0};
+    if (conn != NULL) {
+        netins_udp_get_last_error_msg(conn, message, sizeof(message));
+    }
+    fprintf(stderr, "%s failed: code=%d message=%s\n",
+        operation,
+        conn != NULL ? netins_udp_get_last_error_code(conn) : errno,
+        message);
+}
+
+static int
+send_all(netins_udp_t *conn, const void *data, size_t length, int finish)
+{
+    const unsigned char *bytes = data;
+    size_t offset = 0;
+    while (offset < length) {
+        ssize_t sent = netins_udp_send(conn, bytes + offset,
+            length - offset,
+            finish ? NETINS_UDP_MSG_FIN : NETINS_UDP_MSG_NONE);
+        if (sent < 0) {
+            return -1;
+        }
+        if (sent == 0) {
+            return -1;
+        }
+        offset += (size_t)sent;
+    }
+    return 0;
+}
+
+int
+main(void)
+{
+    int result = 1;
+    netins_udp_t *conn = NULL;
 
     if (netins_udp_init() != NETINS_UDP_OK) {
-        return -1;
+        return 1;
     }
 
-    client = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
-    if (client == NULL) {
+    conn = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
+    if (conn == NULL) {
         goto done;
     }
 
@@ -757,88 +824,93 @@ download_file(const char *host, int port, const char *server_name)
         NETINS_UDP_INTERFACES_INITIALIZER;
     interfaces.interface_count = 2;
     snprintf(interfaces.names[0], sizeof(interfaces.names[0]),
-        "rmnet_data0");
+        "%s", "rmnet_data0");
     snprintf(interfaces.names[1], sizeof(interfaces.names[1]),
-        "usb0");
-    if (netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
-            &interfaces, sizeof(interfaces)) != NETINS_UDP_OK) {
+        "%s", "usb0");
+    if (netins_udp_set_opt(conn, NETINS_UDP_OPT_INTERFACES,
+            &interfaces, sizeof(interfaces)) != NETINS_UDP_OK)
+    {
+        print_error("set interfaces", conn);
         goto done;
     }
 
-    netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
-    snprintf(tls.server_name, sizeof(tls.server_name), "%s",
-        server_name);
-    if (netins_udp_set_opt(client, NETINS_UDP_OPT_TLS,
-            &tls, sizeof(tls)) != NETINS_UDP_OK) {
+    netins_udp_tls_config_t tls =
+        NETINS_UDP_TLS_CONFIG_INITIALIZER;
+    snprintf(tls.server_name, sizeof(tls.server_name),
+        "%s", "server.example.com");
+    snprintf(tls.ca_file, sizeof(tls.ca_file),
+        "%s", "/opt/netins/certs/ca.pem");
+    if (netins_udp_set_opt(conn, NETINS_UDP_OPT_TLS,
+            &tls, sizeof(tls)) != NETINS_UDP_OK)
+    {
+        print_error("set TLS", conn);
         goto done;
     }
 
-    if (netins_udp_connect(client, host, port) != NETINS_UDP_OK) {
+    if (netins_udp_connect(conn, "192.0.2.10", 8443)
+        != NETINS_UDP_OK)
+    {
+        print_error("connect", conn);
         goto done;
     }
 
-    netins_udp_h3_request_config_t config;
-    netins_udp_h3_request_config_init(&config);
-    snprintf(config.method, sizeof(config.method), "GET");
-    snprintf(config.path, sizeof(config.path), "/file.bin");
+    printf("connected, multipath=%d\n",
+        netins_udp_is_multipath(conn));
 
-    if (netins_udp_h3_request_open(client, &config, &request)
-        != NETINS_UDP_OK) {
+    const char message[] = "hello from NetIns UDP";
+    if (send_all(conn, message, sizeof(message) - 1, 1) != 0) {
+        print_error("send", conn);
         goto done;
     }
 
-    unsigned char buffer[64 * 1024];
+    unsigned char buffer[4096];
     for (;;) {
-        ssize_t received = netins_udp_h3_request_recv(request,
-            buffer, sizeof(buffer), NETINS_UDP_MSG_NONE);
+        ssize_t received = netins_udp_recv(conn, buffer,
+            sizeof(buffer), NETINS_UDP_MSG_NONE);
         if (received > 0) {
-            /* 处理或保存 buffer[0..received)。 */
+            fwrite(buffer, 1, (size_t)received, stdout);
             continue;
         }
         if (received == 0) {
-            result = 0;
+            break;
         }
-        break;
+        print_error("recv", conn);
+        goto done;
     }
 
+    result = 0;
+
 done:
-    if (result != 0 && client != NULL) {
-        char message[NETINS_UDP_ERROR_MSG_LEN] = {0};
-        if (request != NULL) {
-            netins_udp_h3_request_get_last_error_msg(request,
-                message, sizeof(message));
-        } else {
-            netins_udp_get_last_error_msg(client, message,
-                sizeof(message));
+    if (conn != NULL) {
+        if (netins_udp_get_state(conn) == NETINS_UDP_STATE_CONNECTED) {
+            (void)netins_udp_shutdown(conn, 0);
         }
-        fprintf(stderr, "NetIns UDP error: %s\n", message);
+        netins_udp_close(conn);
     }
-    netins_udp_h3_request_close(request);
-    netins_udp_close(client);
-    netins_udp_cleanup();
+    (void)netins_udp_cleanup();
     return result;
 }
 ```
 
-## 服务端示例
+---
 
-以下示例监听连接并返回一个简单响应：
+## 12. 完整服务端示例
 
 ```c
 #include <stdio.h>
 #include <string.h>
+
 #include <xquic/netins_udp.h>
 
 int
-serve_once(int port, const char *certificate, const char *private_key)
+main(void)
 {
-    int result = -1;
+    int result = 1;
     netins_udp_t *listener = NULL;
     netins_udp_t *connection = NULL;
-    netins_udp_h3_request_t *request = NULL;
 
     if (netins_udp_init() != NETINS_UDP_OK) {
-        return -1;
+        return 1;
     }
 
     listener = netins_udp_new(NETINS_UDP_TYPE_MPQUIC);
@@ -846,17 +918,19 @@ serve_once(int port, const char *certificate, const char *private_key)
         goto done;
     }
 
-    netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
+    netins_udp_tls_config_t tls =
+        NETINS_UDP_TLS_CONFIG_INITIALIZER;
     snprintf(tls.certificate_file, sizeof(tls.certificate_file),
-        "%s", certificate);
+        "%s", "/opt/netins/certs/server.crt");
     snprintf(tls.private_key_file, sizeof(tls.private_key_file),
-        "%s", private_key);
+        "%s", "/opt/netins/certs/server.key");
     if (netins_udp_set_opt(listener, NETINS_UDP_OPT_TLS,
-            &tls, sizeof(tls)) != NETINS_UDP_OK) {
+            &tls, sizeof(tls)) != NETINS_UDP_OK)
+    {
         goto done;
     }
 
-    if (netins_udp_listen(listener, NULL, port) == NULL) {
+    if (netins_udp_listen(listener, NULL, 8443) == NULL) {
         goto done;
     }
 
@@ -865,128 +939,112 @@ serve_once(int port, const char *certificate, const char *private_key)
         goto done;
     }
 
-    if (netins_udp_h3_request_accept(connection, &request)
-        != NETINS_UDP_OK) {
-        goto done;
-    }
-
-    unsigned char buffer[4096];
+    unsigned char buffer[64 * 1024];
     for (;;) {
-        ssize_t received = netins_udp_h3_request_recv(request,
-            buffer, sizeof(buffer), NETINS_UDP_MSG_NONE);
+        ssize_t received = netins_udp_recv(connection, buffer,
+            sizeof(buffer), NETINS_UDP_MSG_NONE);
         if (received > 0) {
-            /* 处理请求体。 */
+            printf("received %zd bytes\n", received);
             continue;
         }
-        if (received < 0) {
-            goto done;
+        if (received == 0) {
+            break;
         }
-        break;
-    }
-
-    static const char body[] = "OK";
-    netins_udp_h3_response_config_t response;
-    netins_udp_h3_response_config_init(&response);
-    response.status = 200;
-    response.content_length = sizeof(body) - 1;
-    snprintf(response.content_type, sizeof(response.content_type),
-        "text/plain");
-
-    if (netins_udp_h3_request_set_response(request, &response)
-        != NETINS_UDP_OK) {
         goto done;
     }
-    size_t sent_total = 0;
-    while (sent_total < sizeof(body) - 1) {
-        ssize_t sent = netins_udp_h3_request_send(request,
-            body + sent_total, sizeof(body) - 1 - sent_total,
+
+    const char response[] = "server received data\n";
+    size_t offset = 0;
+    while (offset < sizeof(response) - 1) {
+        ssize_t sent = netins_udp_send(connection,
+            response + offset, sizeof(response) - 1 - offset,
             NETINS_UDP_MSG_FIN);
-        if (sent <= 0) {
+        if (sent < 0) {
             goto done;
         }
-        sent_total += (size_t)sent;
+        if (sent == 0) {
+            goto done;
+        }
+        offset += (size_t)sent;
     }
 
+    (void)netins_udp_shutdown(connection, 0);
     result = 0;
 
 done:
-    netins_udp_h3_request_close(request);
     if (connection != NULL) {
-        netins_udp_shutdown(connection, 0);
+        netins_udp_close(connection);
     }
-    netins_udp_close(connection);
-    netins_udp_close(listener);
-    netins_udp_cleanup();
+    if (listener != NULL) {
+        netins_udp_close(listener);
+    }
+    (void)netins_udp_cleanup();
     return result;
 }
 ```
 
-## 使用注意事项
+实际服务端通常会循环调用 `accept()`，并为每个 accepted connection 创建独立
+工作线程或任务。
 
-### 1. 资源管理
+---
 
-- 每次成功的 `netins_udp_init()` 都必须对应一次 cleanup。
-- 每个 connection、listener 和 accepted connection 都必须单独 close。
-- 每个 HTTP/3 request 都必须单独 close。
-- close 返回后对象指针失效。
+## 13. 编译和链接
 
-推荐关闭顺序：
+动态库链接示例：
 
-1. 停止发起新的业务操作。
-2. 关闭全部 request。
-3. 对连接调用 `netins_udp_shutdown()`。
-4. 关闭 accepted connection 或 client。
-5. 关闭 listener。
-6. 调用 `netins_udp_cleanup()`。
+```sh
+cc app.c -I/opt/netins-udp/include \
+  -L/opt/netins-udp/lib \
+  -lxquic -lssl -lcrypto -lpthread -ldl -lm \
+  -o app
+```
 
-### 2. 线程安全
+静态库链接示例：
 
-公共连接状态、选项、统计和生命周期函数带有同步保护。不同对象可以在不同线程
-使用。
+```sh
+cc app.c -I/opt/netins-udp/include \
+  /opt/netins-udp/lib/libxquic.a \
+  -lssl -lcrypto -lpthread -ldl -lm \
+  -o app
+```
 
-同一对象开始 close 后，应用程序不得再从其他线程提交新调用。回调函数不得
-使用同一句柄重入 API。
+运行时需要保证头文件与库文件来自同一交付版本。
 
-### 3. 阻塞与非阻塞
+---
 
-connect、accept、request accept、send 和 recv 默认阻塞。可通过
-`NETINS_UDP_OPT_NONBLOCK` 或单次调用的 `NETINS_UDP_MSG_DONTWAIT` 使用非阻塞
-方式。
+## 14. 使用注意事项
 
-使用 poll/epoll 时，收到通知后必须继续处理到 `EAGAIN`，否则可能持续收到可读
-通知。
+### 资源管理
 
-### 4. 数据发送
+- 每次成功的 `netins_udp_init()` 都应对应一次 `netins_udp_cleanup()`；
+- 每个 `netins_udp_new()` 创建的对象都必须关闭；
+- 每个 `netins_udp_accept()` 返回的连接都必须单独关闭；
+- `netins_udp_close()` 返回后不得再次使用该指针。
 
-send 可能部分成功，必须检查返回值并发送剩余数据。固定长度 body 的发送总量
-必须与声明的 `content_length` 一致。
+### 多路径判断
 
-### 5. 多路径
+- 创建 `NETINS_UDP_TYPE_MPQUIC` 对象只表示请求使用多路径；
+- 必须在连接建立后查询 `netins_udp_is_multipath()`；
+- 路径数量和活动路径数量应通过 `netins_udp_get_path_count()` 或
+  `netins_udp_get_info()` 查询；
+- 单条链路故障时，连接可能保持有效，但实际吞吐会随剩余路径能力变化。
 
-请求 MPQUIC 不代表始终存在两条活动路径。连接建立后应读取：
+### 数据收发
 
-- `multipath_active`
-- `path_count`
-- `active_path_count`
-- `validating_path_count`
-- 每条路径的 `path_state` 和 `app_status`
+- `send()` 可能部分完成，必须循环处理；
+- `recv()` 返回 0 表示对端正常结束发送，不是错误；
+- `NETINS_UDP_MSG_FIN` 用于结束本端发送方向；
+- 不要依赖一次 `send()` 对应一次 `recv()`；
+- 普通连续数据和文件内容均使用固定大小缓冲区循环调用 `send/recv`。
 
-路径状态可能在连接生命周期中变化。需要持续监控时，应结合
-`NETINS_UDP_EVENT_PATH_CHANGED` 和 `netins_udp_get_snapshot()`。
+### 阻塞行为
 
-### 6. 网络和证书
+- 默认情况下 `connect()`、`accept()`、`send()` 和 `recv()` 为阻塞调用；
+- 非阻塞模式下暂时无法完成时返回 -1，并设置 `EAGAIN` 或 `EINPROGRESS`；
+- 超时和非阻塞选项建议在首次收发之前配置完成。
 
-接口绑定依赖 Linux 路由、接口状态和 `SO_BINDTODEVICE` 权限。证书文件、
-私钥文件和信任链必须在运行环境中可访问。
+### 线程使用
 
-不支持的 TLS、调度器或拥塞控制配置会返回 `NETINS_UDP_ERROR`，并设置
-`errno=EOPNOTSUPP`。
-
-### 7. 功能限制
-
-- 应用数据面为 HTTP/3 request/response。
-- 客户端请求方法支持 GET 和 POST。
-- 不提供 connection-level TCP 风格字节流接口。
-- 客户端支持系统默认信任链和服务端证书校验。
-- 服务端必须配置证书和私钥。
-- 支持 Linux x86_64 和 AArch64；应使用与目标平台一致的库和依赖项。
+- 不同连接对象可以由不同线程使用；
+- 同一连接允许一个发送线程与一个接收线程并行；
+- 开始 `close()` 后不得再提交新的调用。

@@ -59,6 +59,7 @@ struct netins_udp_h3_request_s {
     int last_error_code;
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
     netins_udp_v2_notifier_t notifier;
+    netins_udp_v2_notifier_t *parent_notifier;
 };
 
 static void
@@ -67,7 +68,44 @@ netins_udp_v2_h3_notify_handle(void *user_data, uint32_t events)
     netins_udp_h3_request_t *request = user_data;
     if (request != NULL) {
         netins_udp_v2_notifier_signal(&request->notifier, events);
+        pthread_mutex_lock(&request->lock);
+        /*
+         * Signal while the request lock pins the parent pointer. The hidden
+         * request is closed before its parent notifier is destroyed, and
+         * close clears this pointer under the same lock.
+         */
+        uint32_t parent_events = events
+            & (NETINS_UDP_EVENT_READABLE | NETINS_UDP_EVENT_WRITABLE);
+        if ((events & (NETINS_UDP_EVENT_CLOSED
+                | NETINS_UDP_EVENT_ERROR)) != 0)
+        {
+            /*
+             * Request EOF/error belongs to the hidden data channel, not to
+             * the QUIC connection. Wake simple send/recv users, but reserve
+             * connection CLOSED/ERROR for actual transport transitions.
+             */
+            parent_events |= NETINS_UDP_EVENT_READABLE
+                | NETINS_UDP_EVENT_WRITABLE;
+        }
+        netins_udp_v2_notifier_signal(request->parent_notifier,
+            parent_events);
+        pthread_mutex_unlock(&request->lock);
     }
+}
+
+void
+netins_udp_v2_h3_request_set_parent_notifier(
+    netins_udp_h3_request_t *request,
+    netins_udp_v2_notifier_t *parent_notifier)
+{
+    if (request == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&request->lock);
+    if (!request->closing) {
+        request->parent_notifier = parent_notifier;
+    }
+    pthread_mutex_unlock(&request->lock);
 }
 
 static void
@@ -545,10 +583,10 @@ netins_udp_h3_response_config_add_header(
         name, value);
 }
 
-int
-netins_udp_h3_request_open(netins_udp_t *netins,
+static int
+netins_udp_v2_h3_request_open_impl(netins_udp_t *netins,
     const netins_udp_h3_request_config_t *config,
-    netins_udp_h3_request_t **out_request)
+    netins_udp_h3_request_t **out_request, int select_public_mode)
 {
     if (out_request == NULL) {
         errno = EINVAL;
@@ -568,6 +606,12 @@ netins_udp_h3_request_open(netins_udp_t *netins,
         netins_udp_v2_h3_request_config_error(config, &message);
     if (error_code != 0) {
         netins_udp_v2_connection_set_error(netins, error_code, message);
+        netins_udp_v2_connection_release(netins);
+        return NETINS_UDP_ERROR;
+    }
+    if (select_public_mode
+        && netins_udp_v2_connection_select_h3(netins) != NETINS_UDP_OK)
+    {
         netins_udp_v2_connection_release(netins);
         return NETINS_UDP_ERROR;
     }
@@ -629,8 +673,27 @@ netins_udp_h3_request_open(netins_udp_t *netins,
 }
 
 int
-netins_udp_h3_request_accept(netins_udp_t *netins,
+netins_udp_h3_request_open(netins_udp_t *netins,
+    const netins_udp_h3_request_config_t *config,
     netins_udp_h3_request_t **out_request)
+{
+    return netins_udp_v2_h3_request_open_impl(netins, config,
+        out_request, 1);
+}
+
+int
+netins_udp_v2_h3_request_open_internal(netins_udp_t *netins,
+    const netins_udp_h3_request_config_t *config,
+    netins_udp_h3_request_t **out_request)
+{
+    return netins_udp_v2_h3_request_open_impl(netins, config,
+        out_request, 0);
+}
+
+static int
+netins_udp_v2_h3_request_accept_impl(netins_udp_t *netins,
+    netins_udp_h3_request_t **out_request, int select_public_mode,
+    int force_dontwait)
 {
     if (out_request == NULL) {
         errno = EINVAL;
@@ -644,8 +707,14 @@ netins_udp_h3_request_accept(netins_udp_t *netins,
     {
         return NETINS_UDP_ERROR;
     }
+    if (select_public_mode
+        && netins_udp_v2_connection_select_h3(netins) != NETINS_UDP_OK)
+    {
+        netins_udp_v2_connection_release(netins);
+        return NETINS_UDP_ERROR;
+    }
 
-    int dontwait = parent.nonblock;
+    int dontwait = parent.nonblock || force_dontwait;
     int wait_forever = !dontwait && parent.recv_timeout_ms == 0;
     uint32_t timeout_ms = dontwait ? 0 : parent.recv_timeout_ms;
     netins_udp_v2_transport_server_request_t *server_transport = NULL;
@@ -720,6 +789,30 @@ netins_udp_h3_request_accept(netins_udp_t *netins,
     *out_request = request;
     netins_udp_v2_connection_release(netins);
     return NETINS_UDP_OK;
+}
+
+int
+netins_udp_h3_request_accept(netins_udp_t *netins,
+    netins_udp_h3_request_t **out_request)
+{
+    return netins_udp_v2_h3_request_accept_impl(netins, out_request,
+        1, 0);
+}
+
+int
+netins_udp_v2_h3_request_accept_internal(netins_udp_t *netins,
+    netins_udp_h3_request_t **out_request)
+{
+    return netins_udp_v2_h3_request_accept_impl(netins, out_request,
+        0, 0);
+}
+
+int
+netins_udp_v2_h3_request_accept_internal_dontwait(
+    netins_udp_t *netins, netins_udp_h3_request_t **out_request)
+{
+    return netins_udp_v2_h3_request_accept_impl(netins, out_request,
+        0, 1);
 }
 
 int
@@ -954,6 +1047,41 @@ netins_udp_h3_request_send(netins_udp_h3_request_t *request,
     pthread_mutex_unlock(&request->send_lock);
     netins_udp_v2_h3_end_call(request);
     return (ssize_t)sent;
+}
+
+int
+netins_udp_v2_h3_request_finish_send(
+    netins_udp_h3_request_t *request)
+{
+    if (request == NULL) {
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+    pthread_mutex_lock(&request->send_lock);
+    int already_finished = request->send_fin_accepted;
+    pthread_mutex_unlock(&request->send_lock);
+    if (already_finished) {
+        return NETINS_UDP_OK;
+    }
+    if (netins_udp_h3_request_send(request, NULL, 0,
+            NETINS_UDP_MSG_FIN) == 0)
+    {
+        return NETINS_UDP_OK;
+    }
+
+    int saved_error = errno;
+    pthread_mutex_lock(&request->send_lock);
+    already_finished = request->send_fin_accepted;
+    pthread_mutex_unlock(&request->send_lock);
+    if (already_finished) {
+        pthread_mutex_lock(&request->lock);
+        netins_udp_v2_h3_set_error_locked(request, 0, NULL);
+        pthread_mutex_unlock(&request->lock);
+        errno = 0;
+        return NETINS_UDP_OK;
+    }
+    errno = saved_error != 0 ? saved_error : EIO;
+    return NETINS_UDP_ERROR;
 }
 
 ssize_t
@@ -1242,6 +1370,7 @@ netins_udp_h3_request_close(netins_udp_h3_request_t *request)
 
     pthread_mutex_lock(&request->lock);
     request->closing = 1;
+    request->parent_notifier = NULL;
     netins_udp_v2_transport_request_t *transport = request->transport;
     netins_udp_v2_transport_server_request_t *server_transport =
         request->server_transport;

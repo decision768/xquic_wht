@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "netins_udp_data_backend.h"
 #include "netins_udp_v2_internal.h"
 #include "netins_udp_v2_notifier.h"
 #include "netins_udp_v2_transport.h"
@@ -56,6 +57,8 @@ _Static_assert(NETINS_UDP_EVENT_CONNECTED
 
 struct netins_udp_s {
     pthread_mutex_t lock;
+    pthread_mutex_t data_lock;
+    pthread_cond_t data_cond;
     pthread_cond_t idle_cond;
     size_t active_calls;
     size_t active_logs;
@@ -88,6 +91,10 @@ struct netins_udp_s {
     netins_udp_v2_transport_client_t *client_transport;
     netins_udp_v2_transport_server_t *listener_transport;
     netins_udp_v2_transport_server_connection_t *accepted_transport;
+    netins_udp_data_backend_t *data_backend;
+    int data_backend_creating;
+    int data_api_selected;
+    int h3_api_selected;
     int last_error_code;
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
     netins_udp_close_reason_t close_reason;
@@ -97,6 +104,10 @@ struct netins_udp_s {
 static pthread_mutex_t g_netins_udp_v2_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_netins_udp_v2_init_refs;
 static uint32_t g_netins_udp_v2_handle_count;
+
+static void netins_udp_v2_sync_data_backend_error(netins_udp_t *netins,
+    netins_udp_data_backend_t *backend, int fallback_error,
+    const char *fallback_message);
 
 static void
 netins_udp_v2_log(netins_udp_t *netins, int level, uint32_t once,
@@ -580,8 +591,27 @@ netins_udp_new(int type)
         errno = init_error;
         return NULL;
     }
+    init_error = pthread_mutex_init(&netins->data_lock, NULL);
+    if (init_error != 0) {
+        pthread_mutex_destroy(&netins->lock);
+        free(netins);
+        pthread_mutex_unlock(&g_netins_udp_v2_lock);
+        errno = init_error;
+        return NULL;
+    }
     init_error = pthread_cond_init(&netins->idle_cond, NULL);
     if (init_error != 0) {
+        pthread_mutex_destroy(&netins->data_lock);
+        pthread_mutex_destroy(&netins->lock);
+        free(netins);
+        pthread_mutex_unlock(&g_netins_udp_v2_lock);
+        errno = init_error;
+        return NULL;
+    }
+    init_error = pthread_cond_init(&netins->data_cond, NULL);
+    if (init_error != 0) {
+        pthread_cond_destroy(&netins->idle_cond);
+        pthread_mutex_destroy(&netins->data_lock);
         pthread_mutex_destroy(&netins->lock);
         free(netins);
         pthread_mutex_unlock(&g_netins_udp_v2_lock);
@@ -590,7 +620,9 @@ netins_udp_new(int type)
     }
     if (netins_udp_v2_notifier_init(&netins->notifier) != 0) {
         int error_code = errno != 0 ? errno : EIO;
+        pthread_cond_destroy(&netins->data_cond);
         pthread_cond_destroy(&netins->idle_cond);
+        pthread_mutex_destroy(&netins->data_lock);
         pthread_mutex_destroy(&netins->lock);
         free(netins);
         pthread_mutex_unlock(&g_netins_udp_v2_lock);
@@ -848,7 +880,7 @@ netins_udp_set_opt(netins_udp_t *netins, int option,
         if (!netins_udp_v2_scalar_copy(value, value_len, &scheduler,
                 sizeof(scheduler))
             || scheduler < NETINS_UDP_SCHEDULER_DEFAULT
-            || scheduler > NETINS_UDP_SCHEDULER_ADAPTIVE)
+            || scheduler > NETINS_UDP_SCHEDULER_FASTONLY)
         {
             result = netins_udp_v2_set_option_error_locked(netins, EINVAL,
                 "unknown scheduler");
@@ -1072,12 +1104,11 @@ netins_udp_v2_prepare_transport_config(netins_udp_t *netins,
     }
     if (netins->tls.require_client_certificate
         || netins->tls.certificate_file[0] != '\0'
-        || netins->tls.private_key_file[0] != '\0'
-        || netins->tls.ca_file[0] != '\0')
+        || netins->tls.private_key_file[0] != '\0')
     {
         pthread_mutex_unlock(&netins->lock);
         return netins_udp_v2_fail(netins, EOPNOTSUPP,
-            "custom client certificates and CA files are not supported by the current backend");
+            "custom client certificates are not supported by the current backend");
     }
 
     memset(config, 0, sizeof(*config));
@@ -1087,6 +1118,8 @@ netins_udp_v2_prepare_transport_config(netins_udp_t *netins,
         ? netins->tls.server_name : host;
     snprintf(config->server_name, sizeof(config->server_name), "%s",
         server_name);
+    snprintf(config->ca_file, sizeof(config->ca_file), "%s",
+        netins->tls.ca_file);
     config->interface_count = netins->interfaces.interface_count;
     for (uint32_t i = 0; i < config->interface_count; ++i) {
         snprintf(config->interface_names[i],
@@ -1630,12 +1663,73 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
         netins_udp_v2_end_call(netins);
         return NETINS_UDP_ERROR;
     }
-    if (client_transport != NULL) {
-        netins_udp_v2_transport_client_request_shutdown(client_transport,
-            application_error);
-    } else {
-        netins_udp_v2_transport_server_connection_request_shutdown(
-            accepted_transport, application_error);
+
+    int transport_shutdown_requested = 0;
+    if (application_error == 0) {
+        /*
+         * A peer-side first recv can be blocked inside lazy request accept.
+         * Once the public state is CLOSING no new creator can start. If one
+         * was already active, request transport shutdown before waiting so
+         * that accept/open is canceled instead of deadlocking shutdown.
+        */
+        pthread_mutex_lock(&netins->data_lock);
+        int creation_in_progress = netins->data_backend_creating;
+        pthread_mutex_unlock(&netins->data_lock);
+        if (creation_in_progress) {
+            if (client_transport != NULL) {
+                netins_udp_v2_transport_client_request_shutdown(
+                    client_transport, 0);
+            } else {
+                netins_udp_v2_transport_server_connection_request_shutdown(
+                    accepted_transport, 0);
+            }
+            transport_shutdown_requested = 1;
+        }
+
+        pthread_mutex_lock(&netins->data_lock);
+        while (netins->data_backend_creating) {
+            int wait_result = pthread_cond_wait(&netins->data_cond,
+                &netins->data_lock);
+            if (wait_result != 0) {
+                error_code = wait_result;
+                break;
+            }
+        }
+        netins_udp_data_backend_t *data_backend =
+            netins->data_backend;
+        pthread_mutex_unlock(&netins->data_lock);
+
+        if (error_code == 0 && data_backend != NULL
+            && netins_udp_data_backend_finish_send(data_backend)
+                != NETINS_UDP_OK)
+        {
+            error_code = errno != 0 ? errno : EIO;
+            netins_udp_v2_sync_data_backend_error(netins, data_backend,
+                error_code,
+                "failed to finish queued connection data before shutdown");
+        }
+        if (error_code != 0) {
+            pthread_mutex_lock(&netins->lock);
+            netins->state = NETINS_UDP_STATE_ERROR;
+            netins_udp_v2_set_error_locked(netins, error_code,
+                "graceful shutdown could not finish queued application data");
+            pthread_mutex_unlock(&netins->lock);
+            netins_udp_v2_notifier_signal(&netins->notifier,
+                NETINS_UDP_EVENT_ERROR);
+            errno = error_code;
+            netins_udp_v2_end_call(netins);
+            return NETINS_UDP_ERROR;
+        }
+    }
+
+    if (!transport_shutdown_requested || application_error != 0) {
+        if (client_transport != NULL) {
+            netins_udp_v2_transport_client_request_shutdown(client_transport,
+                application_error);
+        } else {
+            netins_udp_v2_transport_server_connection_request_shutdown(
+                accepted_transport, application_error);
+        }
     }
     netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
         NETINS_UDP_V2_LOGGED_SHUTDOWN,
@@ -1783,6 +1877,235 @@ netins_udp_get_state(netins_udp_t *netins)
     return state;
 }
 
+static void
+netins_udp_v2_sync_data_backend_error(netins_udp_t *netins,
+    netins_udp_data_backend_t *backend, int fallback_error,
+    const char *fallback_message)
+{
+    int saved_errno = errno;
+    int error_code = 0;
+    char message[NETINS_UDP_ERROR_MSG_LEN] = {0};
+    if (backend != NULL) {
+        (void)netins_udp_data_backend_get_error(backend, &error_code,
+            message, sizeof(message));
+    }
+    if (error_code == 0) {
+        error_code = saved_errno != 0 ? saved_errno : fallback_error;
+    }
+    netins_udp_v2_connection_set_error(netins, error_code,
+        message[0] != '\0' ? message : fallback_message);
+    errno = error_code;
+}
+
+static int
+netins_udp_v2_default_data_backend_get(netins_udp_t *netins,
+    int flags, netins_udp_data_backend_t **out_backend)
+{
+    if (out_backend == NULL) {
+        return netins_udp_v2_fail(netins, EINVAL,
+            "default data backend output must not be NULL");
+    }
+    *out_backend = NULL;
+
+    (void)netins_udp_v2_refresh_state(netins);
+    pthread_mutex_lock(&netins->lock);
+    int role = netins->role;
+    int state = netins->state;
+    int app_protocol = netins->app_protocol;
+    int nonblock = netins->nonblock;
+    int call_dontwait = nonblock
+        || (flags & NETINS_UDP_MSG_DONTWAIT) != 0;
+    uint32_t send_timeout_ms = netins->send_timeout_ms;
+    uint32_t recv_timeout_ms = netins->recv_timeout_ms;
+    uint32_t close_timeout_ms = netins->close_timeout_ms;
+    int error_code = 0;
+    const char *message = NULL;
+    if (role == NETINS_UDP_ROLE_LISTENER) {
+        error_code = EOPNOTSUPP;
+        message = "connection data send/recv is not valid on a listener";
+    } else if (role != NETINS_UDP_ROLE_CLIENT
+        && role != NETINS_UDP_ROLE_ACCEPTED)
+    {
+        error_code = ENOTCONN;
+        message = "handle does not represent a connected endpoint";
+    } else if (state != NETINS_UDP_STATE_CONNECTED) {
+        error_code = ENOTCONN;
+        message = "connection data send/recv requires a connected handle";
+    } else if (app_protocol != NETINS_UDP_APP_HTTP3) {
+        error_code = EOPNOTSUPP;
+        message = "connection data send/recv requires HTTP/3";
+    }
+    if (error_code != 0) {
+        netins_udp_v2_set_error_locked(netins, error_code, message);
+    }
+    pthread_mutex_unlock(&netins->lock);
+    if (error_code != 0) {
+        errno = error_code;
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->data_lock);
+    if (netins->h3_api_selected) {
+        pthread_mutex_unlock(&netins->data_lock);
+        return netins_udp_v2_fail(netins, EBUSY,
+            "connection already uses another application data API");
+    }
+    netins->data_api_selected = 1;
+    while (netins->data_backend_creating)
+    {
+        if (call_dontwait) {
+            pthread_mutex_unlock(&netins->data_lock);
+            return netins_udp_v2_fail(netins, EAGAIN,
+                "parallel data channel creation is already in progress");
+        }
+        int wait_result = pthread_cond_wait(&netins->data_cond,
+            &netins->data_lock);
+        if (wait_result != 0) {
+            pthread_mutex_unlock(&netins->data_lock);
+            return netins_udp_v2_fail(netins, wait_result,
+                "failed waiting for default data channel creation");
+        }
+    }
+    netins_udp_data_backend_t *backend = netins->data_backend;
+    netins->data_backend_creating = 1;
+    pthread_mutex_unlock(&netins->data_lock);
+
+    int result = NETINS_UDP_OK;
+    int backend_created = 0;
+    if (backend == NULL) {
+        netins_udp_data_backend_config_t config;
+        memset(&config, 0, sizeof(config));
+        config.connection = netins;
+        config.parent_notifier = &netins->notifier;
+        config.role = role;
+        config.nonblock = nonblock;
+        config.send_timeout_ms = send_timeout_ms;
+        config.recv_timeout_ms = recv_timeout_ms;
+        config.close_timeout_ms = close_timeout_ms;
+        result = netins_udp_data_backend_create(&config, &backend);
+        backend_created = result == NETINS_UDP_OK;
+    }
+    if (result == NETINS_UDP_OK) {
+        result = netins_udp_data_backend_establish(backend,
+            call_dontwait);
+    }
+
+    int saved_error = errno != 0 ? errno : EIO;
+    if (result != NETINS_UDP_OK
+        && saved_error != EAGAIN && saved_error != ETIMEDOUT)
+    {
+        netins_udp_v2_sync_data_backend_error(netins, backend,
+            saved_error, "failed to establish parallel data channels");
+    }
+
+    pthread_mutex_lock(&netins->data_lock);
+    if (backend_created && netins->data_backend == NULL
+        && (result == NETINS_UDP_OK || saved_error == EAGAIN
+            || saved_error == ETIMEDOUT))
+    {
+        netins->data_backend = backend;
+    }
+    netins->data_backend_creating = 0;
+    pthread_cond_broadcast(&netins->data_cond);
+    pthread_mutex_unlock(&netins->data_lock);
+
+    if (result != NETINS_UDP_OK) {
+        /*
+         * EAGAIN/ETIMEDOUT can occur after only some server-side lanes were
+         * accepted. Keep that private backend so the next call resumes
+         * establishment without losing already accepted requests.
+         */
+        if (backend_created && saved_error != EAGAIN
+            && saved_error != ETIMEDOUT)
+        {
+            netins_udp_data_backend_destroy(backend);
+        }
+        errno = saved_error;
+        return NETINS_UDP_ERROR;
+    }
+
+    pthread_mutex_lock(&netins->data_lock);
+    if (netins->data_backend == NULL) {
+        netins->data_backend = backend;
+    }
+    *out_backend = netins->data_backend;
+    pthread_mutex_unlock(&netins->data_lock);
+    netins_udp_v2_connection_set_error(netins, 0, NULL);
+    return NETINS_UDP_OK;
+}
+
+ssize_t
+netins_udp_send(netins_udp_t *netins, const void *data,
+    size_t length, int flags)
+{
+    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
+        return -1;
+    }
+    if ((flags & ~(NETINS_UDP_MSG_DONTWAIT
+            | NETINS_UDP_MSG_FIN)) != 0
+        || (length != 0 && data == NULL))
+    {
+        (void)netins_udp_v2_fail(netins, EINVAL,
+            "invalid connection data send arguments");
+        netins_udp_v2_end_call(netins);
+        return -1;
+    }
+    netins_udp_data_backend_t *backend = NULL;
+    if (netins_udp_v2_default_data_backend_get(netins, flags, &backend)
+        != NETINS_UDP_OK)
+    {
+        netins_udp_v2_end_call(netins);
+        return -1;
+    }
+
+    ssize_t sent = netins_udp_data_backend_send(backend, data, length,
+        flags);
+    if (sent < 0) {
+        netins_udp_v2_sync_data_backend_error(netins, backend,
+            EIO, "connection data send failed");
+    } else {
+        netins_udp_v2_connection_set_error(netins, 0, NULL);
+    }
+    netins_udp_v2_end_call(netins);
+    return sent;
+}
+
+ssize_t
+netins_udp_recv(netins_udp_t *netins, void *data,
+    size_t length, int flags)
+{
+    if (netins_udp_v2_begin_call(netins) != NETINS_UDP_OK) {
+        return -1;
+    }
+    if ((flags & ~(NETINS_UDP_MSG_DONTWAIT
+            | NETINS_UDP_MSG_PEEK)) != 0
+        || (length != 0 && data == NULL))
+    {
+        (void)netins_udp_v2_fail(netins, EINVAL,
+            "invalid connection data receive arguments");
+        netins_udp_v2_end_call(netins);
+        return -1;
+    }
+    netins_udp_data_backend_t *backend = NULL;
+    if (netins_udp_v2_default_data_backend_get(netins, flags, &backend)
+        != NETINS_UDP_OK)
+    {
+        netins_udp_v2_end_call(netins);
+        return -1;
+    }
+
+    ssize_t received = netins_udp_data_backend_recv(backend, data,
+        length, flags);
+    if (received < 0) {
+        netins_udp_v2_sync_data_backend_error(netins, backend,
+            EIO, "connection data receive failed");
+    } else {
+        netins_udp_v2_connection_set_error(netins, 0, NULL);
+    }
+    netins_udp_v2_end_call(netins);
+    return received;
+}
+
 static int
 netins_udp_v2_validate_output(netins_udp_t *netins,
     uint32_t struct_size, uint32_t api_version, size_t required_size,
@@ -1916,6 +2239,26 @@ netins_udp_v2_build_snapshot(netins_udp_t *netins,
         out->statis.acked_mbps = transport.acked_mbps;
         out->statis.loss_rate = transport.loss_rate;
     }
+
+    /*
+     * In connection-level byte mode, expose exactly the bytes accepted by
+     * send() and consumed by recv(). Transport and per-path counters remain
+     * wire/QUIC observations, including the private aggregation channels.
+     */
+    pthread_mutex_lock(&netins->data_lock);
+    netins_udp_data_backend_t *data_backend = netins->data_backend;
+    if (data_backend != NULL) {
+        uint64_t application_bytes_sent = 0;
+        uint64_t application_bytes_received = 0;
+        if (netins_udp_data_backend_get_counters(data_backend,
+                &application_bytes_sent,
+                &application_bytes_received) == NETINS_UDP_OK)
+        {
+            out->statis.bytes_sent = application_bytes_sent;
+            out->statis.bytes_received = application_bytes_received;
+        }
+    }
+    pthread_mutex_unlock(&netins->data_lock);
 
     out->path_count = out->info.path_count;
     for (uint32_t i = 0; i < out->path_count
@@ -2173,6 +2516,7 @@ netins_udp_get_events(netins_udp_t *netins, uint32_t *out_events)
     (void)netins_udp_v2_refresh_state(netins);
     pthread_mutex_lock(&netins->lock);
     int role = netins->role;
+    int state = netins->state;
     netins_udp_v2_transport_client_t *client_transport =
         netins->client_transport;
     netins_udp_v2_transport_server_t *listener_transport =
@@ -2199,6 +2543,69 @@ netins_udp_get_events(netins_udp_t *netins, uint32_t *out_events)
         transport_result =
             netins_udp_v2_transport_server_connection_get_events(
                 accepted_transport, &level_events);
+    }
+    if (transport_result == 0) {
+        /*
+         * Default-channel creation never holds data_lock while it performs a
+         * potentially blocking transport operation. A normal lock therefore
+         * gives get_events() a complete level snapshot without consuming a
+         * notification on a failed trylock.
+         */
+        pthread_mutex_lock(&netins->data_lock);
+        netins_udp_data_backend_t *data_backend =
+            netins->data_backend;
+        if (data_backend != NULL) {
+            uint32_t data_events = 0;
+            if (netins_udp_data_backend_get_events(data_backend,
+                    &data_events) != NETINS_UDP_OK)
+            {
+                netins_udp_v2_sync_data_backend_error(netins,
+                    data_backend, EIO,
+                    "connection data channels failed");
+                /*
+                 * A private data-channel failure does not redefine the QUIC
+                 * connection state. Wake both byte-stream directions so the
+                 * next send/recv reports the stored backend error.
+                 */
+                level_events |= NETINS_UDP_EVENT_READABLE
+                    | NETINS_UDP_EVENT_WRITABLE;
+            } else {
+                level_events |= data_events;
+            }
+            if (role == NETINS_UDP_ROLE_ACCEPTED
+                && (level_events
+                    & NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE) != 0)
+            {
+                /*
+                 * A nonblocking server may have accepted only part of the
+                 * private lane set. The next lane is progress for either
+                 * public byte-stream direction.
+                 */
+                level_events |= NETINS_UDP_EVENT_READABLE
+                    | NETINS_UDP_EVENT_WRITABLE;
+            }
+        } else if (role == NETINS_UDP_ROLE_CLIENT
+            && state == NETINS_UDP_STATE_CONNECTED)
+        {
+            /*
+             * The client can create its lazy default data channel on the
+             * first send/recv call, so it is connection-level writable.
+             */
+            level_events |= NETINS_UDP_EVENT_WRITABLE;
+
+        } else if (role == NETINS_UDP_ROLE_ACCEPTED
+            && (level_events
+                & NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE) != 0)
+        {
+            /*
+             * A peer data request is ready to be bound. Wake simple API
+             * users for either direction without hiding the advanced H3
+             * accept event from applications that explicitly use it.
+             */
+            level_events |= NETINS_UDP_EVENT_READABLE
+                | NETINS_UDP_EVENT_WRITABLE;
+        }
+        pthread_mutex_unlock(&netins->data_lock);
     }
     int result = NETINS_UDP_OK;
     if (transport_result != 0) {
@@ -2259,6 +2666,35 @@ netins_udp_get_last_error_msg(netins_udp_t *netins,
     snprintf(buffer, buffer_len, "%s", netins->last_error_msg);
     pthread_mutex_unlock(&netins->lock);
     netins_udp_v2_end_call(netins);
+    return NETINS_UDP_OK;
+}
+
+/*
+ * Public advanced HTTP/3 requests and the connection-level byte API are two
+ * application modes. The byte backend opens its private requests through the
+ * internal entry points, so public mode selection remains simple and stable.
+ */
+int
+netins_udp_v2_connection_select_h3(netins_udp_t *netins)
+{
+    if (netins == NULL) {
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+
+    int conflict = 0;
+    pthread_mutex_lock(&netins->data_lock);
+    if (netins->data_api_selected) {
+        conflict = 1;
+    } else {
+        netins->h3_api_selected = 1;
+    }
+    pthread_mutex_unlock(&netins->data_lock);
+
+    if (conflict) {
+        return netins_udp_v2_fail(netins, EBUSY,
+            "connection already uses another application data API");
+    }
     return NETINS_UDP_OK;
 }
 
@@ -2475,6 +2911,18 @@ netins_udp_close(netins_udp_t *netins)
     netins->state = NETINS_UDP_STATE_CLOSED;
     pthread_mutex_unlock(&netins->lock);
 
+    pthread_mutex_lock(&netins->data_lock);
+    netins_udp_data_backend_t *data_backend = netins->data_backend;
+    netins->data_backend = NULL;
+    pthread_mutex_unlock(&netins->data_lock);
+
+    /*
+     * Child request handles refer to transport-owned request objects. Release
+     * every private lane while its parent transport is still alive. A prior
+     * graceful shutdown has already flushed the backend; direct close is an
+     * abort and may intentionally discard unsent application bytes.
+     */
+    netins_udp_data_backend_destroy(data_backend);
     if (client_transport != NULL) {
         netins_udp_v2_transport_client_close(client_transport);
     }
@@ -2489,7 +2937,9 @@ netins_udp_close(netins_udp_t *netins)
     netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
         NETINS_UDP_V2_LOGGED_CLOSED, "NetIns UDP handle closed");
     netins_udp_v2_notifier_destroy(&netins->notifier);
+    pthread_cond_destroy(&netins->data_cond);
     pthread_cond_destroy(&netins->idle_cond);
+    pthread_mutex_destroy(&netins->data_lock);
     pthread_mutex_destroy(&netins->lock);
     free(netins);
 

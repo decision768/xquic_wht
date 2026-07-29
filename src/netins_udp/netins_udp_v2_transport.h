@@ -116,6 +116,7 @@ typedef struct netins_udp_v2_transport_config_s {
     char host[NETINS_UDP_V2_TRANSPORT_HOST_LEN];
     uint16_t port;
     char server_name[NETINS_UDP_V2_TRANSPORT_SERVER_NAME_LEN];
+    char ca_file[NETINS_UDP_V2_TRANSPORT_FILE_PATH_LEN];
     uint32_t interface_count;
     char interface_names[NETINS_UDP_V2_TRANSPORT_MAX_PATHS]
         [NETINS_UDP_V2_TRANSPORT_INTERFACE_NAME_LEN];

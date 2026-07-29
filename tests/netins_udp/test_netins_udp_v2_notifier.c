@@ -53,12 +53,24 @@ main(void)
         | NETINS_UDP_V2_EVENT_PATH_CHANGED));
     assert(!is_readable(first_fd));
 
-    /* A live level is rearmed before get_events returns. */
+    /*
+     * WRITABLE is reported as a level, but does not continuously rearm the
+     * shared notification fd and spin receive-only event loops.
+     */
     netins_udp_v2_notifier_signal(&first, NETINS_UDP_V2_EVENT_WRITABLE);
     generation = netins_udp_v2_notifier_begin_level_query(&first);
     assert(netins_udp_v2_notifier_consume(&first, generation,
         NETINS_UDP_V2_EVENT_WRITABLE, &events) == 0);
     assert(events == NETINS_UDP_V2_EVENT_WRITABLE);
+    assert(!is_readable(first_fd));
+
+    /* A live readable condition remains armed until it is drained. */
+    netins_udp_v2_notifier_signal(&first, NETINS_UDP_V2_EVENT_READABLE);
+    generation = netins_udp_v2_notifier_begin_level_query(&first);
+    assert(netins_udp_v2_notifier_consume(&first, generation,
+        NETINS_UDP_V2_EVENT_READABLE,
+        &events) == 0);
+    assert(events == NETINS_UDP_V2_EVENT_READABLE);
     assert(is_readable(first_fd));
     generation = netins_udp_v2_notifier_begin_level_query(&first);
     assert(netins_udp_v2_notifier_consume(&first, generation, 0,

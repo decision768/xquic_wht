@@ -8,7 +8,8 @@
 include/xquic/netins_udp.h
 ```
 
-公共符号只有统一对象、HTTP/3 request、状态统计、通知和错误查询接口。
+公共符号包含统一对象、连接级 send/recv、HTTP/3 request 扩展、状态统计、
+通知和错误查询接口。
 仓库内部为复用 mini observer 和既有独立 client 而保留的兼容接口位于：
 
 ```text
@@ -30,6 +31,7 @@ src/netins_udp/netins_udp_legacy.h
 netins_udp.h
     |
     +-- 连接对象层：client / listener / accepted connection
+    +-- 连接级可靠有序数据：send / recv
     +-- HTTP/3 request 对象层
     +-- snapshot / path statistics / close reason
     +-- 独立 eventfd/pipe 通知
@@ -61,6 +63,12 @@ NetIns backend adapters
 引用，因此父连接开始关闭后仍可安全查询并 close。父连接 close 会中止并
 detach 子对象，但不会替应用释放子对象地址。
 
+连接级 `send/recv` 在每个 client 或 accepted connection 内部拥有一组隐藏的
+并行 HTTP/3 数据通道。数据由私有 backend 自动分发，并按全局字节偏移重排成
+一个连续有序字节流。这些通道由 connection 自动创建、绑定和释放，不暴露给
+调用方，也不要求调用方处理 headers。显式创建的高级 request 仍由应用独立
+释放；同一 connection 不允许混用两种数据使用方式。
+
 连接级运行时选项使用明确的快照边界：request 在 open/accept 时复制
 `NONBLOCK` 和 send/recv/close timeout，后续父对象修改不追溯到既有 request；
 accepted connection 在 accept 时继承 listener 选项，此后与 listener 独立。
@@ -90,16 +98,25 @@ listener close：
 
 ## 4. 数据面
 
-公共数据面固定为 HTTP/3 request，而不是连接级原始字节流。原因是 QUIC
-原生提供多 stream；如果把连接伪装为 TCP 字节流，会产生 stream 选择、
-消息边界、并发和关闭语义冲突。
+普通应用的数据面是可靠、有序的连接级字节数据，内部由多条持续的 HTTP/3
+request/response 通道并行承载。发送端给每个内部数据帧分配全局字节偏移，
+接收端只向应用交付连续前缀，从而在多个内部通道完成顺序不同时仍保持 socket
+式字节流语义。该接口不保留每次 send 的消息边界，也不声称兼容裸 UDP 数据报
+或 Linux socket 的全部 flags。
 
-应用线程只操作有界队列，不直接调用 XQUIC：
+client 到 server 的发送方向保持最多 4 条活动数据通道，server 到 client 的
+发送方向保持最多 8 条活动数据通道，对应既有 mini 上传、下载方向的并发能力。
+这些数量、内部帧格式、重排预算和 HTTP/3 对象均属于私有实现，不进入公共 ABI。
+文件内容与普通内存数据统一通过 `send/recv` 传输，不再交付独立的公共文件 API。
 
+应用线程通过连接级接口提交或取得数据：
+
+- connection send/recv：私有并行 request body 与 response body；
 - client request：headers、请求 body、响应 body；
 - server request：请求 accept、请求 body、response headers、响应 body；
-- 公共 POST 不继承 mini 的 `x-stream-*` 私有头；空 authority 按 HTTPS
-  authority 规则补全主机、IPv6 方括号和非默认端口；
+- 连接级数据 backend 使用自己的版本化内部帧，不把内部 headers、通道编号或
+  字节偏移暴露给应用；空 authority 按 HTTPS authority 规则补全主机、IPv6
+  方括号和非默认端口；
 - send/recv 支持部分完成、超时和非阻塞；
 - 服务端公开关闭 request 后，未读大 POST 进入丢弃式 drain；
 - client 以每 request 预留量和每连接发送/接收总预算共同限制并发队列；
@@ -110,6 +127,13 @@ listener close：
 
 connection、listener、accepted connection 和 request 各自维护独立 notifier。
 notifier 使用 eventfd/pipe，仅作为 readiness 唤醒，不承载网络数据。
+
+隐藏数据通道的 READABLE/WRITABLE 会映射到所属 connection notifier。
+隐藏通道的 CLOSED/ERROR 只转换为一次数据面唤醒，使后续 `send/recv`
+返回通道错误；它们不会伪装成 connection 的 CLOSED/ERROR。连接终止事件只由
+QUIC transport 状态产生。客户端建连后即报告连接级 WRITABLE；accepted
+connection 检测到默认数据 request 后即报告 READABLE/WRITABLE，因此不要求
+调用方先试探性调用一次 `send/recv`。
 
 状态变化事件被锁存；readable/writable/acceptable 等为 level 条件。
 `get_events()` 负责原子消费、重新计算 level 并在必要时重置唤醒，从而避免：
@@ -125,8 +149,9 @@ notifier 使用 eventfd/pipe，仅作为 readiness 唤醒，不承载网络数�
 `xqc_conn_get_stats()`：
 
 - connection info 描述协商状态和路径数量；
-- connection statistics 描述去重 stream payload、wire bytes、ACK、loss
-  proxy、inflight 和区间速率；
+- connection statistics 在简易 `send/recv` 模式下以调用方实际提交和取得的
+  字节作为应用字节，不计私有通道帧头；wire bytes、ACK、loss proxy、
+  inflight 和区间速率仍来自传输 observer；
 - path statistics 描述稳定 path index、地址、接口、RTT、CWND 和逐路径流量；
 - request info 单独统计 HTTP body 字节。
 
@@ -154,7 +179,9 @@ path index 在连接生命周期内只分配、不复用，避免路径关闭和
 - 只安装最终头文件；
 - 公共声明都有实现和动态库导出；
 - 兼容 backend 声明未泄露、符号未导出；
-- 不发布 raw stream、通用 SOCKOPT 或旧式 client/observer 入口。
+- 不发布 raw XQUIC stream、通用 SOCKOPT 或旧式 client/observer 入口；
+- 公共文件传输 demo 和数据回环测试只使用连接级 `send/recv` API；
+- 已移除的文件专用接口不会重新出现在安装头、导出表或构建目标中。
 
 ## 8. 线程模型
 
@@ -174,7 +201,7 @@ path index 在连接生命周期内只分配、不复用，避免路径关闭和
 - `netins_udp.h`
 - `libxquic.so`
 - `libxquic.a`
-- README、使用说明、架构说明和统一示例
+- README、使用说明、架构说明、公共 client/server demo 和压力脚本
 
 正式发布验收应包括：
 

@@ -47,6 +47,7 @@ extern "C" {
 #define NETINS_UDP_SERVER_ADDRESS_LEN     128U
 /** 独立客户端 TLS SNI/主机名缓冲区长度。 */
 #define NETINS_UDP_SERVER_NAME_LEN        256U
+#define NETINS_UDP_CA_FILE_LEN            512U
 /** 当前独立客户端连接接口的版本。 */
 #define NETINS_UDP_CLIENT_API_VERSION     1U
 /** 当前 HTTP/3 stream 收发接口的版本。 */
@@ -152,6 +153,8 @@ typedef struct netins_udp_client_config_s {
     uint16_t reserved16;
     /** TLS SNI/HTTP 主机名；为空时使用 server_address。 */
     char server_name[NETINS_UDP_SERVER_NAME_LEN];
+    /** Optional PEM trust store used by the private NetIns client backend. */
+    char ca_file[NETINS_UDP_CA_FILE_LEN];
     /**
      * 按优先顺序配置的本地网卡名。interface_count=0 时使用系统默认路由。
      * 当前实现支持在 XQUIC 允许创建路径后使用后续接口建立多路径。

@@ -136,7 +136,11 @@ typedef enum netins_udp_scheduler_e {
     NETINS_UDP_SCHEDULER_ACT = 5,
     NETINS_UDP_SCHEDULER_BANDWIDTH = 6,
     NETINS_UDP_SCHEDULER_FASTPROBE = 7,
-    NETINS_UDP_SCHEDULER_ADAPTIVE = 8
+    NETINS_UDP_SCHEDULER_ADAPTIVE = 8,
+    NETINS_UDP_SCHEDULER_FASTPROBE5 = 9,
+    NETINS_UDP_SCHEDULER_FASTPROBE10 = 10,
+    NETINS_UDP_SCHEDULER_FASTPROBE20 = 11,
+    NETINS_UDP_SCHEDULER_FASTONLY = 12
 } netins_udp_scheduler_t;
 
 typedef enum netins_udp_congestion_control_e {
@@ -164,7 +168,10 @@ typedef enum netins_udp_msg_flag_e {
  * Events reported by connection and child notification descriptors.
  * CONNECTED/PATH_CHANGED/CLOSED/ERROR are latched transition events.
  * ACCEPTABLE/READABLE/WRITABLE and H3_REQUEST_ACCEPTABLE are level
- * conditions. Bit 7 is reserved for ABI stability.
+ * conditions returned by get_events(). To avoid a receive-only event loop
+ * spinning, a continuously true WRITABLE level does not by itself keep the
+ * shared notification fd readable; later writable transitions still wake it.
+ * Bit 7 is reserved for ABI stability.
  */
 typedef enum netins_udp_event_e {
     NETINS_UDP_EVENT_NONE = 0,
@@ -211,9 +218,11 @@ typedef struct netins_udp_interfaces_s {
 
 /*
  * The library copies this structure and all strings during set_opt().
- * cert/key are required for listeners. Client certificate fields may be empty.
- * Peer verification defaults to enabled. require_client_certificate is only
- * meaningful for a listener.
+ * cert/key are required for listeners. Client certificate authentication is
+ * not supported by this release, so client certificate fields and
+ * require_client_certificate must remain empty/zero. Peer verification
+ * defaults to enabled. A client may set ca_file to a PEM trust store; an empty
+ * ca_file uses the platform default trust paths.
  */
 typedef struct netins_udp_tls_config_s {
     uint32_t struct_size;
@@ -263,10 +272,12 @@ typedef struct netins_udp_statis_s {
     uint64_t snapshot_time_us;
     uint64_t sample_interval_us;
     /*
-     * Unique QUIC STREAM payload bytes.  They exclude QUIC packet/frame
-     * overhead, retransmissions and reinjection duplicates.  In HTTP/3 mode
-     * they include H3/QPACK/control-stream payload; per-request body counters
-     * below exclude protocol framing.
+     * In connection-level send/recv mode these are the application bytes
+     * accepted by send() and consumed by recv(); private aggregation framing
+     * is excluded. Before that mode is selected, or when using the advanced
+     * request API, they are unique QUIC STREAM payload bytes and may include
+     * application-protocol control streams. QUIC packet/frame overhead,
+     * retransmissions and reinjection duplicates are always excluded.
      */
     uint64_t bytes_sent;
     uint64_t bytes_received;
@@ -525,11 +536,45 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(
     netins_udp_t *listener, struct sockaddr *addr, socklen_t *addrlen);
 
 /*
- * Initiates graceful transport shutdown without releasing the handle, allowing
- * final state/statistics/close reason to be queried before netins_udp_close().
+ * Initiates graceful transport shutdown without releasing the handle. For the
+ * connection-level data API, application_error==0 first finishes the hidden
+ * send direction and the transport closes only after library-owned send queues
+ * are handed to XQUIC. A nonzero application_error is an immediate error close.
+ * Final state/statistics/close reason remain queryable until close().
  */
 NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *netins,
     uint64_t application_error);
+
+/*
+ * Reliable, ordered connection-level application data. These functions hide
+ * the private parallel transport channels and expose one continuous byte
+ * stream: callers do not create or accept child requests for this mode.
+ *
+ * send/recv are valid on a connected client or an accepted server connection,
+ * but not on a listener. A successful call may transfer fewer bytes than
+ * requested. recv returns 0 after the peer has cleanly finished its send
+ * direction. NETINS_UDP_MSG_FIN finishes the local send direction after the
+ * bytes accepted by that call; it takes effect only when the return value
+ * equals length. NETINS_UDP_MSG_DONTWAIT applies to either call;
+ * NETINS_UDP_MSG_PEEK applies only to recv.
+ *
+ * The API preserves byte order but not individual send-call boundaries.
+ * One sender and one receiver may operate concurrently. Additional senders
+ * and receivers are serialized by the library.
+ * Bytes counted by a positive send return value have been copied into
+ * library-owned bounded queues; the caller may reuse that input memory.
+ * NONBLOCK and send/receive/close timeouts are captured when the private data
+ * channels are first created; configure them before the first send/recv call.
+ *
+ * Do not mix these connection-level functions with the advanced HTTP/3
+ * request API on the same connection. The first selected data mode remains
+ * fixed for the connection lifetime; attempts to select the other mode fail
+ * with EBUSY.
+ */
+NETINS_UDP_PUBLIC ssize_t netins_udp_send(netins_udp_t *netins,
+    const void *data, size_t length, int flags);
+NETINS_UDP_PUBLIC ssize_t netins_udp_recv(netins_udp_t *netins,
+    void *data, size_t length, int flags);
 
 /*
  * HTTP/3 request extension. Client opens requests; server accepts requests.

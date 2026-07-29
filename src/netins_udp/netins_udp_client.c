@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <netdb.h>
 #include <poll.h>
 #include <pthread.h>
@@ -18,8 +19,12 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <openssl/x509.h>
+#include <openssl/x509_vfy.h>
 
 #include <xquic/xqc_errno.h>
 #include <xquic/xqc_http3.h>
@@ -30,6 +35,7 @@
 #define NETINS_UDP_CLIENT_REFRESH_US         500000ULL
 #define NETINS_UDP_CLIENT_PATH_RETRY_US      200000ULL
 #define NETINS_UDP_CLIENT_CLOSE_WAIT_MS      500U
+#define NETINS_UDP_CLIENT_PATH_FAILOVER_PTO  2U
 #define NETINS_UDP_STREAM_DEFAULT_SEND_QUEUE (4U * 1024U * 1024U)
 #define NETINS_UDP_STREAM_DEFAULT_RECV_QUEUE (16U * 1024U * 1024U)
 #define NETINS_UDP_CLIENT_SEND_QUEUE_BUDGET   (64U * 1024U * 1024U)
@@ -54,6 +60,15 @@ typedef struct netins_udp_client_h3_extension_s {
     netins_udp_client_h3_header_t
         peer_headers[NETINS_UDP_CLIENT_H3_MAX_HEADERS];
 } netins_udp_client_h3_extension_t;
+
+typedef struct netins_udp_client_rx_batch_s {
+    size_t slot_capacity;
+    unsigned char *storage;
+#if defined(__linux__)
+    struct mmsghdr messages[NETINS_UDP_BACKEND_RX_BATCH_CAPACITY];
+    struct iovec iovecs[NETINS_UDP_BACKEND_RX_BATCH_CAPACITY];
+#endif
+} netins_udp_client_rx_batch_t;
 
 struct netins_udp_stream_s {
     pthread_mutex_t lock;
@@ -112,6 +127,7 @@ typedef struct netins_udp_client_path_s {
     socklen_t local_addrlen;
     struct sockaddr_storage peer_addr;
     socklen_t peer_addrlen;
+    netins_udp_client_rx_batch_t *rx_batch;
 } netins_udp_client_path_t;
 
 struct netins_udp_client_s {
@@ -160,6 +176,7 @@ struct netins_udp_client_s {
 
     char ciphers[256];
     char groups[128];
+    X509_STORE *ca_store;
 };
 
 static void
@@ -1045,6 +1062,33 @@ netins_udp_client_resolve_peer(netins_udp_client_t *client,
 }
 
 static int
+netins_udp_client_alloc_rx_batch(netins_udp_client_path_t *path)
+{
+    netins_udp_client_rx_batch_t *batch = calloc(1, sizeof(*batch));
+    if (batch == NULL) {
+        return NETINS_UDP_ERROR;
+    }
+    batch->slot_capacity = 65536U;
+    batch->storage = malloc(batch->slot_capacity
+        * NETINS_UDP_BACKEND_RX_BATCH_CAPACITY);
+    if (batch->storage == NULL) {
+        free(batch);
+        return NETINS_UDP_ERROR;
+    }
+#if defined(__linux__)
+    for (size_t i = 0; i < NETINS_UDP_BACKEND_RX_BATCH_CAPACITY; ++i) {
+        batch->iovecs[i].iov_base = batch->storage
+            + i * batch->slot_capacity;
+        batch->iovecs[i].iov_len = batch->slot_capacity;
+        batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
+        batch->messages[i].msg_hdr.msg_iovlen = 1;
+    }
+#endif
+    path->rx_batch = batch;
+    return NETINS_UDP_OK;
+}
+
+static int
 netins_udp_client_create_socket(netins_udp_client_t *client,
     netins_udp_client_path_t *path, const char *interface_name,
     const struct sockaddr_storage *peer_addr, socklen_t peer_addrlen)
@@ -1120,6 +1164,13 @@ netins_udp_client_create_socket(netins_udp_client_t *client,
         path->fd = -1;
         return NETINS_UDP_ERROR;
     }
+    if (netins_udp_client_alloc_rx_batch(path) != NETINS_UDP_OK) {
+        netins_udp_client_set_error(client, ENOMEM,
+            "failed to allocate the bounded UDP receive batch");
+        close(fd);
+        path->fd = -1;
+        return NETINS_UDP_ERROR;
+    }
     return NETINS_UDP_OK;
 }
 
@@ -1132,6 +1183,11 @@ netins_udp_client_close_path(netins_udp_client_path_t *path)
     path->fd = -1;
     path->active = 0;
     path->write_blocked = 0;
+    if (path->rx_batch != NULL) {
+        free(path->rx_batch->storage);
+        free(path->rx_batch);
+        path->rx_batch = NULL;
+    }
 }
 
 static netins_udp_client_path_t *
@@ -1234,11 +1290,73 @@ static int
 netins_udp_client_verify_certificate(const unsigned char *certs[],
     const size_t cert_len[], size_t certs_len, void *conn_user_data)
 {
-    (void)certs;
-    (void)cert_len;
-    (void)certs_len;
-    (void)conn_user_data;
-    return XQC_ERROR;
+    netins_udp_client_t *client = conn_user_data;
+    if (client == NULL || client->ca_store == NULL || certs == NULL
+        || cert_len == NULL || certs_len == 0
+        || cert_len[0] > (size_t)LONG_MAX)
+    {
+        return XQC_ERROR;
+    }
+
+    const unsigned char *cursor = certs[0];
+    X509 *leaf = d2i_X509(NULL, &cursor, (long)cert_len[0]);
+    STACK_OF(X509) *untrusted = sk_X509_new_null();
+    X509_STORE_CTX *store_context = X509_STORE_CTX_new();
+    if (leaf == NULL || untrusted == NULL || store_context == NULL) {
+        X509_free(leaf);
+        sk_X509_free(untrusted);
+        X509_STORE_CTX_free(store_context);
+        return XQC_ERROR;
+    }
+
+    int ok = 1;
+    for (size_t i = 1; i < certs_len; ++i) {
+        if (cert_len[i] > (size_t)LONG_MAX) {
+            ok = 0;
+            break;
+        }
+        cursor = certs[i];
+        X509 *certificate = d2i_X509(NULL, &cursor, (long)cert_len[i]);
+        if (certificate == NULL || !sk_X509_push(untrusted, certificate)) {
+            X509_free(certificate);
+            ok = 0;
+            break;
+        }
+    }
+    if (ok && X509_STORE_CTX_init(store_context, client->ca_store,
+            leaf, untrusted) != 1)
+    {
+        ok = 0;
+    }
+    const char *server_name = client->config.server_name[0] != '\0'
+        ? client->config.server_name : client->config.server_address;
+    if (ok && server_name[0] != '\0') {
+        X509_VERIFY_PARAM *verify_param =
+            X509_STORE_CTX_get0_param(store_context);
+        struct in_addr ipv4;
+        struct in6_addr ipv6;
+        int name_result;
+        if (inet_pton(AF_INET, server_name, &ipv4) == 1
+            || inet_pton(AF_INET6, server_name, &ipv6) == 1)
+        {
+            name_result =
+                X509_VERIFY_PARAM_set1_ip_asc(verify_param, server_name);
+        } else {
+            name_result =
+                X509_VERIFY_PARAM_set1_host(verify_param, server_name, 0);
+        }
+        if (name_result != 1) {
+            ok = 0;
+        }
+    }
+    if (ok) {
+        ok = X509_verify_cert(store_context) == 1;
+    }
+
+    X509_STORE_CTX_free(store_context);
+    sk_X509_pop_free(untrusted, X509_free);
+    X509_free(leaf);
+    return ok ? XQC_OK : XQC_ERROR;
 }
 
 static void
@@ -1686,6 +1804,8 @@ netins_udp_client_start_connection(netins_udp_client_t *client)
     settings.idle_time_out = client->idle_timeout_ms;
     settings.spurious_loss_detect_on = 1;
     settings.scheduler_callback = client->scheduler;
+    settings.scheduler_params.pto_cnt_thr =
+        NETINS_UDP_CLIENT_PATH_FAILOVER_PTO;
     settings.reinj_ctl_callback = xqc_deadline_reinj_ctl_cb;
     settings.adaptive_ack_frequency = 1;
     settings.mp_ack_on_any_path = 0;
@@ -1700,6 +1820,10 @@ netins_udp_client_start_connection(netins_udp_client_t *client)
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
     if (client->config.verify_certificate) {
         conn_ssl_config.cert_verify_flag = XQC_TLS_CERT_FLAG_NEED_VERIFY;
+        if (client->ca_store != NULL) {
+            conn_ssl_config.cert_verify_flag |=
+                XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED;
+        }
     }
 
     const char *server_name = client->config.server_name[0] != '\0'
@@ -1803,18 +1927,66 @@ static int
 netins_udp_client_recv_path(netins_udp_client_t *client,
     netins_udp_client_path_t *path)
 {
-    unsigned char packet[65536];
+    if (path == NULL || path->fd < 0 || !path->active
+        || path->rx_batch == NULL)
+    {
+        return 0;
+    }
     int processed = 0;
     uint32_t packet_limit = netins_udp_backend_rx_packet_limit(
         &client->rx_policy, client->path_count);
-    for (int i = 0; i < (int)packet_limit; ++i) {
-        struct sockaddr_storage peer_addr;
-        socklen_t peer_addrlen = sizeof(peer_addr);
-        ssize_t size = recvfrom(path->fd, packet, sizeof(packet), 0,
-            (struct sockaddr *)&peer_addr, &peer_addrlen);
+    if (packet_limit > NETINS_UDP_BACKEND_RX_BATCH_CAPACITY) {
+        packet_limit = NETINS_UDP_BACKEND_RX_BATCH_CAPACITY;
+    }
+    netins_udp_client_rx_batch_t *batch = path->rx_batch;
+
+#if defined(__linux__)
+    for (uint32_t i = 0; i < packet_limit; ++i) {
+        memset(&batch->messages[i].msg_hdr, 0,
+            sizeof(batch->messages[i].msg_hdr));
+        batch->messages[i].msg_hdr.msg_iov = &batch->iovecs[i];
+        batch->messages[i].msg_hdr.msg_iovlen = 1;
+        batch->messages[i].msg_len = 0;
+    }
+    int received;
+    do {
+        received = recvmmsg(path->fd, batch->messages, packet_limit,
+            MSG_DONTWAIT, NULL);
+    } while (received < 0 && errno == EINTR);
+    if (received < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return 0;
+        }
+        int error_code = errno;
+        return netins_udp_client_handle_path_error(client, path,
+            error_code, "recvmmsg");
+    }
+
+    uint64_t receive_time_us = netins_udp_client_packet_time_us();
+    for (int i = 0; i < received; ++i) {
+        size_t size = batch->messages[i].msg_len;
+        if (size == 0) {
+            continue;
+        }
+        (void)xqc_engine_packet_process(client->engine,
+            batch->storage + (size_t)i * batch->slot_capacity, size,
+            (const struct sockaddr *)&path->local_addr,
+            path->local_addrlen,
+            (const struct sockaddr *)&path->peer_addr,
+            path->peer_addrlen, receive_time_us, client);
+        processed++;
+        if (!path->active) {
+            break;
+        }
+    }
+#else
+    for (uint32_t i = 0; i < packet_limit; ++i) {
+        unsigned char *packet = batch->storage
+            + (size_t)i * batch->slot_capacity;
+        ssize_t size = recvfrom(path->fd, packet, batch->slot_capacity,
+            0, NULL, NULL);
         if (size < 0) {
             if (errno == EINTR) {
-                --i;
                 continue;
             }
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -1831,13 +2003,15 @@ netins_udp_client_recv_path(netins_udp_client_t *client,
             packet, (size_t)size,
             (const struct sockaddr *)&path->local_addr,
             path->local_addrlen,
-            (const struct sockaddr *)&peer_addr, peer_addrlen,
+            (const struct sockaddr *)&path->peer_addr,
+            path->peer_addrlen,
             netins_udp_client_packet_time_us(), client);
         processed++;
         if (!path->active) {
             break;
         }
     }
+#endif
     return processed;
 }
 
@@ -2217,15 +2391,11 @@ netins_udp_client_poll_timeout_ms(netins_udp_client_t *client,
     int timeout_ms = 500;
     pthread_mutex_lock(&client->lock);
     uint64_t wake_us = client->next_wake_us;
-    int close_requested = client->close_requested && !client->close_sent;
     uint64_t connect_deadline_us =
         client->state == NETINS_UDP_STATE_CONNECTING
             ? client->connect_deadline_us : 0;
     pthread_mutex_unlock(&client->lock);
 
-    if (close_requested) {
-        return 0;
-    }
     if (wake_us != 0) {
         if (wake_us <= now_us) {
             return 0;
@@ -2250,11 +2420,45 @@ netins_udp_client_poll_timeout_ms(netins_udp_client_t *client,
 }
 
 static void
+netins_udp_client_streams_send_drained_locked(
+    netins_udp_client_t *client, int *out_drained)
+{
+    int drained = 1;
+    for (netins_udp_stream_t *stream = client->streams;
+         stream != NULL; stream = stream->next)
+    {
+        pthread_mutex_lock(&stream->lock);
+        int terminal = stream->stream_error != 0
+            || stream->state == NETINS_UDP_STREAM_STATE_ERROR
+            || stream->state == NETINS_UDP_STREAM_STATE_CLOSED
+            || stream->close_notified;
+        int stream_drained = terminal
+            || (stream->send_queue_bytes == 0
+                && (!stream->send_fin_requested
+                    || stream->send_finished));
+        pthread_mutex_unlock(&stream->lock);
+        if (!stream_drained) {
+            drained = 0;
+            break;
+        }
+    }
+    *out_drained = drained;
+}
+
+static void
 netins_udp_client_drive_close(netins_udp_client_t *client)
 {
     pthread_mutex_lock(&client->lock);
-    int should_close = client->close_requested && !client->close_sent;
     uint64_t application_error = client->close_application_error;
+    int streams_drained = 1;
+    if (client->close_requested && !client->close_sent
+        && application_error == 0)
+    {
+        netins_udp_client_streams_send_drained_locked(client,
+            &streams_drained);
+    }
+    int should_close = client->close_requested && !client->close_sent
+        && (application_error != 0 || streams_drained);
     xqc_h3_conn_t *h3_conn = client->h3_conn;
     if (should_close) {
         client->close_sent = 1;
@@ -2548,26 +2752,6 @@ netins_udp_client_make_deadline(uint32_t timeout_ms, struct timespec *deadline)
         deadline->tv_nsec -= 1000000000L;
     }
     return NETINS_UDP_OK;
-}
-
-static void
-netins_udp_client_request_all_streams_close(netins_udp_client_t *client)
-{
-    pthread_mutex_lock(&client->lock);
-    for (netins_udp_stream_t *stream = client->streams;
-         stream != NULL; stream = stream->next)
-    {
-        pthread_mutex_lock(&stream->lock);
-        stream->close_requested = 1;
-        if (stream->state != NETINS_UDP_STREAM_STATE_CLOSED
-            && stream->state != NETINS_UDP_STREAM_STATE_ERROR)
-        {
-            stream->state = NETINS_UDP_STREAM_STATE_CLOSING;
-        }
-        pthread_cond_broadcast(&stream->cond);
-        pthread_mutex_unlock(&stream->lock);
-    }
-    pthread_mutex_unlock(&client->lock);
 }
 
 static void
@@ -3412,6 +3596,7 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     client->config = *config;
     client->config.server_address[NETINS_UDP_SERVER_ADDRESS_LEN - 1] = '\0';
     client->config.server_name[NETINS_UDP_SERVER_NAME_LEN - 1] = '\0';
+    client->config.ca_file[NETINS_UDP_CA_FILE_LEN - 1] = '\0';
     for (uint32_t i = 0; i < NETINS_UDP_MAX_PATHS; ++i) {
         client->config.interface_names[i]
             [NETINS_UDP_INTERFACE_NAME_LEN - 1] = '\0';
@@ -3434,6 +3619,20 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     if (client->config.interface_count < 2) {
         client->config.enable_multipath = 0;
     }
+    if (client->config.verify_certificate
+        && client->config.ca_file[0] != '\0')
+    {
+        client->ca_store = X509_STORE_new();
+        if (client->ca_store == NULL
+            || X509_STORE_load_locations(client->ca_store,
+                client->config.ca_file, NULL) != 1)
+        {
+            X509_STORE_free(client->ca_store);
+            free(client);
+            errno = EINVAL;
+            return NETINS_UDP_ERROR;
+        }
+    }
 
     client->wake_pipe[0] = -1;
     client->wake_pipe[1] = -1;
@@ -3446,6 +3645,7 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     snprintf(client->groups, sizeof(client->groups), "%s", XQC_TLS_GROUPS);
     int init_error = pthread_mutex_init(&client->lock, NULL);
     if (init_error != 0) {
+        X509_STORE_free(client->ca_store);
         free(client);
         errno = init_error;
         return NETINS_UDP_ERROR;
@@ -3453,6 +3653,7 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     init_error = pthread_cond_init(&client->state_cond, NULL);
     if (init_error != 0) {
         pthread_mutex_destroy(&client->lock);
+        X509_STORE_free(client->ca_store);
         free(client);
         errno = init_error;
         return NETINS_UDP_ERROR;
@@ -3461,6 +3662,7 @@ netins_udp_client_create(const netins_udp_client_config_t *config,
     if (client->observer == NULL) {
         pthread_cond_destroy(&client->state_cond);
         pthread_mutex_destroy(&client->lock);
+        X509_STORE_free(client->ca_store);
         free(client);
         errno = ENOMEM;
         return NETINS_UDP_ERROR;
@@ -3842,11 +4044,13 @@ netins_udp_client_close(netins_udp_client_t *client)
     }
 
     if (client->thread_started) {
-        netins_udp_client_request_all_streams_close(client);
-        pthread_mutex_lock(&client->lock);
-        client->close_requested = 1;
-        pthread_mutex_unlock(&client->lock);
-        netins_udp_client_wake(client);
+        /*
+         * A normal owner close must preserve the same drain semantics as
+         * request_shutdown(0). Do not mark individual streams for immediate
+         * close here: that used to race queued body data and FIN delivery.
+         * The bounded wait below remains the forced-cleanup limit.
+         */
+        netins_udp_client_request_shutdown(client, 0);
 
         struct timespec deadline;
         if (netins_udp_client_make_deadline(client->close_timeout_ms,
@@ -3901,5 +4105,6 @@ netins_udp_client_close(netins_udp_client_t *client)
     }
     pthread_cond_destroy(&client->state_cond);
     pthread_mutex_destroy(&client->lock);
+    X509_STORE_free(client->ca_store);
     free(client);
 }

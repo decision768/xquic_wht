@@ -56,6 +56,7 @@ struct netins_udp_server_request_s {
 
 static struct netins_udp_client_s g_client;
 static struct netins_udp_server_connection_s g_server_connection;
+static netins_udp_v2_transport_request_t *g_last_transport_request;
 static netins_udp_v2_transport_h3_config_t g_open_config;
 static netins_udp_v2_transport_h3_response_config_t
     g_server_response_config;
@@ -72,6 +73,8 @@ static int g_recv_entered;
 static int g_server_request_available;
 static uint32_t g_server_accept_timeout_ms;
 static int g_server_accept_wait_forever;
+static int g_select_h3_error;
+static int g_connection_release_count;
 
 int
 netins_udp_v2_connection_acquire_h3(
@@ -114,10 +117,26 @@ netins_udp_v2_connection_acquire_h3_server(
     return NETINS_UDP_OK;
 }
 
+int
+netins_udp_v2_connection_select_h3(netins_udp_t *netins)
+{
+    if (netins == NULL) {
+        errno = EINVAL;
+        return NETINS_UDP_ERROR;
+    }
+    if (g_select_h3_error != 0) {
+        netins->last_error_code = g_select_h3_error;
+        errno = g_select_h3_error;
+        return NETINS_UDP_ERROR;
+    }
+    return NETINS_UDP_OK;
+}
+
 void
 netins_udp_v2_connection_release(netins_udp_t *netins)
 {
     (void)netins;
+    g_connection_release_count++;
 }
 
 void
@@ -175,6 +194,7 @@ netins_udp_v2_transport_h3_request_open(
     memcpy(request->received, "hello", 5);
     request->received_length = 5;
     request->info.receive_finished = 1;
+    g_last_transport_request = request;
     *out_request = request;
     return 0;
 }
@@ -302,6 +322,9 @@ netins_udp_v2_transport_h3_request_close(
     uint32_t timeout_ms)
 {
     assert(timeout_ms == 100);
+    if (g_last_transport_request == request) {
+        g_last_transport_request = NULL;
+    }
     free(request);
 }
 
@@ -578,6 +601,45 @@ main(void)
     assert(netins_udp_h3_request_open(&connection, NULL, &request)
         == NETINS_UDP_ERROR);
     assert(errno == EINVAL);
+    int release_count = g_connection_release_count;
+    g_select_h3_error = EBUSY;
+    assert(netins_udp_h3_request_open(&connection, &config, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EBUSY);
+    assert(request == NULL);
+    assert(g_child_count == 0);
+    assert(g_connection_release_count == release_count + 1);
+    g_select_h3_error = 0;
+    request = open_request(&connection, "POST", 5);
+    assert(g_child_count == 1);
+
+    /*
+     * A hidden request may wake connection-level send/recv users, but its
+     * terminal state must not masquerade as a QUIC connection transition.
+     */
+    netins_udp_v2_notifier_t parent_notifier;
+    assert(netins_udp_v2_notifier_init(&parent_notifier) == 0);
+    netins_udp_v2_h3_request_set_parent_notifier(request,
+        &parent_notifier);
+    assert(g_last_transport_request != NULL);
+    assert(g_last_transport_request->notify != NULL);
+    g_last_transport_request->notify(
+        g_last_transport_request->notify_user_data,
+        NETINS_UDP_V2_EVENT_CLOSED | NETINS_UDP_V2_EVENT_ERROR);
+    uint64_t parent_generation =
+        netins_udp_v2_notifier_begin_level_query(&parent_notifier);
+    uint32_t parent_events = 0;
+    assert(netins_udp_v2_notifier_consume(&parent_notifier,
+        parent_generation, 0, &parent_events) == 0);
+    assert((parent_events & NETINS_UDP_EVENT_READABLE) != 0);
+    assert((parent_events & NETINS_UDP_EVENT_WRITABLE) != 0);
+    assert((parent_events & NETINS_UDP_EVENT_CLOSED) == 0);
+    assert((parent_events & NETINS_UDP_EVENT_ERROR) == 0);
+    netins_udp_v2_h3_request_set_parent_notifier(request, NULL);
+    netins_udp_v2_notifier_destroy(&parent_notifier);
+    netins_udp_h3_request_close(request);
+    assert(g_child_count == 0);
+
     request = open_request(&connection, "POST", 5);
     assert(g_child_count == 1);
     int request_fd = netins_udp_h3_request_get_fd(request);
@@ -688,6 +750,15 @@ main(void)
         .server_side = 1,
         .nonblock = 1,
     };
+    release_count = g_connection_release_count;
+    g_select_h3_error = EBUSY;
+    assert(netins_udp_h3_request_accept(&server_connection, &request)
+        == NETINS_UDP_ERROR);
+    assert(errno == EBUSY);
+    assert(request == NULL);
+    assert(g_child_count == 0);
+    assert(g_connection_release_count == release_count + 1);
+    g_select_h3_error = 0;
     assert(netins_udp_h3_request_accept(&server_connection, &request)
         == NETINS_UDP_ERROR);
     assert(errno == EAGAIN);

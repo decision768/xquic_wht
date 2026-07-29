@@ -24,6 +24,8 @@ SERVER_BACKEND = ROOT / "src/netins_udp/netins_udp_server.c"
 OBSERVER_BACKEND = ROOT / "src/netins_udp/netins_udp_observer.c"
 V2_CLIENT = ROOT / "src/netins_udp/netins_udp_v2_client.c"
 V2_H3 = ROOT / "src/netins_udp/netins_udp_v2_h3.c"
+DATA_BACKEND = ROOT / "src/netins_udp/netins_udp_data_backend.c"
+V2_NOTIFIER = ROOT / "src/netins_udp/netins_udp_v2_notifier.c"
 V2_TRANSPORT = ROOT / "src/netins_udp/netins_udp_v2_transport.c"
 XQC_SEND_CTL = ROOT / "src/transport/xqc_send_ctl.c"
 XQC_STREAM = ROOT / "src/transport/xqc_stream.c"
@@ -35,7 +37,13 @@ MINI_SERVER_HEADER = ROOT / "mini/mini_server.h"
 OBSERVER_TEST = ROOT / "tests/netins_udp/test_netins_udp.c"
 V2_CLIENT_TEST = ROOT / "tests/netins_udp/test_netins_udp_v2_client.c"
 V2_H3_TEST = ROOT / "tests/netins_udp/test_netins_udp_v2_h3.c"
+V2_NOTIFIER_TEST = ROOT / "tests/netins_udp/test_netins_udp_v2_notifier.c"
 V2_LOOPBACK_TEST = ROOT / "tests/netins_udp/test_netins_udp_v2_loopback.c"
+DATA_LOOPBACK_TEST = (
+    ROOT / "tests/netins_udp/test_netins_udp_data_loopback.c"
+)
+DATA_CLIENT_DEMO = ROOT / "api/examples/netins_udp_data_client.c"
+DATA_SERVER_DEMO = ROOT / "api/examples/netins_udp_data_server.c"
 DELIVERY_FILES = (
     ROOT / "api/README.md",
     ROOT / "api/NETINS_UDP_API_使用说明.md",
@@ -43,6 +51,7 @@ DELIVERY_FILES = (
 )
 IMPLEMENTATIONS = (
     ROOT / "src/netins_udp/netins_udp_api_version.c",
+    ROOT / "src/netins_udp/netins_udp_data_backend.c",
     ROOT / "src/netins_udp/netins_udp_v2_client.c",
     ROOT / "src/netins_udp/netins_udp_v2_h3.c",
 )
@@ -147,6 +156,8 @@ def main(argv=None):
     observer_backend = OBSERVER_BACKEND.read_text(encoding="utf-8")
     v2_client = V2_CLIENT.read_text(encoding="utf-8")
     v2_h3 = V2_H3.read_text(encoding="utf-8")
+    data_backend = DATA_BACKEND.read_text(encoding="utf-8")
+    v2_notifier = V2_NOTIFIER.read_text(encoding="utf-8")
     v2_transport = V2_TRANSPORT.read_text(encoding="utf-8")
     xqc_send_ctl = XQC_SEND_CTL.read_text(encoding="utf-8")
     xqc_stream = XQC_STREAM.read_text(encoding="utf-8")
@@ -158,7 +169,11 @@ def main(argv=None):
     observer_test = OBSERVER_TEST.read_text(encoding="utf-8")
     v2_client_test = V2_CLIENT_TEST.read_text(encoding="utf-8")
     v2_h3_test = V2_H3_TEST.read_text(encoding="utf-8")
+    v2_notifier_test = V2_NOTIFIER_TEST.read_text(encoding="utf-8")
     v2_loopback_test = V2_LOOPBACK_TEST.read_text(encoding="utf-8")
+    data_loopback_test = DATA_LOOPBACK_TEST.read_text(encoding="utf-8")
+    data_client_demo = DATA_CLIENT_DEMO.read_text(encoding="utf-8")
+    data_server_demo = DATA_SERVER_DEMO.read_text(encoding="utf-8")
     implementations = "\n".join(
         path.read_text(encoding="utf-8") for path in IMPLEMENTATIONS
     )
@@ -629,6 +644,209 @@ def main(argv=None):
                 f"{backend_name} private descriptors are inherited across exec"
             )
 
+    # P1 regression guards for the simple high-performance connection API.
+    client_scheduler = v2_transport[
+        v2_transport.index("netins_udp_v2_transport_scheduler("):
+        v2_transport.index(
+            "netins_udp_v2_transport_congestion_control(",
+            v2_transport.index("netins_udp_v2_transport_scheduler("),
+        )
+    ]
+    server_scheduler = server_backend[
+        server_backend.index("netins_udp_server_scheduler("):
+        server_backend.index(
+            "netins_udp_server_congestion_control(",
+            server_backend.index("netins_udp_server_scheduler("),
+        )
+    ]
+    if not re.search(
+        r"case\s+0\s*:\s*return\s+&xqc_rap_scheduler_cb",
+        client_scheduler,
+    ):
+        ok = fail("client default scheduler no longer matches the RAP baseline")
+    if not re.search(
+        r"case\s+0\s*:\s*return\s+&xqc_adaptive_scheduler_cb",
+        server_scheduler,
+    ):
+        ok = fail("server default scheduler no longer matches mini adaptive mode")
+    if "settings.scheduler_params.pto_cnt_thr" not in client_backend:
+        ok = fail("client backend omits the mini path-failover PTO setting")
+    if "settings.scheduler_params.pto_cnt_thr" not in server_backend:
+        ok = fail("server backend omits the mini path-failover PTO setting")
+
+    if "recvmmsg(path->fd" not in client_backend:
+        ok = fail("Linux client RX regressed from bounded recvmmsg batching")
+    if "recvmmsg(server->socket_fd" not in server_backend:
+        ok = fail("Linux server RX regressed from bounded recvmmsg batching")
+    if "xqc_engine_finish_recv(client->engine)" not in client_backend:
+        ok = fail("client RX batch no longer finishes receive processing")
+
+    if "pthread_mutex_trylock(&netins->data_lock)" in v2_client:
+        ok = fail("connection get_events can consume a wake after failed trylock")
+    if (
+        "data_backend_creating" not in v2_client
+        or "pthread_cond_wait(&netins->data_cond" not in v2_client
+    ):
+        ok = fail("lazy connection data-channel creation is not serialized")
+    if not re.search(
+        r"data_backend_creating\s*=\s*1\s*;\s*"
+        r"[\s\S]{0,256}"
+        r"pthread_mutex_unlock\(&netins->data_lock\)",
+        v2_client,
+    ):
+        ok = fail("blocking data-channel creation still holds data_lock")
+    if (
+        "h3_api_selected" not in v2_client
+        or "netins_udp_v2_h3_request_open_internal(" not in data_backend
+        or "netins_udp_v2_h3_request_accept_internal(" not in data_backend
+        or v2_h3.count("netins_udp_v2_connection_select_h3(netins)") < 2
+    ):
+        ok = fail(
+            "simple connection data and advanced H3 modes are not isolated"
+        )
+    if (
+        "data_open_count_before_conflict" not in v2_client_test
+        or "rejected_server_h3_parent" not in v2_client_test
+    ):
+        ok = fail("data-mode mutual exclusion lacks client/server tests")
+    if (
+        v2_h3_test.count("g_select_h3_error = EBUSY") < 2
+        or "g_connection_release_count == release_count + 1"
+            not in v2_h3_test
+    ):
+        ok = fail("H3 mode-conflict failures do not verify parent-call release")
+
+    # P2: the public byte stream is backed by private parallel H3 lanes.
+    # Third parties see only send/recv; framing and reorder state stay private.
+    for token in (
+        "#define NETINS_UDP_DATA_LANE_COUNT          8U",
+        "#define NETINS_UDP_DATA_CLIENT_SEND_LANES   4U",
+        "#define NETINS_UDP_DATA_SERVER_SEND_LANES   8U",
+        "#define NETINS_UDP_DATA_FRAME_PAYLOAD_SIZE  (4U * 1024U * 1024U)",
+        "#define NETINS_UDP_DATA_REORDER_LIMIT       (64U * 1024U * 1024U)",
+        "NETINS_UDP_DATA_FRAME_MAGIC",
+        "netins_udp_data_queue_frame(",
+        "netins_udp_data_insert_segment(",
+        "netins_udp_data_copy_received(",
+        "netins_udp_h3_request_send(",
+        "netins_udp_h3_request_recv(",
+    ):
+        if token not in data_backend:
+            ok = fail(f"parallel connection-data backend omits {token}")
+
+    get_events_body = v2_client[
+        v2_client.index("netins_udp_get_events("):
+        v2_client.index(
+            "netins_udp_get_last_error_code(",
+            v2_client.index("netins_udp_get_events("),
+        )
+    ]
+    if "state == NETINS_UDP_STATE_CONNECTED" not in get_events_body:
+        ok = fail("connected clients omit initial connection-level WRITABLE")
+    if not re.search(
+        r"NETINS_UDP_EVENT_H3_REQUEST_ACCEPTABLE[\s\S]{0,320}"
+        r"NETINS_UDP_EVENT_READABLE\s*\|\s*"
+        r"NETINS_UDP_EVENT_WRITABLE",
+        get_events_body,
+    ):
+        ok = fail("accepted connections omit initial simple-data readiness")
+
+    parent_notify = v2_h3[
+        v2_h3.index("netins_udp_v2_h3_notify_handle("):
+        v2_h3.index(
+            "netins_udp_v2_h3_request_set_parent_notifier(",
+            v2_h3.index("netins_udp_v2_h3_notify_handle("),
+        )
+    ]
+    if not re.search(
+        r"parent_events\s*=\s*events\s*&\s*"
+        r"\(NETINS_UDP_EVENT_READABLE\s*\|\s*"
+        r"NETINS_UDP_EVENT_WRITABLE\)",
+        parent_notify,
+    ):
+        ok = fail("hidden H3 terminal events can leak to the connection notifier")
+    if "NETINS_UDP_EVENT_CLOSED) == 0" not in v2_h3_test:
+        ok = fail("H3 unit test does not cover connection terminal-event isolation")
+    if not re.search(
+        r"level_events\s*&\s*NETINS_UDP_V2_NOTIFIER_REARM_EVENTS",
+        v2_notifier,
+    ):
+        ok = fail("notification fd can busy-loop on permanent WRITABLE")
+    if "WRITABLE is reported as a level" not in v2_notifier_test:
+        ok = fail("notifier unit test omits the WRITABLE busy-loop guard")
+
+    shutdown_body = v2_client[
+        v2_client.index("netins_udp_shutdown("):
+        v2_client.index(
+            "netins_udp_v2_refresh_state(",
+            v2_client.index("netins_udp_shutdown("),
+        )
+    ]
+    if "netins_udp_data_backend_finish_send(data_backend)" not in shutdown_body:
+        ok = fail("normal shutdown does not finish parallel data channels")
+    if not re.search(
+        r"creation_in_progress[\s\S]{0,520}"
+        r"request_shutdown[\s\S]{0,620}"
+        r"while\s*\(netins->data_backend_creating\)",
+        shutdown_body,
+    ):
+        ok = fail("shutdown can deadlock behind lazy data-channel creation")
+    if "netins_udp_client_streams_send_drained_locked" not in client_backend:
+        ok = fail("client normal shutdown can close before queued sends drain")
+    if (
+        "netins_udp_server_connection_send_drained_locked"
+        not in server_backend
+    ):
+        ok = fail("server normal shutdown can close before queued sends drain")
+    close_body = v2_client[v2_client.index("netins_udp_close("):]
+    backend_close_at = close_body.find(
+        "netins_udp_data_backend_destroy(data_backend)"
+    )
+    client_close_at = close_body.find(
+        "netins_udp_v2_transport_client_close(client_transport)"
+    )
+    accepted_close_at = close_body.find(
+        "netins_udp_v2_transport_server_connection_close("
+    )
+    if (
+        backend_close_at < 0
+        or client_close_at < 0
+        or accepted_close_at < 0
+        or backend_close_at > client_close_at
+        or backend_close_at > accepted_close_at
+    ):
+        ok = fail("owner close releases parent transport before private lanes")
+    if "netins_udp_client_request_shutdown(client, 0)" not in client_backend:
+        ok = fail("client owner close bypasses normal drain semantics")
+
+    if (
+        "netins_udp_data_backend_get_counters" not in data_backend
+        or not re.search(
+            r"netins_udp_data_backend_get_counters\(data_backend,"
+            r"[\s\S]{0,220}out->statis\.bytes_sent"
+            r"[\s\S]{0,160}out->statis\.bytes_received",
+            v2_client,
+        )
+    ):
+        ok = fail(
+            "connection statistics can expose private aggregation framing"
+        )
+    if (
+        "assert(connection_statis.bytes_sent == 11)" not in v2_client_test
+        or "assert(connection_statis.bytes_received == 11)"
+        not in v2_client_test
+    ):
+        ok = fail(
+            "connection statistics test omits public send/recv byte semantics"
+        )
+
+    if (
+        "X509_STORE_load_locations" not in client_backend
+        or "client->config.ca_file" not in client_backend
+        or "legacy.ca_file" not in v2_transport
+    ):
+        ok = fail("public client custom-CA configuration is not implemented")
+
     forbidden_public_tokens = (
         "NETINS_UDP_APP_RAW_STREAM",
         "NETINS_UDP_OPT_SOCKOPT",
@@ -640,9 +858,11 @@ def main(argv=None):
         "NETINS_UDP_EVENT_STREAM_ACCEPTABLE",
         "netins_udp_client_create(",
         "netins_udp_observer_open(",
-        "netins_udp_send(",
-        "netins_udp_recv(",
         "netins_udp_stream_open(",
+        "netins_udp_file_result_t",
+        "netins_udp_post_file(",
+        "netins_udp_get_file(",
+        "netins_udp_serve_file(",
     )
     for token in forbidden_public_tokens:
         if token in public:
@@ -664,6 +884,35 @@ def main(argv=None):
     )
     if "创建时快照" not in delivery_text:
         ok = fail("delivery documentation omits runtime option snapshot semantics")
+    for path, source in (
+        (DATA_CLIENT_DEMO, data_client_demo),
+        (DATA_SERVER_DEMO, data_server_demo),
+        (DATA_LOOPBACK_TEST, data_loopback_test),
+    ):
+        if "#include <xquic/netins_udp.h>" not in source:
+            ok = fail(
+                f"{path.relative_to(ROOT)} does not use the installed header"
+            )
+        if re.search(r"\b(?:xqc_|netins_udp_h3_)", source):
+            ok = fail(
+                f"{path.relative_to(ROOT)} bypasses the public connection API"
+            )
+        if (
+            "netins_udp_send(" not in source
+            or "netins_udp_recv(" not in source
+        ):
+            ok = fail(
+                f"{path.relative_to(ROOT)} does not exercise both data directions"
+            )
+    if (
+        "#define NETINS_UDP_DEMO_BUFFER_SIZE (4U * 1024U * 1024U)"
+        not in data_client_demo
+        or "#define NETINS_UDP_DEMO_BUFFER_SIZE (4U * 1024U * 1024U)"
+        not in data_server_demo
+        or "#define DATA_LOOPBACK_CHUNK (4U * 1024U * 1024U)"
+        not in data_loopback_test
+    ):
+        ok = fail("high-performance data examples no longer use 4 MiB chunks")
     for pattern, description in (
         (r"\bV1\b|\bV2\b", "split API version terminology"),
         (r"api/draft/netins_udp_v2\.h", "obsolete draft header"),
@@ -728,10 +977,27 @@ def main(argv=None):
                 f"{cmake_path.relative_to(ROOT)} uses FindPython3 despite "
                 "declaring compatibility with CMake 3.6"
             )
+        if "src/netins_udp/netins_udp_data_backend.c" not in cmake:
+            ok = fail(
+                f"{cmake_path.relative_to(ROOT)} omits the private "
+                "connection-data backend"
+            )
+        for removed_source in (
+            "netins_udp_file_backend.c",
+            "netins_udp_file_loopback_test",
+            "netins_udp_file_client",
+            "netins_udp_file_server",
+        ):
+            if removed_source in cmake:
+                ok = fail(
+                    f"{cmake_path.relative_to(ROOT)} still delivers "
+                    f"{removed_source}"
+                )
         for test_target in (
             "netins_udp_v2_client_unit_test",
             "netins_udp_v2_h3_unit_test",
             "netins_udp_v2_loopback_test",
+            "netins_udp_data_loopback_test",
         ):
             include_directories = re.search(
                 rf"target_include_directories\s*\(\s*"

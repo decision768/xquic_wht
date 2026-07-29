@@ -193,6 +193,7 @@ netins_udp_v2_transport_scheduler(int scheduler)
 {
     switch (scheduler) {
     case 0:
+        return &xqc_rap_scheduler_cb;
     case 1:
         return &xqc_minrtt_scheduler_cb;
     case 2:
@@ -209,6 +210,14 @@ netins_udp_v2_transport_scheduler(int scheduler)
         return &xqc_fastprobe_scheduler_cb;
     case 8:
         return &xqc_adaptive_scheduler_cb;
+    case 9:
+        return &xqc_fastprobe5_scheduler_cb;
+    case 10:
+        return &xqc_fastprobe10_scheduler_cb;
+    case 11:
+        return &xqc_fastprobe20_scheduler_cb;
+    case 12:
+        return &xqc_fastonly_scheduler_cb;
     default:
         return NULL;
     }
@@ -268,6 +277,8 @@ netins_udp_v2_transport_client_create(
     legacy.server_port = config->port;
     snprintf(legacy.server_name, sizeof(legacy.server_name), "%s",
         config->server_name);
+    snprintf(legacy.ca_file, sizeof(legacy.ca_file), "%s",
+        config->ca_file);
     legacy.interface_count = config->interface_count;
     for (uint32_t i = 0; i < config->interface_count; ++i) {
         snprintf(legacy.interface_names[i],

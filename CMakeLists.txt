@@ -505,6 +505,7 @@ set (
     "src/netins_udp/netins_udp_client.c"
     "src/netins_udp/netins_udp_server.c"
     "src/netins_udp/netins_udp_v2_notifier.c"
+    "src/netins_udp/netins_udp_data_backend.c"
     "src/netins_udp/netins_udp_v2_client.c"
     "src/netins_udp/netins_udp_v2_h3.c"
     "src/netins_udp/netins_udp_v2_transport.c"
@@ -557,6 +558,7 @@ if(NETINS_UDP_BUILD_TESTS)
 
     add_executable(netins_udp_v2_client_unit_test
         src/netins_udp/netins_udp_v2_notifier.c
+        src/netins_udp/netins_udp_data_backend.c
         src/netins_udp/netins_udp_v2_client.c
         tests/netins_udp/test_netins_udp_v2_client.c
     )
@@ -628,6 +630,23 @@ if(NETINS_UDP_BUILD_TESTS)
         m
     )
 
+    # Manual public connection-data acceptance test:
+    # netins_udp_data_loopback_test server.crt server.key 18444
+    add_executable(netins_udp_data_loopback_test
+        tests/netins_udp/test_netins_udp_data_loopback.c
+    )
+    target_include_directories(netins_udp_data_loopback_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(netins_udp_data_loopback_test PRIVATE
+        xquic-static
+        ${SSL_LIB_PATH}
+        pthread
+        dl
+        m
+    )
+
     add_library(netins_udp_example OBJECT
         api/examples/netins_udp_snapshot_example.c
         api/examples/netins_udp_connect_example.c
@@ -652,6 +671,37 @@ if(NETINS_UDP_BUILD_CONNECT_EXAMPLE)
         ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
     target_link_libraries(netins_udp_connect_cli PRIVATE
+        xquic-static
+        ${SSL_LIB_PATH}
+        pthread
+        dl
+        m
+    )
+endif()
+
+option(NETINS_UDP_BUILD_DATA_DEMO
+    "build the public NetIns UDP send/recv demos" OFF)
+if(NETINS_UDP_BUILD_DATA_DEMO)
+    add_executable(netins_udp_data_client
+        api/examples/netins_udp_data_client.c
+    )
+    add_executable(netins_udp_data_server
+        api/examples/netins_udp_data_server.c
+    )
+    target_include_directories(netins_udp_data_client PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_include_directories(netins_udp_data_server PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+    )
+    target_link_libraries(netins_udp_data_client PRIVATE
+        xquic-static
+        ${SSL_LIB_PATH}
+        pthread
+        dl
+        m
+    )
+    target_link_libraries(netins_udp_data_server PRIVATE
         xquic-static
         ${SSL_LIB_PATH}
         pthread
@@ -705,5 +755,10 @@ install(FILES
     api/examples/netins_udp_client_lifecycle_example.c
     api/examples/netins_udp_server_lifecycle_example.c
     api/examples/netins_udp_h3_request_example.c
+    api/examples/netins_udp_data_client.c
+    api/examples/netins_udp_data_server.c
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
+)
+install(PROGRAMS scripts/netins_udp_api_stress.sh
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
 )

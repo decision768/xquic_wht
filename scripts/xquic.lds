@@ -167,6 +167,8 @@ XQUIC_VERS_1.0 {
         netins_udp_listen;
         netins_udp_accept;
         netins_udp_shutdown;
+        netins_udp_send;
+        netins_udp_recv;
         netins_udp_get_state;
         netins_udp_is_multipath;
         netins_udp_get_path_count;

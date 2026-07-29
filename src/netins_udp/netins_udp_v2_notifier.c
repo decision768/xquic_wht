@@ -12,6 +12,8 @@
     ((1U << 0) | (1U << 4) | (1U << 5) | (1U << 6))
 #define NETINS_UDP_V2_NOTIFIER_LEVEL_EVENTS \
     ((1U << 1) | (1U << 2) | (1U << 3) | (1U << 8))
+#define NETINS_UDP_V2_NOTIFIER_REARM_EVENTS \
+    ((1U << 1) | (1U << 2) | (1U << 8))
 
 static int
 netins_udp_v2_notifier_nonblocking_cloexec(int fd)
@@ -169,7 +171,14 @@ netins_udp_v2_notifier_consume(netins_udp_v2_notifier_t *notifier,
      * readiness but before this pipe is drained. Re-arm in that case so the
      * caller performs one fresh readiness query instead of losing the wakeup.
      */
-    if (level_events != 0
+    /*
+     * Keep readable/acceptable conditions armed until the application drains
+     * them. WRITABLE is still returned as a level condition, but is not
+     * continuously rearmed: doing so makes a receive-only epoll loop spin
+     * merely because the send queue has space. A later writable transition
+     * still calls signal() and wakes the descriptor.
+     */
+    if ((level_events & NETINS_UDP_V2_NOTIFIER_REARM_EVENTS) != 0
         || notifier->level_generation != level_generation)
     {
         netins_udp_v2_notifier_write_locked(notifier);
