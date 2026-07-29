@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <stdarg.h>
+#include <time.h>
 
 
 
@@ -30,6 +31,11 @@ typedef struct {
     struct timeval latest_end;
     unsigned char stream_done[XQC_MINI_SVR_MAX_STREAMS];
     size_t stream_progress[XQC_MINI_SVR_MAX_STREAMS];
+    uint64_t recv_aggregate_sample_count;
+    uint64_t recv_aggregate_sample_bytes;
+    uint64_t recv_aggregate_total_ns;
+    uint64_t recv_aggregate_min_ns;
+    uint64_t recv_aggregate_max_ns;
     char output_path[PATH_LEN];
 } xqc_mini_svr_file_state_t;
 
@@ -144,6 +150,79 @@ xqc_mini_svr_now_us(void)
     return (uint64_t)tv.tv_sec * 1000 * 1000 + (uint64_t)tv.tv_usec;
 }
 
+static uint64_t
+xqc_mini_svr_monotonic_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+    return (uint64_t)ts.tv_sec * 1000 * 1000 * 1000 + (uint64_t)ts.tv_nsec;
+}
+
+static void
+xqc_mini_svr_record_latency(uint64_t *sample_count, uint64_t *sample_bytes,
+    uint64_t *total_ns, uint64_t *min_ns, uint64_t *max_ns,
+    uint64_t start_ns, uint64_t end_ns, size_t bytes)
+{
+    if (start_ns == 0 || end_ns < start_ns || bytes == 0) {
+        return;
+    }
+
+    uint64_t latency_ns = end_ns - start_ns;
+    if (*sample_count == 0 || latency_ns < *min_ns) {
+        *min_ns = latency_ns;
+    }
+    if (latency_ns > *max_ns) {
+        *max_ns = latency_ns;
+    }
+    (*sample_count)++;
+    *sample_bytes += (uint64_t)bytes;
+    *total_ns += latency_ns;
+}
+
+static void
+xqc_mini_svr_merge_latency(uint64_t *sample_count, uint64_t *sample_bytes,
+    uint64_t *total_ns, uint64_t *min_ns, uint64_t *max_ns,
+    uint64_t source_count, uint64_t source_bytes, uint64_t source_total_ns,
+    uint64_t source_min_ns, uint64_t source_max_ns)
+{
+    if (source_count == 0) {
+        return;
+    }
+
+    if (*sample_count == 0 || source_min_ns < *min_ns) {
+        *min_ns = source_min_ns;
+    }
+    if (source_max_ns > *max_ns) {
+        *max_ns = source_max_ns;
+    }
+    *sample_count += source_count;
+    *sample_bytes += source_bytes;
+    *total_ns += source_total_ns;
+}
+
+static void
+xqc_mini_svr_log_fragment_latency(const char *direction, const char *operation,
+    uint64_t sample_count, uint64_t sample_bytes, uint64_t total_ns,
+    uint64_t min_ns, uint64_t max_ns)
+{
+    if (sample_count == 0) {
+        printf("[server_fragment_latency] direction=%s operation=%s"
+               " sample_count=0 sample_bytes=0 processing_avg_us=unavailable\n",
+            direction, operation);
+        return;
+    }
+
+    printf("[server_fragment_latency] direction=%s operation=%s"
+           " sample_count=%" PRIu64 " sample_bytes=%" PRIu64
+           " processing_avg_us=%.3f processing_min_us=%.3f"
+           " processing_max_us=%.3f metric=server_internal_processing\n",
+        direction, operation, sample_count, sample_bytes,
+        (double)total_ns / (double)sample_count / 1000.0,
+        (double)min_ns / 1000.0, (double)max_ns / 1000.0);
+}
+
 static void
 xqc_mini_svr_update_max_u64(uint64_t *value, uint64_t candidate)
 {
@@ -256,6 +335,11 @@ xqc_mini_svr_get_diag_maybe_reset_phase(xqc_mini_svr_user_stream_t *user_stream)
         user_conn->get_submit_last_us = 0;
         user_conn->get_submit_streams = 0;
         user_conn->get_submit_bytes = 0;
+        user_conn->get_split_sample_count = 0;
+        user_conn->get_split_sample_bytes = 0;
+        user_conn->get_split_total_ns = 0;
+        user_conn->get_split_min_ns = 0;
+        user_conn->get_split_max_ns = 0;
         printf("[diag_server_get_submit][reset] stream=%d/%d"
                " offset=%zu len=%zu metric=app_submit_not_delivered\n",
                user_stream->stream_index, user_stream->stream_count,
@@ -288,6 +372,14 @@ xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
     user_conn->get_submit_last_us = now_us;
     user_conn->get_submit_streams++;
     user_conn->get_submit_bytes += user_stream->response_body_len;
+    xqc_mini_svr_merge_latency(&user_conn->get_split_sample_count,
+        &user_conn->get_split_sample_bytes, &user_conn->get_split_total_ns,
+        &user_conn->get_split_min_ns, &user_conn->get_split_max_ns,
+        user_stream->send_split_sample_count,
+        user_stream->send_split_sample_bytes,
+        user_stream->send_split_total_ns,
+        user_stream->send_split_min_ns,
+        user_stream->send_split_max_ns);
     if (user_stream->stream_count > user_conn->get_submit_expected_streams) {
         user_conn->get_submit_expected_streams = user_stream->stream_count;
     }
@@ -307,6 +399,19 @@ xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
            user_conn->get_submit_streams,
            user_conn->get_submit_expected_streams,
            user_conn->get_submit_bytes, wall_time_ms, app_submit_mbps);
+
+    if (user_conn->get_submit_expected_streams > 0
+        && user_conn->get_submit_streams
+            >= (uint64_t)user_conn->get_submit_expected_streams)
+    {
+        xqc_mini_svr_log_fragment_latency("send", "split",
+            user_conn->get_split_sample_count,
+            user_conn->get_split_sample_bytes,
+            user_conn->get_split_total_ns,
+            user_conn->get_split_min_ns,
+            user_conn->get_split_max_ns);
+        user_conn->get_submit_active = 0;
+    }
 }
 
 static void
@@ -478,18 +583,24 @@ static ssize_t
 xqc_mini_svr_h3_send_body_record(xqc_mini_svr_user_stream_t *user_stream,
     unsigned char *data, size_t len, int fin)
 {
-    xqc_usec_t start_us = xqc_mini_svr_now_us();
+    uint64_t start_ns = xqc_mini_svr_monotonic_now_ns();
     ssize_t ret = xqc_h3_request_send_body(user_stream->h3_request, data, len, fin);
-    xqc_usec_t end_us = xqc_mini_svr_now_us();
+    uint64_t end_ns = xqc_mini_svr_monotonic_now_ns();
 
     if (user_stream->method == REQUEST_METHOD_GET && user_stream->use_file_response) {
         user_stream->h3_send_count++;
         if (ret > 0) {
             user_stream->h3_send_bytes += (uint64_t)ret;
+            xqc_mini_svr_record_latency(&user_stream->send_split_sample_count,
+                &user_stream->send_split_sample_bytes,
+                &user_stream->send_split_total_ns,
+                &user_stream->send_split_min_ns,
+                &user_stream->send_split_max_ns,
+                start_ns, end_ns, (size_t)ret);
         }
-        if (end_us >= start_us) {
+        if (start_ns != 0 && end_ns >= start_ns) {
             xqc_mini_svr_update_max_u64(&user_stream->h3_send_max_us,
-                (uint64_t)(end_us - start_us));
+                (end_ns - start_ns) / 1000);
         }
     }
 
@@ -819,6 +930,11 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
     g_svr_file_state.latest_end.tv_usec = 0;
     memset(g_svr_file_state.stream_done, 0, sizeof(g_svr_file_state.stream_done));
     memset(g_svr_file_state.stream_progress, 0, sizeof(g_svr_file_state.stream_progress));
+    g_svr_file_state.recv_aggregate_sample_count = 0;
+    g_svr_file_state.recv_aggregate_sample_bytes = 0;
+    g_svr_file_state.recv_aggregate_total_ns = 0;
+    g_svr_file_state.recv_aggregate_min_ns = 0;
+    g_svr_file_state.recv_aggregate_max_ns = 0;
     if (output_path != NULL && output_path[0] != '\0') {
         strncpy(g_svr_file_state.output_path, output_path,
             sizeof(g_svr_file_state.output_path) - 1);
@@ -1035,6 +1151,17 @@ xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream)
             }
         }
 
+        xqc_mini_svr_merge_latency(
+            &g_svr_file_state.recv_aggregate_sample_count,
+            &g_svr_file_state.recv_aggregate_sample_bytes,
+            &g_svr_file_state.recv_aggregate_total_ns,
+            &g_svr_file_state.recv_aggregate_min_ns,
+            &g_svr_file_state.recv_aggregate_max_ns,
+            user_stream->recv_aggregate_sample_count,
+            user_stream->recv_aggregate_sample_bytes,
+            user_stream->recv_aggregate_total_ns,
+            user_stream->recv_aggregate_min_ns,
+            user_stream->recv_aggregate_max_ns);
         g_svr_file_state.completed_streams++;
         printf("[server] segment %d complete (%zu bytes at offset %zu)\n",
             user_stream->stream_index, user_stream->recv_body_len,
@@ -1054,6 +1181,12 @@ xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream)
                 printf("[server] aggregate throughput unavailable (duration %.3f ms)\n",
                     duration_ms);
             }
+            xqc_mini_svr_log_fragment_latency("recv", "aggregate",
+                g_svr_file_state.recv_aggregate_sample_count,
+                g_svr_file_state.recv_aggregate_sample_bytes,
+                g_svr_file_state.recv_aggregate_total_ns,
+                g_svr_file_state.recv_aggregate_min_ns,
+                g_svr_file_state.recv_aggregate_max_ns);
         }
     }
 }
@@ -1760,6 +1893,7 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             }
         }
         do {
+            uint64_t aggregate_start_ns = xqc_mini_svr_monotonic_now_ns();
             read = xqc_h3_request_recv_body(h3_request, recv_buff, recv_buff_size, &fin);
 
             if (read == -XQC_EAGAIN) {
@@ -1779,6 +1913,16 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
 
             read_sum += read;
             user_stream->recv_body_len += read;
+            uint64_t aggregate_end_ns = xqc_mini_svr_monotonic_now_ns();
+            if (read > 0) {
+                xqc_mini_svr_record_latency(
+                    &user_stream->recv_aggregate_sample_count,
+                    &user_stream->recv_aggregate_sample_bytes,
+                    &user_stream->recv_aggregate_total_ns,
+                    &user_stream->recv_aggregate_min_ns,
+                    &user_stream->recv_aggregate_max_ns,
+                    aggregate_start_ns, aggregate_end_ns, (size_t)read);
+            }
             xqc_mini_svr_update_upload_progress(user_stream);
             //printf("[server] received chunk: %zd bytes (total: %zu)\n", read, user_stream->recv_body_len);
         } while (read > 0);

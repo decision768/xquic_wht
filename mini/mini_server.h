@@ -172,6 +172,11 @@ typedef struct xqc_mini_svr_user_conn_s {
     uint64_t                get_submit_last_us;
     uint64_t                get_submit_streams;
     uint64_t                get_submit_bytes;
+    uint64_t                get_split_sample_count;
+    uint64_t                get_split_sample_bytes;
+    uint64_t                get_split_total_ns;
+    uint64_t                get_split_min_ns;
+    uint64_t                get_split_max_ns;
 
 } xqc_mini_svr_user_conn_t;
 

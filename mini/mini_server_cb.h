@@ -104,6 +104,20 @@ typedef struct xqc_mini_svr_user_stream_s {
     uint64_t                    h3_send_count;
     uint64_t                    h3_send_bytes;
     uint64_t                    h3_send_max_us;
+    /*
+     * Internal processing latency samples. These fields are private to mini_server
+     * and do not change the public XQUIC/NetIns ABI.
+     */
+    uint64_t                    recv_aggregate_sample_count;
+    uint64_t                    recv_aggregate_sample_bytes;
+    uint64_t                    recv_aggregate_total_ns;
+    uint64_t                    recv_aggregate_min_ns;
+    uint64_t                    recv_aggregate_max_ns;
+    uint64_t                    send_split_sample_count;
+    uint64_t                    send_split_sample_bytes;
+    uint64_t                    send_split_total_ns;
+    uint64_t                    send_split_min_ns;
+    uint64_t                    send_split_max_ns;
     int                         get_path_diag_started;
     xqc_mini_svr_get_diag_snapshot_t get_path_diag_start;
     char                        request_path[PATH_LEN];
