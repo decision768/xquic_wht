@@ -16,6 +16,28 @@ static unsigned int netins_udp_handle_count;
 static int netins_udp_valid(const netins_udp_t *handle);
 
 static void
+netins_udp_copy_string(char *destination, size_t destination_size,
+    const char *source)
+{
+    if (destination == NULL || destination_size == 0) {
+        return;
+    }
+    if (source == NULL) {
+        destination[0] = '\0';
+        return;
+    }
+
+    size_t length = 0;
+    while (length + 1 < destination_size && source[length] != '\0') {
+        length++;
+    }
+    if (length > 0) {
+        memcpy(destination, source, length);
+    }
+    destination[length] = '\0';
+}
+
+static void
 netins_udp_log(netins_udp_t *handle, int level, const char *format, ...)
 {
     if (!netins_udp_valid(handle) || handle->logger == NULL
@@ -263,9 +285,9 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         memset(handle->backend_config.interfaces, 0,
             sizeof(handle->backend_config.interfaces));
         for (uint32_t i = 0; i < interfaces->interface_count; i++) {
-            strncpy(handle->backend_config.interfaces[i],
-                interfaces->names[i],
-                sizeof(handle->backend_config.interfaces[i]) - 1);
+            netins_udp_copy_string(handle->backend_config.interfaces[i],
+                sizeof(handle->backend_config.interfaces[i]),
+                interfaces->names[i]);
         }
         break;
     }
@@ -286,8 +308,8 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
                 "unsupported scheduler");
         }
         handle->backend_config.has_scheduler = 1;
-        strncpy(handle->backend_config.scheduler, name,
-            sizeof(handle->backend_config.scheduler) - 1);
+        netins_udp_copy_string(handle->backend_config.scheduler,
+            sizeof(handle->backend_config.scheduler), name);
         break;
     }
     case NETINS_UDP_OPT_CONGESTION_CONTROL: {
@@ -345,14 +367,14 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
                 "client certificates are not supported");
         }
         handle->backend_config.has_tls = 1;
-        strncpy(handle->backend_config.tls_server_name, tls->server_name,
-            sizeof(handle->backend_config.tls_server_name) - 1);
-        strncpy(handle->backend_config.certificate_file,
-            tls->certificate_file,
-            sizeof(handle->backend_config.certificate_file) - 1);
-        strncpy(handle->backend_config.private_key_file,
-            tls->private_key_file,
-            sizeof(handle->backend_config.private_key_file) - 1);
+        netins_udp_copy_string(handle->backend_config.tls_server_name,
+            sizeof(handle->backend_config.tls_server_name), tls->server_name);
+        netins_udp_copy_string(handle->backend_config.certificate_file,
+            sizeof(handle->backend_config.certificate_file),
+            tls->certificate_file);
+        netins_udp_copy_string(handle->backend_config.private_key_file,
+            sizeof(handle->backend_config.private_key_file),
+            tls->private_key_file);
         break;
     }
     case NETINS_UDP_OPT_CONNECT_TIMEOUT_MS: {
@@ -770,12 +792,12 @@ netins_udp_copy_path_statis(netins_udp_path_statis_t *destination,
     destination->path_index = source->path_index;
     destination->path_state = source->path_state;
     destination->app_status = source->app_status;
-    strncpy(destination->interface_name, source->interface_name,
-        sizeof(destination->interface_name) - 1);
-    strncpy(destination->local_address, source->local_address,
-        sizeof(destination->local_address) - 1);
-    strncpy(destination->peer_address, source->peer_address,
-        sizeof(destination->peer_address) - 1);
+    netins_udp_copy_string(destination->interface_name,
+        sizeof(destination->interface_name), source->interface_name);
+    netins_udp_copy_string(destination->local_address,
+        sizeof(destination->local_address), source->local_address);
+    netins_udp_copy_string(destination->peer_address,
+        sizeof(destination->peer_address), source->peer_address);
     destination->packets_sent = source->packets_sent;
     destination->packets_received = source->packets_received;
     destination->bytes_sent = source->bytes_sent;
@@ -869,8 +891,8 @@ netins_udp_get_close_reason(netins_udp_t *handle,
     out->source = handle->close_source;
     out->system_error = handle->close_system_error;
     out->transport_error = handle->close_transport_error;
-    strncpy(out->message, handle->close_message,
-        sizeof(out->message) - 1);
+    netins_udp_copy_string(out->message, sizeof(out->message),
+        handle->close_message);
     return 0;
 }
 
@@ -925,8 +947,8 @@ netins_udp_get_snapshot(netins_udp_t *handle, netins_udp_snapshot_t *out)
     out->close_reason.source = handle->close_source;
     out->close_reason.system_error = handle->close_system_error;
     out->close_reason.transport_error = handle->close_transport_error;
-    strncpy(out->close_reason.message, handle->close_message,
-        sizeof(out->close_reason.message) - 1);
+    netins_udp_copy_string(out->close_reason.message,
+        sizeof(out->close_reason.message), handle->close_message);
     return 0;
 }
 

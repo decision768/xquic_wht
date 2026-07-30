@@ -102,12 +102,13 @@ if(NOT SSL_INC_PATH AND NOT SSL_LIB_PATH)
     # set(SSL_INC_PATH ${SSL_INCLUDE_DIR})
 
 else()
-    if(NOT EXISTS ${SSL_INC_PATH})
-        message(FATAL_ERROR "ssl include path not found")
+    if(NOT EXISTS "${SSL_INC_PATH}")
+        message(FATAL_ERROR
+            "ssl include path not found: ${SSL_INC_PATH}")
     endif()
 
     foreach(LIB IN LISTS SSL_LIB_PATH)
-        if(NOT EXISTS ${LIB})
+        if(NOT EXISTS "${LIB}")
             message(FATAL_ERROR "ssl lib not found ${LIB}")
         endif()
     endforeach()

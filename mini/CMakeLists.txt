@@ -7,6 +7,17 @@ set(ZLOG_STATIC_LIB
     "/home/admin123/zlog-1.2.18/build_aarch64/lib/libzlog.a"
     CACHE FILEPATH "Path to the zlog static library")
 
+if(NOT EXISTS "${ZLOG_INCLUDE_DIR}/zlog.h")
+    message(FATAL_ERROR
+        "zlog header not found: ${ZLOG_INCLUDE_DIR}/zlog.h")
+endif()
+if(NOT EXISTS "${ZLOG_STATIC_LIB}")
+    message(FATAL_ERROR
+        "zlog library not found: ${ZLOG_STATIC_LIB}")
+endif()
+message(STATUS "Mini API zlog include: ${ZLOG_INCLUDE_DIR}")
+message(STATUS "Mini API zlog library: ${ZLOG_STATIC_LIB}")
+
 set(MINI_BACKEND_INCLUDE_DIRS
     "${CMAKE_SOURCE_DIR}"
     "${CMAKE_SOURCE_DIR}/include"

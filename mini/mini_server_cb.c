@@ -83,6 +83,29 @@ static void xqc_mini_svr_log_get_path_response_done(xqc_mini_svr_user_stream_t *
     double duration_ms, double mbps);
 
 
+static void
+xqc_mini_svr_copy_string(char *destination, size_t destination_size,
+    const char *source)
+{
+    if (destination == NULL || destination_size == 0) {
+        return;
+    }
+    if (source == NULL) {
+        destination[0] = '\0';
+        return;
+    }
+
+    size_t length = 0;
+    while (length + 1 < destination_size && source[length] != '\0') {
+        length++;
+    }
+    if (length > 0) {
+        memcpy(destination, source, length);
+    }
+    destination[length] = '\0';
+}
+
+
 static size_t
 xqc_mini_svr_get_stream_range_size(xqc_mini_svr_user_stream_t *user_stream)
 {
@@ -753,8 +776,105 @@ xqc_mini_svr_duration_ms(const struct timeval *start, const struct timeval *end)
 static xqc_mini_svr_user_conn_t *
 xqc_mini_svr_get_conn_from_request(xqc_mini_svr_user_stream_t *user_stream)
 {
-    return (xqc_mini_svr_user_conn_t *)xqc_h3_get_conn_user_data_by_request(
-        user_stream->h3_request);
+    if (user_stream == NULL) {
+        return NULL;
+    }
+    if (user_stream->user_conn != NULL) {
+        return user_stream->user_conn;
+    }
+    user_stream->user_conn =
+        (xqc_mini_svr_user_conn_t *)xqc_h3_get_conn_user_data_by_request(
+            user_stream->h3_request);
+    return user_stream->user_conn;
+}
+
+static void
+xqc_mini_svr_defer_request(xqc_mini_svr_user_conn_t *user_conn,
+    xqc_mini_svr_user_stream_t *user_stream,
+    xqc_request_notify_flag_t flag)
+{
+    user_stream->pending_read_flags |= (unsigned int)flag;
+    if (user_stream->pending_for_serve) {
+        return;
+    }
+
+    user_stream->pending_for_serve = 1;
+    user_stream->pending_next = NULL;
+    if (user_conn->pending_stream_tail == NULL) {
+        user_conn->pending_stream_head = user_stream;
+    } else {
+        user_conn->pending_stream_tail->pending_next = user_stream;
+    }
+    user_conn->pending_stream_tail = user_stream;
+}
+
+static void
+xqc_mini_svr_unlink_deferred_request(xqc_mini_svr_user_conn_t *user_conn,
+    xqc_mini_svr_user_stream_t *user_stream)
+{
+    if (user_conn == NULL || user_stream == NULL
+        || !user_stream->pending_for_serve)
+    {
+        return;
+    }
+
+    xqc_mini_svr_user_stream_t **cursor =
+        &user_conn->pending_stream_head;
+    while (*cursor != NULL) {
+        if (*cursor == user_stream) {
+            *cursor = user_stream->pending_next;
+            if (user_conn->pending_stream_tail == user_stream) {
+                user_conn->pending_stream_tail = NULL;
+                for (xqc_mini_svr_user_stream_t *tail =
+                        user_conn->pending_stream_head;
+                    tail != NULL; tail = tail->pending_next)
+                {
+                    user_conn->pending_stream_tail = tail;
+                }
+            }
+            user_stream->pending_next = NULL;
+            user_stream->pending_for_serve = 0;
+            user_stream->pending_read_flags = 0;
+            return;
+        }
+        cursor = &(*cursor)->pending_next;
+    }
+
+    user_stream->pending_next = NULL;
+    user_stream->pending_for_serve = 0;
+    user_stream->pending_read_flags = 0;
+}
+
+int
+xqc_mini_svr_resume_pending_requests(xqc_mini_svr_user_conn_t *user_conn)
+{
+    if (user_conn == NULL || !user_conn->serve_configured
+        || user_conn->serve_cancelled)
+    {
+        return XQC_ERROR;
+    }
+
+    while (user_conn->pending_stream_head != NULL) {
+        xqc_mini_svr_user_stream_t *user_stream =
+            user_conn->pending_stream_head;
+        user_conn->pending_stream_head = user_stream->pending_next;
+        if (user_conn->pending_stream_head == NULL) {
+            user_conn->pending_stream_tail = NULL;
+        }
+
+        xqc_request_notify_flag_t flags =
+            (xqc_request_notify_flag_t)user_stream->pending_read_flags;
+        user_stream->pending_next = NULL;
+        user_stream->pending_for_serve = 0;
+        user_stream->pending_read_flags = 0;
+
+        int ret = xqc_mini_svr_h3_request_read_notify(
+            user_stream->h3_request, flags, user_stream);
+        if (ret < 0) {
+            return ret;
+        }
+    }
+    return XQC_OK;
 }
 
 void
@@ -979,8 +1099,7 @@ xqc_mini_svr_resolve_file_path(
     }
 
     if (target[0] == '/') {
-        strncpy(resolved, target, resolved_len - 1);
-        resolved[resolved_len - 1] = '\0';
+        xqc_mini_svr_copy_string(resolved, resolved_len, target);
         return XQC_OK;
     }
 
@@ -1172,9 +1291,8 @@ xqc_mini_svr_reset_file_state(xqc_mini_svr_file_state_t *state,
     state->recv_aggregate_min_ns = 0;
     state->recv_aggregate_max_ns = 0;
     if (output_path != NULL && output_path[0] != '\0') {
-        strncpy(state->output_path, output_path,
-            sizeof(state->output_path) - 1);
-        state->output_path[sizeof(state->output_path) - 1] = '\0';
+        xqc_mini_svr_copy_string(state->output_path,
+            sizeof(state->output_path), output_path);
     } else {
         state->output_path[0] = '\0';
     }
@@ -1251,8 +1369,7 @@ xqc_mini_svr_resolve_upload_path(
         target = SERVER_OUTPUT_FILE;
     }
     if (target[0] == '/') {
-        strncpy(resolved, target, resolved_len - 1);
-        resolved[resolved_len - 1] = '\0';
+        xqc_mini_svr_copy_string(resolved, resolved_len, target);
         return XQC_OK;
     }
     int written = snprintf(resolved, resolved_len, "%s/%s",
@@ -1826,7 +1943,9 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     printf("[stats] xqc_mini_svr_h3_conn_close_notify success \n");
     if (user_conn->is_connection_scope) {
         xqc_mini_svr_user_conn_t *listener_conn = user_conn->listener_conn;
-        user_conn->last_error_code = xqc_h3_conn_get_errno(h3_conn);
+        int h3_error = xqc_h3_conn_get_errno(h3_conn);
+        user_conn->last_error_code =
+            h3_error == H3_NO_ERROR ? 0 : h3_error;
         xqc_h3_conn_set_user_data(h3_conn, listener_conn);
         user_conn->h3_conn = NULL;
         user_conn->connection_closed = 1;
@@ -1885,6 +2004,9 @@ xqc_mini_svr_h3_request_create_notify(xqc_h3_request_t *h3_request, void *strm_u
         return XQC_ERROR;
     }
     user_stream->h3_request = h3_request;
+    user_stream->user_conn =
+        (xqc_mini_svr_user_conn_t *)xqc_h3_get_conn_user_data_by_request(
+            h3_request);
     user_stream->method = REQUEST_METHOD_POST;
     user_stream->response_status = 200;
     user_stream->response_content_type = "text/plain";
@@ -1915,6 +2037,9 @@ xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_us
     if (user_stream == NULL) {
         return 0;
     }
+    xqc_mini_svr_user_conn_t *user_conn =
+        xqc_mini_svr_get_conn_from_request(user_stream);
+    xqc_mini_svr_unlink_deferred_request(user_conn, user_stream);
     if (user_stream->recv_body_fd >= 0) {
         close(user_stream->recv_body_fd);
         user_stream->recv_body_fd = -1;
@@ -2027,10 +2152,20 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         return XQC_OK;
     }
     if (user_conn != NULL && user_conn->api_owned
-        && (!user_conn->serve_configured || user_conn->serve_cancelled))
+        && user_conn->serve_cancelled)
     {
         printf("[error] request received outside an active serve loop\n");
         return XQC_ERROR;
+    }
+    if (user_conn != NULL && user_conn->api_owned
+        && !user_conn->serve_configured)
+    {
+        int first_defer = !user_stream->pending_for_serve;
+        xqc_mini_svr_defer_request(user_conn, user_stream, flag);
+        if (first_defer) {
+            printf("[stats] request deferred until serve loop is active\n");
+        }
+        return XQC_OK;
     }
 
 

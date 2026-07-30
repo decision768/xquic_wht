@@ -315,38 +315,58 @@ mini_backend_server_connection_serve(mini_backend_server_t *server,
 #if defined(XQC_SYS_WINDOWS)
     return EOPNOTSUPP;
 #else
-    char canonical_root[PATH_LEN];
-    if (realpath(root_path, canonical_root) == NULL) {
+    /*
+     * Do not pass a PATH_LEN-sized buffer to realpath().  On glibc builds
+     * with _FORTIFY_SOURCE enabled, realpath requires a PATH_MAX-sized
+     * destination.  PATH_LEN is intentionally smaller than PATH_MAX on
+     * Linux, so the fortified wrapper aborts the process before serving the
+     * first request.  Passing NULL lets realpath allocate the required size.
+     */
+    char *canonical_root = realpath(root_path, NULL);
+    if (canonical_root == NULL) {
         return errno != 0 ? errno : ENOENT;
     }
-    if (strlen(canonical_root) >= sizeof(connection->serve_root_path)) {
+    size_t canonical_root_len = strlen(canonical_root);
+    if (canonical_root_len >= sizeof(connection->serve_root_path)) {
+        free(canonical_root);
         return ENAMETOOLONG;
     }
     int root_fd = open(canonical_root,
         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (root_fd < 0) {
-        return errno != 0 ? errno : ENOENT;
+        int saved_errno = errno;
+        free(canonical_root);
+        return saved_errno != 0 ? saved_errno : ENOENT;
     }
     struct stat root_stat;
     if (fstat(root_fd, &root_stat) != 0) {
         int saved_errno = errno;
         close(root_fd);
+        free(canonical_root);
         return saved_errno != 0 ? saved_errno : EIO;
     }
     if (!S_ISDIR(root_stat.st_mode)) {
         close(root_fd);
+        free(canonical_root);
         return ENOTDIR;
     }
     if (connection->serve_root_fd >= 0) {
         close(connection->serve_root_fd);
     }
     connection->serve_root_fd = root_fd;
-    strncpy(connection->serve_root_path, canonical_root,
-        sizeof(connection->serve_root_path) - 1);
-    connection->serve_root_path[
-        sizeof(connection->serve_root_path) - 1] = '\0';
+    memcpy(connection->serve_root_path, canonical_root,
+        canonical_root_len + 1);
+    free(canonical_root);
     connection->serve_cancelled = 0;
     connection->serve_configured = 1;
+    int resume_ret = xqc_mini_svr_resume_pending_requests(connection);
+    if (resume_ret < 0) {
+        connection->last_error_code = EPROTO;
+        connection->serve_cancelled = 1;
+        connection->serve_configured = 0;
+        (void)xqc_h3_conn_close(server->ctx.engine, &connection->cid);
+        return EPROTO;
+    }
 
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;

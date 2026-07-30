@@ -54,7 +54,11 @@ typedef struct xqc_mini_svr_get_diag_snapshot_s {
 } xqc_mini_svr_get_diag_snapshot_t;
 
 typedef struct xqc_mini_svr_user_stream_s {
+    struct xqc_mini_svr_user_stream_s *pending_next;
+    struct xqc_mini_svr_user_conn_s   *user_conn;
     xqc_h3_request_t           *h3_request;
+    unsigned int                 pending_read_flags;
+    int                          pending_for_serve;
     int                          recv_body_fd;
     FILE                        *send_body_fp;
     int                          send_body_fd;
@@ -206,6 +210,8 @@ int xqc_mini_svr_h3_request_write_notify(xqc_h3_request_t *h3_request, void *str
 // 发送响应体数据
 int xqc_mini_svr_send_body(xqc_mini_svr_user_stream_t *user_stream);
 void xqc_mini_svr_release_connection_state(
+    struct xqc_mini_svr_user_conn_s *user_conn);
+int xqc_mini_svr_resume_pending_requests(
     struct xqc_mini_svr_user_conn_s *user_conn);
 
 #endif
