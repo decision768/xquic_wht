@@ -32,9 +32,10 @@ usage(const char *program)
         "  --interface NAME        Client interface; repeat at most twice\n"
         "  --server-name NAME      TLS SNI name\n"
         "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
-        "                          bandwidth|fastprobe|adaptive\n"
+        "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
+        "                          fastprobe20|fastonly|adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
-        "  --timeout-ms MS         Connect and transfer timeout; 0 is infinite\n"
+        "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
         "  --repeat N              Sequential tasks on one connection (default 1)\n",
         program);
 }
@@ -70,6 +71,10 @@ parse_scheduler(const char *name, int *out)
         {"act", NETINS_UDP_SCHEDULER_ACT},
         {"bandwidth", NETINS_UDP_SCHEDULER_BANDWIDTH},
         {"fastprobe", NETINS_UDP_SCHEDULER_FASTPROBE},
+        {"fastprobe5", NETINS_UDP_SCHEDULER_FASTPROBE5},
+        {"fastprobe10", NETINS_UDP_SCHEDULER_FASTPROBE10},
+        {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
+        {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
     };
     size_t i;
@@ -253,8 +258,12 @@ configure_client(netins_udp_t *client, const client_options_t *options)
             &options->scheduler, sizeof(options->scheduler)) != 0
         || netins_udp_set_opt(client, NETINS_UDP_OPT_CONGESTION_CONTROL,
             &options->congestion_control,
-            sizeof(options->congestion_control)) != 0
-        || netins_udp_set_opt(client, NETINS_UDP_OPT_CONNECT_TIMEOUT_MS,
+            sizeof(options->congestion_control)) != 0)
+    {
+        return -1;
+    }
+    if (options->timeout_ms != 0
+        && netins_udp_set_opt(client, NETINS_UDP_OPT_CONNECT_TIMEOUT_MS,
             &options->timeout_ms, sizeof(options->timeout_ms)) != 0)
     {
         return -1;

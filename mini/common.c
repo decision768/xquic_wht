@@ -10,28 +10,46 @@ char method_s[][16] = {
     {"POST"}
 };
 
-static _Thread_local int xqc_mini_log_scope_active;
-static _Thread_local xqc_mini_logger_fn xqc_mini_log_callback;
-static _Thread_local void *xqc_mini_log_user_data;
-static _Thread_local int xqc_mini_log_minimum_level;
+#define XQC_MINI_LOG_SCOPE_MAX_DEPTH 32
+
+typedef struct xqc_mini_log_scope_s {
+    xqc_mini_logger_fn callback;
+    void *user_data;
+    int minimum_level;
+} xqc_mini_log_scope_t;
+
+static _Thread_local xqc_mini_log_scope_t
+    xqc_mini_log_scopes[XQC_MINI_LOG_SCOPE_MAX_DEPTH];
+static _Thread_local unsigned int xqc_mini_log_scope_depth;
+static _Thread_local unsigned int xqc_mini_log_scope_overflow;
 
 void
 xqc_mini_log_scope_enter(xqc_mini_logger_fn callback,
     void *user_data, int minimum_level)
 {
-    xqc_mini_log_scope_active = 1;
-    xqc_mini_log_callback = callback;
-    xqc_mini_log_user_data = user_data;
-    xqc_mini_log_minimum_level = minimum_level;
+    if (xqc_mini_log_scope_depth >= XQC_MINI_LOG_SCOPE_MAX_DEPTH) {
+        xqc_mini_log_scope_overflow++;
+        return;
+    }
+    unsigned int index = xqc_mini_log_scope_depth++;
+    xqc_mini_log_scopes[index].callback = callback;
+    xqc_mini_log_scopes[index].user_data = user_data;
+    xqc_mini_log_scopes[index].minimum_level = minimum_level;
 }
 
 void
 xqc_mini_log_scope_leave(void)
 {
-    xqc_mini_log_scope_active = 0;
-    xqc_mini_log_callback = NULL;
-    xqc_mini_log_user_data = NULL;
-    xqc_mini_log_minimum_level = 0;
+    if (xqc_mini_log_scope_overflow > 0) {
+        xqc_mini_log_scope_overflow--;
+        return;
+    }
+    if (xqc_mini_log_scope_depth == 0) {
+        return;
+    }
+    xqc_mini_log_scope_depth--;
+    memset(&xqc_mini_log_scopes[xqc_mini_log_scope_depth], 0,
+        sizeof(xqc_mini_log_scopes[xqc_mini_log_scope_depth]));
 }
 
 int
@@ -39,7 +57,7 @@ xqc_mini_log_printf(const char *format, ...)
 {
     va_list args;
     va_start(args, format);
-    if (!xqc_mini_log_scope_active) {
+    if (xqc_mini_log_scope_depth == 0) {
         int ret = vprintf(format, args);
         va_end(args);
         return ret;
@@ -56,10 +74,11 @@ xqc_mini_log_printf(const char *format, ...)
     } else if (strncmp(message, "[diag", 5) == 0) {
         level = 0;
     }
-    if (xqc_mini_log_callback != NULL
-        && level >= xqc_mini_log_minimum_level)
+    const xqc_mini_log_scope_t *scope =
+        &xqc_mini_log_scopes[xqc_mini_log_scope_depth - 1];
+    if (scope->callback != NULL && level >= scope->minimum_level)
     {
-        xqc_mini_log_callback(xqc_mini_log_user_data, level, message);
+        scope->callback(scope->user_data, level, message);
     }
     return ret;
 }

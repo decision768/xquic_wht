@@ -300,7 +300,8 @@ NETINS_UDP_PUBLIC int netins_udp_cleanup(void);
 /*
  * new() creates a client or server handle. The caller owns every returned
  * handle and releases it exactly once with close(). Options are copied and
- * may only be changed while the handle is in NEW state.
+ * may only be changed while the handle is in NEW state, except LOGGER,
+ * which may be replaced on a live handle.
  */
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int role);
 NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *handle,
@@ -329,7 +330,8 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(netins_udp_t *server);
  *
  * serve() configures an accepted connection's remote file namespace and
  * drives its shared event loop until the peer closes or timeout_ms expires.
- * Remote paths are confined to root_path and ".." components are rejected.
+ * Remote paths are confined to root_path; ".." and symbolic-link traversal
+ * are rejected.
  */
 NETINS_UDP_PUBLIC int netins_udp_transfer(netins_udp_t *client,
     const netins_udp_transfer_t *task,
@@ -354,8 +356,8 @@ NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *handle);
  * Functions returning int use 0 for success and -1 for failure unless they
  * return an enum state. Failure sets errno and, for a valid handle, stores a
  * connection-level error code/message retrievable below. Handles are not
- * safe for concurrent calls; callers must serialize access to each handle
- * and to accepted handles sharing one server backend.
+ * safe for concurrent calls. Callers must serialize all operations on a
+ * listener and every accepted handle that shares its server backend.
  */
 NETINS_UDP_PUBLIC int netins_udp_get_last_error_code(
     netins_udp_t *handle);

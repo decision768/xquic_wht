@@ -857,6 +857,12 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
         if (ret != XQC_OK) {
             fprintf(stderr, "[error] xqc_engine_packet_process ret=%d\n", ret);
         }
+        if (user_conn->api_listener_mode
+            && user_conn->accept_yield_requested)
+        {
+            user_conn->accept_yield_requested = 0;
+            break;
+        }
 
         // total_recv += recv_size;
         // // 每 10MB 打印一次
@@ -925,6 +931,10 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
         return;
     }
     xqc_mini_svr_release_connection_state(user_conn);
+    if (user_conn->serve_root_fd >= 0) {
+        close(user_conn->serve_root_fd);
+        user_conn->serve_root_fd = -1;
+    }
     if (!user_conn->is_connection_scope && user_conn->ev_socket != NULL) {
         event_del(user_conn->ev_socket);
         event_free(user_conn->ev_socket);
@@ -956,6 +966,7 @@ xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx)
 
     user_conn->ctx = ctx;
     user_conn->fd = -1;
+    user_conn->serve_root_fd = -1;
     user_conn->accepting = 1;
 
     user_conn->local_addr = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));

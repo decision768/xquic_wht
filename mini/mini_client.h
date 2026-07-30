@@ -478,6 +478,7 @@ void xqc_mini_cli_init_0rtt(xqc_mini_cli_args_t *args);
 void xqc_mini_cli_init_conn_ssl_config(xqc_conn_ssl_config_t *conn_ssl_config, xqc_mini_cli_args_t *args);
 
 int xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,xqc_mini_cli_req_config_t* req_cfg, size_t body_len,xqc_mini_cli_user_stream_t *user_stream);
+int xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream);
 
 int xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream_t *user_stream);
 

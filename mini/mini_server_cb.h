@@ -82,7 +82,6 @@ typedef struct xqc_mini_svr_user_stream_s {
     int                         header_recvd;
     size_t                      send_body_len;
     size_t                      recv_body_len;
-    char                       *recv_buf;
 
     size_t                      response_body_len;
     size_t                      response_body_sent;

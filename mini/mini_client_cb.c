@@ -5,6 +5,8 @@
  * 3. h3 callbacks
  */
 #include "mini_client_cb.h"
+#include <errno.h>
+#include <limits.h>
 #include <strings.h>
 
 /**
@@ -262,6 +264,29 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     xqc_mini_cli_ctx_t *conn_ctx = user_conn->ctx;
     xqc_request_stats_t stats = xqc_h3_request_get_stats(h3_request);
 
+    if (stats.stream_err != 0) {
+        printf("[error] stream %d closed with transport error %d\n",
+            user_stream->stream_index, stats.stream_err);
+        xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+    } else if (conn_ctx->args->req_cfg.method == REQUEST_METHOD_POST
+        && stats.send_body_size != user_stream->file_size)
+    {
+        printf("[error] stream %d submitted %zu/%zu POST body bytes\n",
+            user_stream->stream_index, stats.send_body_size,
+            user_stream->file_size);
+        xqc_mini_cli_set_transfer_error(user_conn, EIO);
+    }
+
+    int closing_request_count =
+        user_conn->completed_requests + user_conn->active_requests
+        + (user_stream->slot_released ? 1 : 0);
+    if (user_conn->transfer_error_code != 0
+        && closing_request_count < user_conn->target_requests)
+    {
+        user_conn->target_requests = closing_request_count;
+        user_conn->auto_start_requests = 0;
+    }
+
     if (user_stream->send_body_fp) {
         fclose(user_stream->send_body_fp);
         user_stream->send_body_fp = NULL;
@@ -280,7 +305,10 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     }
 
 
-    if (user_conn->completed_requests < user_conn->target_requests) {
+    if (user_conn->transfer_active
+        && user_conn->transfer_error_code == 0
+        && user_conn->completed_requests < user_conn->target_requests)
+    {
         if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
             printf("[error] schedule next request round failed\n");
             xqc_mini_cli_set_transfer_error(user_conn, EIO);
@@ -328,7 +356,9 @@ xqc_mini_cli_finish_download_stream(
             user_conn->active_requests--;
         }
         user_stream->slot_released = 1;
-        if (user_conn->next_stream_index < user_conn->target_requests
+        if (user_conn->transfer_active
+            && user_conn->transfer_error_code == 0
+            && user_conn->next_stream_index < user_conn->target_requests
             && xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK)
         {
             printf("[error] schedule next GET round failed\n");
@@ -336,6 +366,11 @@ xqc_mini_cli_finish_download_stream(
             user_conn->target_requests =
                 user_conn->completed_requests + user_conn->active_requests + 1;
         }
+    }
+
+    if (user_conn->transfer_error_code != 0) {
+        xqc_mini_cli_maybe_finish_transfer(user_conn);
+        return XQC_OK;
     }
 
     user_conn->download_total_bytes += user_stream->recv_body_len;
@@ -382,65 +417,124 @@ xqc_mini_cli_finish_download_stream(
 }
 
 /*用于触发接收事件回调，常用于GET方法或者接收response*/
+static int
+xqc_mini_cli_header_name_is(const xqc_http_header_t *header,
+    const char *name)
+{
+    size_t name_len = strlen(name);
+    return header != NULL && header->name.iov_len == name_len
+        && strncasecmp((const char *)header->name.iov_base,
+            name, name_len) == 0;
+}
+
+static int
+xqc_mini_cli_parse_size_header(const xqc_http_header_t *header,
+    size_t *value)
+{
+    if (header == NULL || value == NULL || header->value.iov_len == 0
+        || header->value.iov_len >= 64)
+    {
+        return XQC_ERROR;
+    }
+    char buffer[64];
+    size_t length = header->value.iov_len;
+    memcpy(buffer, header->value.iov_base, length);
+    buffer[length] = '\0';
+    for (size_t i = 0; i < length; i++) {
+        if (buffer[i] < '0' || buffer[i] > '9') {
+            return XQC_ERROR;
+        }
+    }
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(buffer, &end, 10);
+    if (errno != 0 || end != buffer + length || parsed > SIZE_MAX) {
+        return XQC_ERROR;
+    }
+    *value = (size_t)parsed;
+    return XQC_OK;
+}
+
 int
 xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request, 
     xqc_request_notify_flag_t flag, void *h3s_user_data)
 {
     char recv_buff[XQC_MAX_BUFF_SIZE] = {0};
     size_t recv_buff_size;
-    ssize_t read, read_sum;
+    ssize_t read;
     unsigned char fin = 0;
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
     xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    if (user_stream->recv_fin) {
+        return XQC_OK;
+    }
 
     if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
         xqc_http_headers_t *headers;
         headers = xqc_h3_request_recv_headers(h3_request, &fin);
         if (headers == NULL) {
             printf("[error] xqc_h3_request_recv_headers error\n");
+            xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
             return XQC_ERROR;
         }
         int status_code = 0;
+        int status_present = 0;
+        int content_length_present = 0;
         int total_length_present = 0;
-        for (int i = 0; i < headers->count; i++) {
+        size_t parsed_content_length = 0;
+        size_t parsed_total_length = 0;
+        for (size_t i = 0; i < headers->count; i++) {
+            xqc_http_header_t *header = &headers->headers[i];
             printf("[receive report] %.*s = %.*s\n",
-                (int)headers->headers[i].name.iov_len,
-                (char *)headers->headers[i].name.iov_base,
-                (int)headers->headers[i].value.iov_len,
-                (char *)headers->headers[i].value.iov_base);
-            if (headers->headers[i].name.iov_len == strlen(":status")
-                && strncmp((char *)headers->headers[i].name.iov_base, ":status",
-                           headers->headers[i].name.iov_len) == 0) {
+                (int)header->name.iov_len,
+                (char *)header->name.iov_base,
+                (int)header->value.iov_len,
+                (char *)header->value.iov_base);
+            if (xqc_mini_cli_header_name_is(header, ":status")) {
                 char status_buf[4] = {0};
-                size_t len = headers->headers[i].value.iov_len;
-                if (len >= sizeof(status_buf)) {
-                    len = sizeof(status_buf) - 1;
+                if (status_present || header->value.iov_len != 3) {
+                    xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                    return XQC_ERROR;
                 }
-                memcpy(status_buf, headers->headers[i].value.iov_base, len);
+                memcpy(status_buf, header->value.iov_base, 3);
+                if (status_buf[0] < '1' || status_buf[0] > '5'
+                    || status_buf[1] < '0' || status_buf[1] > '9'
+                    || status_buf[2] < '0' || status_buf[2] > '9')
+                {
+                    xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                    return XQC_ERROR;
+                }
                 status_code = atoi(status_buf);
-            }else if (strncasecmp((char *)headers->headers[i].name.iov_base,
-                "content-length", headers->headers[i].name.iov_len) == 0) {
-                char length_buf[32] = {0};
-                size_t len = headers->headers[i].value.iov_len;
-                if (len >= sizeof(length_buf)) {
-                    len = sizeof(length_buf) - 1;
+                status_present = 1;
+            } else if (xqc_mini_cli_header_name_is(
+                    header, "content-length"))
+            {
+                if (content_length_present
+                    || xqc_mini_cli_parse_size_header(
+                        header, &parsed_content_length) != XQC_OK)
+                {
+                    xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                    return XQC_ERROR;
                 }
-                memcpy(length_buf, headers->headers[i].value.iov_base, len);
-                user_stream->expected_content_length = strtoull(length_buf, NULL, 10);
-            }else if (strncasecmp((char *)headers->headers[i].name.iov_base,
-                "x-total-length", headers->headers[i].name.iov_len) == 0) {
-                char total_buf[32] = {0};
-                size_t len = headers->headers[i].value.iov_len;
-                if (len >= sizeof(total_buf)) {
-                    len = sizeof(total_buf) - 1;
+                content_length_present = 1;
+            } else if (xqc_mini_cli_header_name_is(
+                    header, "x-total-length"))
+            {
+                if (total_length_present
+                    || xqc_mini_cli_parse_size_header(
+                        header, &parsed_total_length) != XQC_OK)
+                {
+                    xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                    return XQC_ERROR;
                 }
-                memcpy(total_buf, headers->headers[i].value.iov_base, len);
-                size_t total_length = strtoull(total_buf, NULL, 10);
-                user_conn->download_expected_bytes = total_length;
-                user_conn->send_file_size = total_length;
                 total_length_present = 1;
             }
         }
+        if (!status_present || !content_length_present) {
+            xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+            return XQC_ERROR;
+        }
+        user_stream->expected_content_length = parsed_content_length;
 
         user_stream->response_status = status_code;
         if (status_code < 200 || status_code >= 300) {
@@ -449,33 +543,71 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && total_length_present
-            && !user_conn->total_requests_known)
+            && status_code >= 200 && status_code < 300)
         {
+            if (!total_length_present) {
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
+            }
+            if ((uintmax_t)parsed_total_length > (uintmax_t)INT64_MAX) {
+                xqc_mini_cli_set_transfer_error(user_conn, EFBIG);
+                return XQC_ERROR;
+            }
+            if (user_conn->total_requests_known
+                && parsed_total_length != user_conn->download_expected_bytes)
+            {
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
+            }
             size_t stream_range_size = user_conn->ctx->args->net_cfg.stream_range_size > 0
                 ? user_conn->ctx->args->net_cfg.stream_range_size
                 : (4*1024*1024);
-            int required_streams = (int)((user_conn->download_expected_bytes + stream_range_size - 1)
-                / stream_range_size);
-            if (required_streams <= 0) {
-                required_streams = 1;
+            size_t required_size = parsed_total_length == 0 ? 1
+                : ((parsed_total_length - 1) / stream_range_size) + 1;
+            if (required_size > INT_MAX) {
+                xqc_mini_cli_set_transfer_error(user_conn, EFBIG);
+                return XQC_ERROR;
             }
+            int required_streams = (int)required_size;
             if (required_streams < user_conn->next_stream_index) {
-                required_streams = user_conn->next_stream_index;
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
             }
-            user_conn->target_requests = required_streams;
-            user_conn->total_requests_known = 1;
-            printf("[stats] GET total length=%zu, total rounds stream count=%d, concurrency=%d\n",
-                user_conn->download_expected_bytes, user_conn->target_requests,
-                user_conn->max_concurrent_requests);
-            if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
-                printf("[error] schedule GET rounds failed\n");
-                xqc_mini_cli_set_transfer_error(user_conn, EIO);
+            size_t expected_offset =
+                (size_t)user_stream->stream_index * stream_range_size;
+            size_t expected_length = expected_offset < parsed_total_length
+                ? parsed_total_length - expected_offset : 0;
+            if (expected_length > stream_range_size) {
+                expected_length = stream_range_size;
+            }
+            if (user_stream->stream_index < 0
+                || user_stream->recv_offset != expected_offset
+                || parsed_content_length != expected_length)
+            {
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
+            }
+
+            if (!user_conn->total_requests_known) {
+                user_conn->download_expected_bytes = parsed_total_length;
+                user_conn->send_file_size = parsed_total_length;
+                user_conn->target_requests = required_streams;
+                user_conn->total_requests_known = 1;
+                printf("[stats] GET total length=%zu, total rounds stream count=%d, concurrency=%d\n",
+                    user_conn->download_expected_bytes,
+                    user_conn->target_requests,
+                    user_conn->max_concurrent_requests);
+                if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
+                    printf("[error] schedule GET rounds failed\n");
+                    xqc_mini_cli_set_transfer_error(user_conn, EIO);
+                    return XQC_ERROR;
+                }
             }
         }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && status_code >= 200 && status_code < 300
+            && user_conn->transfer_active
             && user_conn->download_fd < 0) {
             const char *download_path = user_conn->ctx->args->env_cfg.download_path;
             printf("[stats] response status: %d, download_path: %s\n",
@@ -501,6 +633,10 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
         user_stream->start_time = xqc_now();
         if (fin) {
+            if (user_stream->expected_content_length != 0) {
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
+            }
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
@@ -518,7 +654,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     }
 
     recv_buff_size = XQC_MAX_BUFF_SIZE;
-    read = read_sum = 0;
+    read = 0;
     
     do {
         read = xqc_h3_request_recv_body(h3_request, recv_buff, recv_buff_size, &fin);
@@ -528,10 +664,17 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         } else if (read < 0) {
             printf("xqc_h3_request_recv_body error %zd\n", read);
             xqc_mini_cli_set_transfer_error(user_conn, EIO);
-            return XQC_OK;
+            return XQC_ERROR;
         }
-    
-        read_sum += read;
+        if (user_stream->recv_body_len
+                > user_stream->expected_content_length
+            || (size_t)read > user_stream->expected_content_length
+                - user_stream->recv_body_len)
+        {
+            printf("[error] response body exceeds declared content length\n");
+            xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+            return XQC_ERROR;
+        }
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && read > 0)
         {
@@ -546,7 +689,18 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         user_stream->recv_body_len += read;
         
         
-        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+            && user_stream->response_status >= 200
+            && user_stream->response_status < 300)
+        {
+            if (user_conn->download_received_bytes
+                    > user_conn->download_expected_bytes
+                || (size_t)read > user_conn->download_expected_bytes
+                    - user_conn->download_received_bytes)
+            {
+                xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+                return XQC_ERROR;
+            }
             user_conn->download_received_bytes += (size_t)read;
             if (user_conn->download_expected_bytes > 0) {
                 double progress = (double)user_conn->download_received_bytes * 100.0
@@ -587,6 +741,15 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     //printf("[report] xqc_h3_request_recv_body size %zd, fin:%d\n", read, fin);
 
     if (fin) {
+        if (user_stream->recv_body_len
+            != user_stream->expected_content_length)
+        {
+            printf("[error] response body ended at %zu bytes, expected %zu\n",
+                user_stream->recv_body_len,
+                user_stream->expected_content_length);
+            xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
+            return XQC_ERROR;
+        }
         xqc_usec_t end_time = xqc_now();
         double duration_ms = (user_stream->start_time > 0)
             ? (end_time - user_stream->start_time) / 1000.0
@@ -616,10 +779,20 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 int
 xqc_mini_cli_h3_request_write_notify(xqc_h3_request_t *h3_request, void *h3s_user_data)
 {
-    int ret = 0;
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
-    
-    ret = xqc_mini_cli_request_send(h3_request, user_stream);
+    if (!user_stream->hdr_sent) {
+        int ret = xqc_mini_cli_send_h3_headers(user_stream);
+        if (ret != XQC_OK || !user_stream->hdr_sent) {
+            return ret;
+        }
+        if (user_stream->user_conn->ctx->args->req_cfg.method
+            == REQUEST_METHOD_GET)
+        {
+            return XQC_OK;
+        }
+    }
+
+    int ret = xqc_mini_cli_request_send(h3_request, user_stream);
     
     //printf("[stats] finish h3 request write notify!:%"PRIu64"\n", xqc_h3_stream_id(h3_request));
     
@@ -753,6 +926,19 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     return res;
 }
 
+void
+xqc_mini_cli_conn_update_cid_notify(xqc_connection_t *conn,
+    const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data)
+{
+    (void)conn;
+    (void)retire_cid;
+    xqc_mini_cli_user_conn_t *user_conn =
+        (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn != NULL && new_cid != NULL) {
+        memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
+    }
+}
+
 int
 xqc_mini_cli_read_token(unsigned char *token, unsigned token_len)
 {
@@ -866,6 +1052,17 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
     conn_timeout = ctx->args->net_cfg.conn_timeout;
     xqc_usec_t last_socket_time = ctx->args->net_cfg.last_socket_time;
     socket_idle_time = xqc_now() - last_socket_time;
+    if (ctx->args->defer_transfer_setup) {
+        /*
+         * API task deadlines are enforced by mini_backend_client_transfer().
+         * Do not let the CLI's fixed idle watchdog shorten timeout_ms=0 or a
+         * caller-supplied task deadline, nor close an idle reusable handle.
+         */
+        tv.tv_sec = conn_timeout;
+        tv.tv_usec = 0;
+        event_add(user_conn->ev_timeout, &tv);
+        return;
+    }
     if (!user_conn->auto_start_requests && !user_conn->requests_launched) {
         tv.tv_sec = conn_timeout;
         tv.tv_usec = 0;
@@ -1001,7 +1198,9 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
         }
     }
 
-    if (user_conn->requests_launched
+    if (user_conn->transfer_active
+        && user_conn->transfer_error_code == 0
+        && user_conn->requests_launched
         && user_conn->active_requests < user_conn->max_concurrent_requests
         && user_conn->next_stream_index < user_conn->target_requests)
     {

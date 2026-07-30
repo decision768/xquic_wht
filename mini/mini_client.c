@@ -377,6 +377,7 @@ xqc_mini_cli_stop_async_writer(xqc_mini_cli_user_conn_t *user_conn)
     if (user_conn->download_write_thread_running) {
         pthread_mutex_lock(&user_conn->download_write_lock);
         user_conn->download_write_stop = 1;
+        xqc_mini_cli_free_write_queue_locked(user_conn);
         pthread_cond_broadcast(&user_conn->download_write_cond);
         pthread_cond_broadcast(&user_conn->download_write_space_cond);
         pthread_mutex_unlock(&user_conn->download_write_lock);
@@ -632,14 +633,26 @@ xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn)
             return XQC_ERROR;
         }
 
-        ret = xqc_mini_cli_send_h3_req(user_conn, user_stream, stream_index);
-        if (ret < 0) {
-            free(user_stream);
-            return XQC_ERROR;
-        }
-
+        /*
+         * Reserve the slot before handing user_stream to XQUIC. Once an H3
+         * request exists, its close callback is the sole owner that may free
+         * user_stream, including all setup-failure paths.
+         */
         user_conn->next_stream_index++;
         user_conn->active_requests++;
+        ret = xqc_mini_cli_send_h3_req(user_conn, user_stream, stream_index);
+        if (ret < 0) {
+            xqc_mini_cli_set_transfer_error(user_conn, EIO);
+            if (user_stream->h3_request != NULL) {
+                (void)xqc_h3_request_close(user_stream->h3_request);
+            } else {
+                if (user_conn->active_requests > 0) {
+                    user_conn->active_requests--;
+                }
+                free(user_stream);
+            }
+            return XQC_ERROR;
+        }
     }
 
     return XQC_OK;
@@ -768,6 +781,7 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
     xqc_transport_callbacks_t transport_cbs = {
         .write_socket = xqc_mini_cli_write_socket,
         .write_socket_ex = xqc_mini_cli_write_socket_ex,
+        .conn_update_cid_notify = xqc_mini_cli_conn_update_cid_notify,
         .save_token = xqc_mini_cli_save_token,
         .save_session_cb = xqc_mini_cli_save_session_cb,
         .save_tp_cb = xqc_mini_cli_save_tp_cb,
@@ -1280,6 +1294,46 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
 }
 // 实际分片发送 HTTP/3 请求体
 int
+xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream)
+{
+    if (user_stream == NULL || user_stream->user_conn == NULL
+        || user_stream->h3_request == NULL)
+    {
+        return XQC_ERROR;
+    }
+    if (user_stream->hdr_sent) {
+        return XQC_OK;
+    }
+
+    xqc_http_header_t headers[H3_HDR_CNT];
+    xqc_mini_cli_req_config_t *req_cfg =
+        &user_stream->user_conn->ctx->args->req_cfg;
+    int header_count = xqc_mini_cli_format_h3_req(headers, req_cfg,
+        user_stream->file_size, user_stream);
+    if (header_count <= 0) {
+        return XQC_ERROR;
+    }
+
+    xqc_http_headers_t header_list = {
+        .headers = headers,
+        .count = (size_t)header_count,
+    };
+    uint8_t fin = req_cfg->method == REQUEST_METHOD_GET ? 1 : 0;
+    ssize_t ret = xqc_h3_request_send_headers(user_stream->h3_request,
+        &header_list, fin);
+    if (ret == -XQC_EAGAIN) {
+        return XQC_OK;
+    }
+    if (ret < 0) {
+        printf("[error] xqc_mini_cli_h3_request_send error %zd\n", ret);
+        return XQC_ERROR;
+    }
+    user_stream->hdr_sent = 1;
+    printf("[stats] xqc_mini_cli_h3_request_send success \n");
+    return XQC_OK;
+}
+
+int
 xqc_mini_cli_request_send(xqc_h3_request_t *h3_request, xqc_mini_cli_user_stream_t *user_stream)
 {
     
@@ -1452,12 +1506,9 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         return XQC_ERROR;
     }
 
-    int ret, fin;
-    /* send packet header/body */
-    xqc_http_header_t header[H3_HDR_CNT];
-    xqc_mini_cli_req_config_t* req_cfg;
-
-    req_cfg = &user_stream->user_conn->ctx->args->req_cfg;
+    int ret;
+    xqc_mini_cli_req_config_t *req_cfg =
+        &user_stream->user_conn->ctx->args->req_cfg;
     
 
     user_stream->send_body_fp = NULL;
@@ -1486,32 +1537,9 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
             user_conn->send_file_size);
     }
 
-    ret = xqc_mini_cli_format_h3_req(header, req_cfg, user_stream->file_size, user_stream);
-    if (ret > 0) {
-        user_stream->h3_hdrs.headers = header;
-        user_stream->h3_hdrs.count = ret;
-        if (user_conn->upload_start_time == 0) {
-            user_conn->upload_start_time = xqc_now();
-        }
-        if (user_stream->start_time == 0) {
-            user_stream->start_time = xqc_now();
-        }
-        /* send header: GET has no request body, send FIN with headers */
-        uint8_t hdr_fin = (req_cfg->method == REQUEST_METHOD_GET) ? 1 : 0;
-        ret = xqc_h3_request_send_headers(user_stream->h3_request, &user_stream->h3_hdrs, hdr_fin);
-
-        if (ret < 0) {
-            printf("[error] xqc_mini_cli_h3_request_send error %d\n", ret);
-            return -1;
-        } else {
-            printf("[stats] xqc_mini_cli_h3_request_send success \n");
-            user_stream->hdr_sent = 1;
-        }
-    }
-    if (req_cfg->method == REQUEST_METHOD_GET) {
-        return XQC_OK;
-    }
-    if (user_stream->file_size > 0) {
+    if (req_cfg->method == REQUEST_METHOD_POST
+        && user_stream->file_size > 0)
+    {
         size_t buffer_capacity = user_conn->ctx->args->net_cfg.user_send_buf_size > 0
             ? user_conn->ctx->args->net_cfg.user_send_buf_size
             : CHUNK_SIZE;
@@ -1525,7 +1553,26 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     user_stream->buffered_len = 0;
     user_stream->buffered_sent = 0;
     user_stream->start_time = xqc_now();
-    xqc_mini_cli_request_send(user_stream->h3_request, user_stream);
+    if (user_conn->upload_start_time == 0) {
+        user_conn->upload_start_time = user_stream->start_time;
+    }
+
+    ret = xqc_mini_cli_send_h3_headers(user_stream);
+    if (ret != XQC_OK) {
+        return ret;
+    }
+    if (!user_stream->hdr_sent) {
+        xqc_engine_main_logic(user_conn->ctx->engine);
+        return XQC_OK;
+    }
+    if (req_cfg->method == REQUEST_METHOD_GET) {
+        return XQC_OK;
+    }
+
+    ret = xqc_mini_cli_request_send(user_stream->h3_request, user_stream);
+    if (ret != XQC_OK) {
+        return ret;
+    }
 
     /* generate engine main log to send packets */
     xqc_engine_main_logic(user_conn->ctx->engine);
@@ -3126,7 +3173,7 @@ xqc_mini_cli_prepare_transfer(xqc_mini_cli_user_conn_t *user_conn,
             size_t range_size =
                 xqc_mini_cli_get_stream_range_size(user_conn);
             size_t required =
-                (user_conn->send_file_size + range_size - 1) / range_size;
+                ((user_conn->send_file_size - 1) / range_size) + 1;
             if (required > (size_t)INT_MAX) {
                 xqc_mini_cli_set_transfer_error(user_conn, EFBIG);
                 return XQC_ERROR;

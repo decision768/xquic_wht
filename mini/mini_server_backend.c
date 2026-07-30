@@ -1,6 +1,7 @@
 #include "mini_backend.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
@@ -311,33 +312,60 @@ mini_backend_server_connection_serve(mini_backend_server_t *server,
         return EINVAL;
     }
 
-    struct stat root_stat;
-    if (stat(root_path, &root_stat) != 0) {
+#if defined(XQC_SYS_WINDOWS)
+    return EOPNOTSUPP;
+#else
+    char canonical_root[PATH_LEN];
+    if (realpath(root_path, canonical_root) == NULL) {
         return errno != 0 ? errno : ENOENT;
     }
+    if (strlen(canonical_root) >= sizeof(connection->serve_root_path)) {
+        return ENAMETOOLONG;
+    }
+    int root_fd = open(canonical_root,
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (root_fd < 0) {
+        return errno != 0 ? errno : ENOENT;
+    }
+    struct stat root_stat;
+    if (fstat(root_fd, &root_stat) != 0) {
+        int saved_errno = errno;
+        close(root_fd);
+        return saved_errno != 0 ? saved_errno : EIO;
+    }
     if (!S_ISDIR(root_stat.st_mode)) {
+        close(root_fd);
         return ENOTDIR;
     }
-
-    strncpy(connection->serve_root_path, root_path,
+    if (connection->serve_root_fd >= 0) {
+        close(connection->serve_root_fd);
+    }
+    connection->serve_root_fd = root_fd;
+    strncpy(connection->serve_root_path, canonical_root,
         sizeof(connection->serve_root_path) - 1);
     connection->serve_root_path[
         sizeof(connection->serve_root_path) - 1] = '\0';
+    connection->serve_cancelled = 0;
     connection->serve_configured = 1;
 
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
     while (!connection->connection_closed) {
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
+            connection->serve_cancelled = 1;
+            connection->serve_configured = 0;
             return ETIMEDOUT;
         }
         int ret = mini_backend_server_pump(server);
         if (ret != 0) {
+            connection->serve_cancelled = 1;
+            connection->serve_configured = 0;
             return ret;
         }
     }
     return connection->last_error_code != 0
         ? connection->last_error_code : 0;
+#endif
 }
 
 void

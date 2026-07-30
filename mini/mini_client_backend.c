@@ -20,6 +20,30 @@ struct mini_backend_client_s {
 };
 
 static void
+mini_backend_client_abort_transfer(mini_backend_client_t *client,
+    int error_code)
+{
+    if (client == NULL || client->connection == NULL) {
+        return;
+    }
+    xqc_mini_cli_set_transfer_error(client->connection,
+        error_code != 0 ? error_code : EIO);
+    client->connection->transfer_active = 0;
+    client->connection->transfer_finished = 1;
+    client->connection->auto_start_requests = 0;
+    client->connection->transfer_end_time = xqc_now();
+    if (!client->connection->connection_closed && client->ctx.engine != NULL) {
+        (void)xqc_h3_conn_close(client->ctx.engine,
+            &client->connection->cid);
+    }
+    xqc_mini_cli_stop_async_writer(client->connection);
+    if (client->connection->download_fd >= 0) {
+        close(client->connection->download_fd);
+        client->connection->download_fd = -1;
+    }
+}
+
+static void
 mini_backend_client_apply_config(xqc_mini_cli_args_t *args,
     const mini_backend_config_t *config)
 {
@@ -251,16 +275,18 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         ret = xqc_mini_cli_launch_requests(client->connection);
     }
     if (ret != XQC_OK) {
-        xqc_mini_cli_set_transfer_error(client->connection, EIO);
-        client->connection->transfer_active = 0;
-        client->connection->transfer_finished = 1;
-        client->connection->transfer_end_time = xqc_now();
+        mini_backend_client_abort_transfer(client, EIO);
         return EIO;
     }
 
     xqc_usec_t start = client->connection->transfer_start_time;
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
     while (!client->connection->transfer_finished) {
+        if (client->connection->transfer_error_code != 0) {
+            ret = client->connection->transfer_error_code;
+            mini_backend_client_abort_transfer(client, ret);
+            break;
+        }
         if (client->connection->connection_closed) {
             ret = client->connection->last_error_code != 0
                 ? client->connection->last_error_code : ECONNRESET;
@@ -269,23 +295,13 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         }
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
             ret = ETIMEDOUT;
-            xqc_mini_cli_set_transfer_error(client->connection, ret);
-            client->connection->transfer_active = 0;
-            client->connection->transfer_finished = 1;
-            client->connection->auto_start_requests = 0;
-            client->connection->transfer_end_time = xqc_now();
-            (void)xqc_h3_conn_close(client->ctx.engine,
-                &client->connection->cid);
+            mini_backend_client_abort_transfer(client, ret);
             break;
         }
         int loop_ret = event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK);
         if (loop_ret < 0) {
             ret = EIO;
-            xqc_mini_cli_set_transfer_error(client->connection, ret);
-            client->connection->transfer_active = 0;
-            client->connection->transfer_finished = 1;
-            client->connection->auto_start_requests = 0;
-            client->connection->transfer_end_time = xqc_now();
+            mini_backend_client_abort_transfer(client, ret);
             break;
         }
 #if !defined(XQC_SYS_WINDOWS)
@@ -308,6 +324,9 @@ mini_backend_client_transfer(mini_backend_client_t *client,
 
     if (ret == XQC_OK && client->connection->transfer_error_code != 0) {
         ret = client->connection->transfer_error_code;
+    }
+    if (ret != XQC_OK) {
+        mini_backend_client_abort_transfer(client, ret);
     }
     return ret == XQC_OK ? 0 : ret;
 }

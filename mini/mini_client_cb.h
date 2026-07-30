@@ -59,6 +59,8 @@ ssize_t xqc_mini_cli_write_socket(const unsigned char *buf, size_t size, const s
 // 根据路径 ID 发送 UDP 数据包
 ssize_t xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t size,
     const struct sockaddr *peer_addr, socklen_t peer_addrlen, void *conn_user_data);
+void xqc_mini_cli_conn_update_cid_notify(xqc_connection_t *conn,
+    const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
 // 读取 token 文件数据
 int xqc_mini_cli_read_token(unsigned char *token, unsigned token_len);
 // 保存 token 到文件
