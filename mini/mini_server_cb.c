@@ -13,10 +13,11 @@
 #include <sys/time.h>
 #include <stdarg.h>
 #include <time.h>
+#include <limits.h>
 
 
 
-#define XQC_MINI_SVR_MAX_STREAMS 16
+#define XQC_MINI_SVR_MAX_TRACKED_FRAGMENTS 262144
 #define SERVER_OUTPUT_FILE "server_received.txt"
 #define XQC_MINI_SVR_STREAM_RANGE_SIZE (4 * 1024 * 1024)
 /* engine callbacks */
@@ -29,8 +30,9 @@ typedef struct {
     int completed_streams;
     struct timeval earliest_start;
     struct timeval latest_end;
-    unsigned char stream_done[XQC_MINI_SVR_MAX_STREAMS];
-    size_t stream_progress[XQC_MINI_SVR_MAX_STREAMS];
+    unsigned char *stream_done;
+    size_t *stream_progress;
+    size_t stream_capacity;
     uint64_t recv_aggregate_sample_count;
     uint64_t recv_aggregate_sample_bytes;
     uint64_t recv_aggregate_total_ns;
@@ -42,7 +44,9 @@ typedef struct {
 static xqc_mini_svr_file_state_t g_svr_file_state = {0};
 
 
-static void xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path);
+static int xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,
+    const char *output_path);
+static void xqc_mini_svr_discard_file_state(void);
 static void xqc_mini_svr_update_upload_progress(xqc_mini_svr_user_stream_t *user_stream);
 static int xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream);//Post文件输出路径
 static void xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream);//检测流帧是否传输完成
@@ -86,6 +90,34 @@ xqc_mini_svr_get_stream_range_size(xqc_mini_svr_user_stream_t *user_stream)
     }
 
     return 4 * 1024 * 1024;
+}
+
+static int
+xqc_mini_svr_get_expected_streams(xqc_mini_svr_user_stream_t *user_stream)
+{
+    int expected_streams = user_stream != NULL ? user_stream->stream_count : 0;
+    if (expected_streams <= 0) {
+        expected_streams = 1;
+    }
+
+    if (user_stream == NULL || !user_stream->metadata_parsed
+        || user_stream->total_file_size == 0)
+    {
+        return expected_streams;
+    }
+
+    size_t stream_range_size = xqc_mini_svr_get_stream_range_size(user_stream);
+    if (stream_range_size == 0) {
+        return expected_streams;
+    }
+
+    size_t required_streams =
+        ((user_stream->total_file_size - 1) / stream_range_size) + 1;
+    if (required_streams > (size_t)INT_MAX) {
+        return expected_streams;
+    }
+
+    return (int)required_streams;
 }
 
 
@@ -347,8 +379,9 @@ xqc_mini_svr_get_diag_maybe_reset_phase(xqc_mini_svr_user_stream_t *user_stream)
                user_stream->response_body_len);
     }
 
-    if (user_stream->stream_count > user_conn->get_submit_expected_streams) {
-        user_conn->get_submit_expected_streams = user_stream->stream_count;
+    int expected_streams = xqc_mini_svr_get_expected_streams(user_stream);
+    if (expected_streams > user_conn->get_submit_expected_streams) {
+        user_conn->get_submit_expected_streams = expected_streams;
     }
 }
 
@@ -380,8 +413,9 @@ xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
         user_stream->send_split_total_ns,
         user_stream->send_split_min_ns,
         user_stream->send_split_max_ns);
-    if (user_stream->stream_count > user_conn->get_submit_expected_streams) {
-        user_conn->get_submit_expected_streams = user_stream->stream_count;
+    int expected_streams = xqc_mini_svr_get_expected_streams(user_stream);
+    if (expected_streams > user_conn->get_submit_expected_streams) {
+        user_conn->get_submit_expected_streams = expected_streams;
     }
 
     double wall_time_ms = now_us >= user_conn->get_submit_start_us
@@ -402,7 +436,10 @@ xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
 
     if (user_conn->get_submit_expected_streams > 0
         && user_conn->get_submit_streams
-            >= (uint64_t)user_conn->get_submit_expected_streams)
+            >= (uint64_t)user_conn->get_submit_expected_streams
+        && (user_stream->total_file_size == 0
+            || user_conn->get_submit_bytes
+                >= (uint64_t)user_stream->total_file_size))
     {
         xqc_mini_svr_log_fragment_latency("send", "split",
             user_conn->get_split_sample_count,
@@ -907,17 +944,52 @@ xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
 
 
 static void
-xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *output_path)
+xqc_mini_svr_discard_file_state(void)
+{
+    int generation = g_svr_file_state.generation;
+    free(g_svr_file_state.stream_done);
+    free(g_svr_file_state.stream_progress);
+    memset(&g_svr_file_state, 0, sizeof(g_svr_file_state));
+    g_svr_file_state.generation = generation;
+}
+
+static int
+xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,
+    const char *output_path)
 {
     if (stream_count <= 0) {
-        stream_count = 1;
-    }
-    if (stream_count > XQC_MINI_SVR_MAX_STREAMS) {
-        printf("[server] stream count %d exceeds limit %d, clamp\n",
-            stream_count, XQC_MINI_SVR_MAX_STREAMS);
-        stream_count = XQC_MINI_SVR_MAX_STREAMS;
+        printf("[error] invalid stream count %d\n", stream_count);
+        return XQC_ERROR;
     }
 
+    unsigned char *stream_done = NULL;
+    size_t *stream_progress = NULL;
+    if (stream_count <= XQC_MINI_SVR_MAX_TRACKED_FRAGMENTS) {
+        stream_done = calloc((size_t)stream_count, sizeof(*stream_done));
+        stream_progress = calloc((size_t)stream_count,
+            sizeof(*stream_progress));
+        if (stream_done == NULL || stream_progress == NULL) {
+            free(stream_done);
+            free(stream_progress);
+            stream_done = NULL;
+            stream_progress = NULL;
+            printf("[warn] upload fragment statistics disabled:"
+                   " tracking allocation failed\n");
+        }
+
+    } else {
+        printf("[warn] upload fragment statistics disabled:"
+               " stream count %d exceeds tracking limit %d\n",
+            stream_count, XQC_MINI_SVR_MAX_TRACKED_FRAGMENTS);
+    }
+
+    free(g_svr_file_state.stream_done);
+    free(g_svr_file_state.stream_progress);
+    g_svr_file_state.stream_done = stream_done;
+    g_svr_file_state.stream_progress = stream_progress;
+    g_svr_file_state.stream_capacity =
+        stream_done != NULL && stream_progress != NULL
+        ? (size_t)stream_count : 0;
     g_svr_file_state.initialized = 1;
     g_svr_file_state.generation++;
     g_svr_file_state.expected_streams = stream_count;
@@ -928,8 +1000,6 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
     g_svr_file_state.earliest_start.tv_usec = 0;
     g_svr_file_state.latest_end.tv_sec = 0;
     g_svr_file_state.latest_end.tv_usec = 0;
-    memset(g_svr_file_state.stream_done, 0, sizeof(g_svr_file_state.stream_done));
-    memset(g_svr_file_state.stream_progress, 0, sizeof(g_svr_file_state.stream_progress));
     g_svr_file_state.recv_aggregate_sample_count = 0;
     g_svr_file_state.recv_aggregate_sample_bytes = 0;
     g_svr_file_state.recv_aggregate_total_ns = 0;
@@ -955,7 +1025,8 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
     if (fp == NULL) {
         perror("fopen");
         printf("[error] failed to prepare output file '%s'\n", output_file);
-        return;
+        g_svr_file_state.initialized = 0;
+        return XQC_ERROR;
     }
     if (total_size > 0) {
         if (fseek(fp, (long)(total_size - 1), SEEK_SET) != 0) {
@@ -968,6 +1039,7 @@ xqc_mini_svr_reset_file_state(int stream_count, size_t total_size,const char *ou
 
     printf("[server] prepared output file '%s' for totaling %zu bytes\n",
         output_file, total_size);
+    return XQC_OK;
 }
 static void
 xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
@@ -1046,20 +1118,24 @@ xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream)
     const char *output_file = output_path[0] != '\0' ? output_path : SERVER_OUTPUT_FILE;
     int tracked_stream_count = user_stream->stream_count;
     if (tracked_stream_count <= 0) {
-        tracked_stream_count = 1;
-    }
-    if (tracked_stream_count > XQC_MINI_SVR_MAX_STREAMS) {
-        tracked_stream_count = XQC_MINI_SVR_MAX_STREAMS;
+        printf("[error] invalid stream count %d\n", tracked_stream_count);
+        return XQC_ERROR;
     }
 
     if (!g_svr_file_state.initialized
         || g_svr_file_state.expected_streams != tracked_stream_count
         || g_svr_file_state.total_size != user_stream->total_file_size
         || strncmp(g_svr_file_state.output_path, output_file,
-            sizeof(g_svr_file_state.output_path)) != 0) {
+            sizeof(g_svr_file_state.output_path)) != 0
+        || g_svr_file_state.completed_streams
+            >= g_svr_file_state.expected_streams) {
 
-        xqc_mini_svr_reset_file_state(tracked_stream_count,
-            user_stream->total_file_size,output_file);
+        if (xqc_mini_svr_reset_file_state(tracked_stream_count,
+                user_stream->total_file_size, output_file) != XQC_OK)
+        {
+            printf("[error] failed to initialize upload task state\n");
+            return XQC_ERROR;
+        }
     }
 
     user_stream->file_generation = g_svr_file_state.generation;
@@ -1091,8 +1167,13 @@ xqc_mini_svr_fill_generated_chunk(unsigned char *buf, size_t len, size_t offset)
 static void
 xqc_mini_svr_update_upload_progress(xqc_mini_svr_user_stream_t *user_stream)
 {
-    if (user_stream->stream_index < 0
-        || user_stream->stream_index >= XQC_MINI_SVR_MAX_STREAMS) {
+    if (!g_svr_file_state.initialized
+        || g_svr_file_state.stream_done == NULL
+        || g_svr_file_state.stream_progress == NULL
+        || user_stream->stream_index < 0
+        || (size_t)user_stream->stream_index
+            >= g_svr_file_state.stream_capacity)
+    {
         return;
     }
 
@@ -1123,8 +1204,13 @@ xqc_mini_svr_update_upload_progress(xqc_mini_svr_user_stream_t *user_stream)
 static void
 xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream)
 {
-    if (user_stream->stream_index < 0
-        || user_stream->stream_index >= XQC_MINI_SVR_MAX_STREAMS) {
+    if (!g_svr_file_state.initialized
+        || g_svr_file_state.stream_done == NULL
+        || g_svr_file_state.stream_progress == NULL
+        || user_stream->stream_index < 0
+        || (size_t)user_stream->stream_index
+            >= g_svr_file_state.stream_capacity)
+    {
         return;
     }
 
@@ -1461,11 +1547,7 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
                               sizeof(struct sockaddr_in), &user_conn->peer_addrlen);
     memcpy(&user_conn->cid, cid, sizeof(*cid));
 
-    g_svr_file_state.initialized = 0;
-    g_svr_file_state.expected_streams = 0;
-    g_svr_file_state.total_size = 0;
-    g_svr_file_state.completed_streams = 0;
-    memset(g_svr_file_state.stream_done, 0, sizeof(g_svr_file_state.stream_done));
+    xqc_mini_svr_discard_file_state();
 
     printf("[stats] xqc_mini_svr_h3_conn_create_notify \n");
     printf("[diag_server_conn] h3_conn_create\n");
