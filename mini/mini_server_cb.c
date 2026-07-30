@@ -50,7 +50,8 @@ static void xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_s
 static int xqc_mini_svr_time_cmp(const struct timeval *a, const struct timeval *b);
 static double xqc_mini_svr_duration_ms(const struct timeval *start, const struct timeval *end);
 static xqc_mini_svr_user_conn_t *xqc_mini_svr_get_conn_from_request(xqc_mini_svr_user_stream_t *user_stream);
-static void xqc_mini_svr_resolve_file_path(xqc_mini_svr_ctx_t *ctx, const char *request_path,
+static int xqc_mini_svr_resolve_file_path(
+    xqc_mini_svr_user_conn_t *user_conn, const char *request_path,
     char *resolved, size_t resolved_len);
 static void xqc_mini_svr_prepare_text_response(xqc_mini_svr_user_stream_t *user_stream,
     int status, const char *fmt, ...);
@@ -59,8 +60,9 @@ static void xqc_mini_svr_compute_stream_segment(int stream_count, int stream_ind
 static int xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream);
 static void xqc_mini_svr_fill_generated_chunk(unsigned char *buf, size_t len,
     size_t offset);
-static void xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
-    size_t resolved_len);
+static int xqc_mini_svr_resolve_upload_path(
+    xqc_mini_svr_user_conn_t *user_conn, const char *request_path,
+    char *resolved, size_t resolved_len);
 static int xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
     size_t *file_size);
 static void xqc_mini_svr_log_mp_active_state(xqc_mini_svr_user_conn_t *user_conn,
@@ -784,20 +786,62 @@ xqc_mini_svr_get_file_state(xqc_mini_svr_user_stream_t *user_stream,
     return (xqc_mini_svr_file_state_t *)user_conn->file_task_state;
 }
 /*用于Get方法的响应发送文件路径 */
-static void
-xqc_mini_svr_resolve_file_path(xqc_mini_svr_ctx_t *ctx, const char *request_path,
+static int
+xqc_mini_svr_relative_path_is_safe(const char *path)
+{
+    if (path == NULL || path[0] == '\0' || strchr(path, '\\') != NULL) {
+        return 0;
+    }
+    const char *component = path;
+    while (*component != '\0') {
+        const char *end = strchr(component, '/');
+        size_t length = end != NULL
+            ? (size_t)(end - component) : strlen(component);
+        if (length == 2 && component[0] == '.' && component[1] == '.') {
+            return 0;
+        }
+        if (end == NULL) {
+            break;
+        }
+        component = end + 1;
+    }
+    return 1;
+}
+
+static int
+xqc_mini_svr_resolve_file_path(
+    xqc_mini_svr_user_conn_t *user_conn, const char *request_path,
     char *resolved, size_t resolved_len)
 {
     if (resolved_len == 0) {
-        return;
+        return XQC_ERROR;
     }
 
     resolved[0] = '\0';
-    if (ctx == NULL || ctx->args == NULL) {
-        return;
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL)
+    {
+        return XQC_ERROR;
     }
+    xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
 
     const char *target = request_path;
+    if (user_conn->api_owned) {
+        if (!user_conn->serve_configured) {
+            return XQC_ERROR;
+        }
+        while (target != NULL && *target == '/') {
+            target++;
+        }
+        if (!xqc_mini_svr_relative_path_is_safe(target)) {
+            return XQC_ERROR;
+        }
+        int written = snprintf(resolved, resolved_len, "%s/%s",
+            user_conn->serve_root_path, target);
+        return written >= 0 && (size_t)written < resolved_len
+            ? XQC_OK : XQC_ERROR;
+    }
+
     if (target == NULL || target[0] == '\0' || strcmp(target, "/") == 0) {
         target = ctx->args->env_cfg.default_send_file;
         if (target[0] == '\0') {
@@ -815,10 +859,13 @@ xqc_mini_svr_resolve_file_path(xqc_mini_svr_ctx_t *ctx, const char *request_path
     if (target[0] == '/') {
         strncpy(resolved, target, resolved_len - 1);
         resolved[resolved_len - 1] = '\0';
-        return;
+        return XQC_OK;
     }
 
-    snprintf(resolved, resolved_len, "%s/%s", ctx->args->env_cfg.data_dir, target);
+    int written = snprintf(resolved, resolved_len, "%s/%s",
+        ctx->args->env_cfg.data_dir, target);
+    return written >= 0 && (size_t)written < resolved_len
+        ? XQC_OK : XQC_ERROR;
 }
 
 /*组织响应报文*/
@@ -853,9 +900,14 @@ xqc_mini_svr_prepare_file_response(xqc_mini_svr_user_stream_t *user_stream)
         return XQC_ERROR;
     }
 
-    xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
-    xqc_mini_svr_resolve_file_path(ctx, user_stream->request_path,
-        user_stream->resolved_path, sizeof(user_stream->resolved_path));
+    if (xqc_mini_svr_resolve_file_path(user_conn,
+            user_stream->request_path, user_stream->resolved_path,
+            sizeof(user_stream->resolved_path)) != XQC_OK)
+    {
+        xqc_mini_svr_prepare_text_response(user_stream, 403,
+            "invalid or unconfigured remote path");
+        return XQC_OK;
+    }
 
     size_t resp_len = user_stream->requested_generated_length;
 
@@ -918,8 +970,12 @@ xqc_mini_svr_get_target_file_size(xqc_mini_svr_user_stream_t *user_stream,
         return XQC_ERROR;
     }
 
-    xqc_mini_svr_resolve_file_path(user_conn->ctx, user_stream->request_path,
-        user_stream->resolved_path, sizeof(user_stream->resolved_path));
+    if (xqc_mini_svr_resolve_file_path(user_conn,
+            user_stream->request_path, user_stream->resolved_path,
+            sizeof(user_stream->resolved_path)) != XQC_OK)
+    {
+        return XQC_ERROR;
+    }
 
     FILE *fp = fopen(user_stream->resolved_path, "rb");
     if (fp == NULL) {
@@ -1017,18 +1073,26 @@ xqc_mini_svr_reset_file_state(xqc_mini_svr_file_state_t *state,
         output_file, total_size);
     return XQC_OK;
 }
-static void
-xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
-    size_t resolved_len)
+static int
+xqc_mini_svr_resolve_upload_path(
+    xqc_mini_svr_user_conn_t *user_conn, const char *request_path,
+    char *resolved, size_t resolved_len)
 {
     if (resolved_len == 0) {
-        return;
+        return XQC_ERROR;
     }
     resolved[0] = '\0';
-    if (ctx == NULL || ctx->args == NULL) {
-        return;
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL)
+    {
+        return XQC_ERROR;
+    }
+    if (user_conn->api_owned) {
+        return xqc_mini_svr_resolve_file_path(user_conn, request_path,
+            resolved, resolved_len);
     }
 
+    xqc_mini_svr_ctx_t *ctx = user_conn->ctx;
     const char *target = ctx->args->env_cfg.upload_path;
     if (target == NULL || target[0] == '\0') {
         target = SERVER_OUTPUT_FILE;
@@ -1036,9 +1100,12 @@ xqc_mini_svr_resolve_upload_path(xqc_mini_svr_ctx_t *ctx, char *resolved,
     if (target[0] == '/') {
         strncpy(resolved, target, resolved_len - 1);
         resolved[resolved_len - 1] = '\0';
-        return;
+        return XQC_OK;
     }
-    snprintf(resolved, resolved_len, "%s/%s", ctx->args->env_cfg.data_dir, target);
+    int written = snprintf(resolved, resolved_len, "%s/%s",
+        ctx->args->env_cfg.data_dir, target);
+    return written >= 0 && (size_t)written < resolved_len
+        ? XQC_OK : XQC_ERROR;
 }
 
 
@@ -1088,9 +1155,14 @@ static int
 xqc_mini_svr_prepare_output_file(xqc_mini_svr_user_stream_t *user_stream)
 {
     xqc_mini_svr_user_conn_t *user_conn = xqc_mini_svr_get_conn_from_request(user_stream);
-    xqc_mini_svr_ctx_t *ctx = user_conn ? user_conn->ctx : NULL;
     char output_path[PATH_LEN];
-    xqc_mini_svr_resolve_upload_path(ctx, output_path, sizeof(output_path));
+    if (xqc_mini_svr_resolve_upload_path(user_conn,
+            user_stream->request_path, output_path, sizeof(output_path))
+        != XQC_OK)
+    {
+        printf("[error] invalid or unconfigured upload path\n");
+        return XQC_ERROR;
+    }
     const char *output_file = output_path[0] != '\0' ? output_path : SERVER_OUTPUT_FILE;
     int tracked_stream_count = user_stream->stream_count;
     if (tracked_stream_count <= 0
@@ -1733,7 +1805,7 @@ xqc_mini_svr_send_response(xqc_mini_svr_user_stream_t *user_stream)
         },
     };
     size_t rsp_hdr_cnt = 3;
-    if (user_stream->total_file_size > 0) {
+    if (user_stream->method == REQUEST_METHOD_GET) {
         snprintf(response_total_length, sizeof(response_total_length), "%zu",
             user_stream->total_file_size);
         rsp_hdr[3].value.iov_len = strlen(response_total_length);

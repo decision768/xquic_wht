@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "mini_server.h"
 
@@ -295,6 +296,47 @@ mini_backend_server_connection_shutdown(mini_backend_server_t *server,
         }
     }
     return 0;
+}
+
+int
+mini_backend_server_connection_serve(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection, const char *root_path,
+    uint32_t timeout_ms)
+{
+    if (server == NULL || connection == NULL || root_path == NULL
+        || root_path[0] == '\0' || connection->connection_closed
+        || strlen(root_path) >= sizeof(connection->serve_root_path))
+    {
+        return EINVAL;
+    }
+
+    struct stat root_stat;
+    if (stat(root_path, &root_stat) != 0) {
+        return errno != 0 ? errno : ENOENT;
+    }
+    if (!S_ISDIR(root_stat.st_mode)) {
+        return ENOTDIR;
+    }
+
+    strncpy(connection->serve_root_path, root_path,
+        sizeof(connection->serve_root_path) - 1);
+    connection->serve_root_path[
+        sizeof(connection->serve_root_path) - 1] = '\0';
+    connection->serve_configured = 1;
+
+    xqc_usec_t start = xqc_now();
+    xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    while (!connection->connection_closed) {
+        if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
+            return ETIMEDOUT;
+        }
+        int ret = mini_backend_server_pump(server);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    return connection->last_error_code != 0
+        ? connection->last_error_code : 0;
 }
 
 void

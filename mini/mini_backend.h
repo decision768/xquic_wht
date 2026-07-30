@@ -19,6 +19,18 @@ typedef enum mini_backend_cc_e {
     MINI_BACKEND_CC_CUBIC = 1
 } mini_backend_cc_t;
 
+typedef enum mini_backend_transfer_direction_e {
+    MINI_BACKEND_TRANSFER_GET = 1,
+    MINI_BACKEND_TRANSFER_POST = 2
+} mini_backend_transfer_direction_t;
+
+typedef struct mini_backend_transfer_result_s {
+    uint64_t total_bytes;
+    uint32_t total_fragments;
+    uint32_t completed_fragments;
+    uint64_t elapsed_us;
+} mini_backend_transfer_result_t;
+
 typedef struct mini_backend_config_s {
     int load_config_file;
     int api_mode;
@@ -53,6 +65,9 @@ int mini_backend_client_connect(mini_backend_client_t *client,
     const char *host, uint16_t port, uint32_t timeout_ms);
 int mini_backend_client_run(mini_backend_client_t *client);
 int mini_backend_client_poll(mini_backend_client_t *client);
+int mini_backend_client_transfer(mini_backend_client_t *client,
+    int direction, const char *local_path, const char *remote_path,
+    uint32_t timeout_ms, mini_backend_transfer_result_t *result);
 int mini_backend_client_shutdown(mini_backend_client_t *client,
     uint32_t timeout_ms);
 void mini_backend_client_destroy(mini_backend_client_t *client);
@@ -76,6 +91,9 @@ void mini_backend_server_release(mini_backend_server_t *server);
 
 int mini_backend_server_connection_shutdown(mini_backend_server_t *server,
     mini_backend_server_connection_t *connection, uint32_t timeout_ms);
+int mini_backend_server_connection_serve(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection, const char *root_path,
+    uint32_t timeout_ms);
 void mini_backend_server_connection_release(mini_backend_server_t *server,
     mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_is_connected(

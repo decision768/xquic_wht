@@ -2968,6 +2968,191 @@ xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
     }
 }
 
+void
+xqc_mini_cli_set_transfer_error(xqc_mini_cli_user_conn_t *user_conn,
+    int error_code)
+{
+    if (user_conn == NULL) {
+        return;
+    }
+    if (error_code == 0) {
+        error_code = EIO;
+    }
+    if (user_conn->transfer_error_code == 0) {
+        user_conn->transfer_error_code = error_code;
+    }
+}
+
+void
+xqc_mini_cli_mark_transfer_io_complete(
+    xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn != NULL) {
+        user_conn->transfer_io_complete = 1;
+    }
+}
+
+void
+xqc_mini_cli_maybe_finish_transfer(
+    xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || !user_conn->ctx->args->defer_transfer_setup
+        || !user_conn->transfer_active)
+    {
+        return;
+    }
+    if (user_conn->completed_requests < user_conn->target_requests
+        || user_conn->active_requests != 0)
+    {
+        return;
+    }
+    if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
+        && !user_conn->transfer_io_complete
+        && user_conn->transfer_error_code == 0)
+    {
+        return;
+    }
+
+    user_conn->transfer_finished = 1;
+    user_conn->transfer_active = 0;
+    user_conn->auto_start_requests = 0;
+    user_conn->transfer_end_time = xqc_now();
+}
+
+int
+xqc_mini_cli_prepare_transfer(xqc_mini_cli_user_conn_t *user_conn,
+    REQUEST_METHOD method, const char *local_path, const char *remote_path,
+    int stream_concurrency)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || local_path == NULL || local_path[0] == '\0'
+        || remote_path == NULL || remote_path[0] == '\0'
+        || (method != REQUEST_METHOD_GET && method != REQUEST_METHOD_POST))
+    {
+        xqc_mini_cli_set_transfer_error(user_conn, EINVAL);
+        return XQC_ERROR;
+    }
+    if (user_conn->transfer_active || user_conn->active_requests != 0) {
+        xqc_mini_cli_set_transfer_error(user_conn, EBUSY);
+        return XQC_ERROR;
+    }
+
+    xqc_mini_cli_args_t *args = user_conn->ctx->args;
+    args->req_cfg.method = method;
+    strncpy(args->req_cfg.url, remote_path, sizeof(args->req_cfg.url) - 1);
+    args->req_cfg.url[sizeof(args->req_cfg.url) - 1] = '\0';
+
+    xqc_mini_cli_stop_async_writer(user_conn);
+    if (user_conn->download_fd >= 0) {
+        close(user_conn->download_fd);
+        user_conn->download_fd = -1;
+    }
+
+    user_conn->target_requests = 1;
+    user_conn->max_concurrent_requests = 1;
+    user_conn->next_stream_index = 0;
+    user_conn->active_requests = 0;
+    user_conn->completed_requests = 0;
+    user_conn->total_requests_known = 0;
+    user_conn->requests_launched = 0;
+    user_conn->timeout_defer_count = 0;
+    user_conn->path_wait_rounds_after_handshake = 0;
+    user_conn->send_file_size = 0;
+    user_conn->send_file_path[0] = '\0';
+    user_conn->upload_start_time = 0;
+    user_conn->upload_finished_streams = 0;
+    user_conn->upload_total_bytes = 0;
+    user_conn->download_path[0] = '\0';
+    user_conn->download_total_bytes = 0;
+    user_conn->download_expected_bytes = 0;
+    user_conn->download_received_bytes = 0;
+    user_conn->download_progress_percent = -1;
+    user_conn->download_finished_streams = 0;
+    user_conn->download_first_body_time = 0;
+    user_conn->download_last_body_time = 0;
+    user_conn->download_write_error = 0;
+    user_conn->transfer_finished = 0;
+    user_conn->transfer_io_complete = 0;
+    user_conn->transfer_error_code = 0;
+    user_conn->transfer_start_time = xqc_now();
+    user_conn->transfer_end_time = 0;
+
+    if (stream_concurrency <= 0) {
+        stream_concurrency = 1;
+    }
+    if (stream_concurrency > XQC_MINI_MAX_STREAMS) {
+        stream_concurrency = XQC_MINI_MAX_STREAMS;
+    }
+
+    if (method == REQUEST_METHOD_POST) {
+        strncpy(args->env_cfg.upload_path, local_path,
+            sizeof(args->env_cfg.upload_path) - 1);
+        args->env_cfg.upload_path[sizeof(args->env_cfg.upload_path) - 1] =
+            '\0';
+        strncpy(user_conn->send_file_path, local_path,
+            sizeof(user_conn->send_file_path) - 1);
+        user_conn->send_file_path[sizeof(user_conn->send_file_path) - 1] =
+            '\0';
+
+        FILE *send_fp = fopen(user_conn->send_file_path, "rb");
+        if (send_fp == NULL) {
+            xqc_mini_cli_set_transfer_error(user_conn,
+                errno != 0 ? errno : ENOENT);
+            return XQC_ERROR;
+        }
+        if (fseek(send_fp, 0, SEEK_END) != 0) {
+            int error_code = errno != 0 ? errno : EIO;
+            fclose(send_fp);
+            xqc_mini_cli_set_transfer_error(user_conn, error_code);
+            return XQC_ERROR;
+        }
+        long file_length = ftell(send_fp);
+        fclose(send_fp);
+        if (file_length < 0) {
+            xqc_mini_cli_set_transfer_error(user_conn,
+                errno != 0 ? errno : EIO);
+            return XQC_ERROR;
+        }
+
+        size_t actual_size = (size_t)file_length;
+        user_conn->send_file_size = args->send_data_len;
+        if (user_conn->send_file_size == 0
+            || user_conn->send_file_size > actual_size)
+        {
+            user_conn->send_file_size = actual_size;
+        }
+        if (user_conn->send_file_size > 0) {
+            size_t range_size =
+                xqc_mini_cli_get_stream_range_size(user_conn);
+            size_t required =
+                (user_conn->send_file_size + range_size - 1) / range_size;
+            if (required > (size_t)INT_MAX) {
+                xqc_mini_cli_set_transfer_error(user_conn, EFBIG);
+                return XQC_ERROR;
+            }
+            user_conn->target_requests = (int)required;
+        }
+        user_conn->total_requests_known = 1;
+        if (stream_concurrency > user_conn->target_requests) {
+            stream_concurrency = user_conn->target_requests;
+        }
+
+    } else {
+        strncpy(args->env_cfg.download_path, local_path,
+            sizeof(args->env_cfg.download_path) - 1);
+        args->env_cfg.download_path[
+            sizeof(args->env_cfg.download_path) - 1] = '\0';
+        user_conn->target_requests = 1;
+    }
+
+    args->req_stream_cnt = stream_concurrency;
+    user_conn->max_concurrent_requests = stream_concurrency;
+    user_conn->auto_start_requests = 1;
+    user_conn->transfer_active = 1;
+    return XQC_OK;
+}
+
 // 客户端主流程：创建连接并发起请求
 int
 xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn)
@@ -3122,7 +3307,21 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->path_wait_rounds_after_handshake = 0;
     user_conn->last_path_probe_ping_time = 0;
 
-    if (ctx->args->defer_transfer_setup) {
+    if (!ctx->args->defer_transfer_setup) {
+        const char *local_path =
+            ctx->args->req_cfg.method == REQUEST_METHOD_POST
+            ? ctx->args->env_cfg.upload_path
+            : ctx->args->env_cfg.download_path;
+        if (xqc_mini_cli_prepare_transfer(user_conn,
+                ctx->args->req_cfg.method, local_path,
+                ctx->args->req_cfg.url, ctx->args->req_stream_cnt)
+            != XQC_OK)
+        {
+            printf("[error] prepare initial transfer failed\n");
+            xqc_mini_cli_free_user_conn(user_conn);
+            return NULL;
+        }
+    } else {
         user_conn->target_requests = 0;
         user_conn->max_concurrent_requests = 0;
         user_conn->next_stream_index = 0;
@@ -3130,127 +3329,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->completed_requests = 0;
         user_conn->total_requests_known = 0;
 
-        int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
-        for (int i = 1; i < target_prepare; i++) {
-            xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
-            ret = xqc_mini_cli_prepare_user_path(user_conn, path);
-            if (ret != XQC_OK) {
-                printf("[warn] pre-bind for path[%d] failed, ret:%d\n", i, ret);
-            }
-        }
-        return user_conn;
     }
-
-   
-    memset(user_conn->send_file_path, 0, sizeof(user_conn->send_file_path));
-    if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
-        strncpy(user_conn->send_file_path, ctx->args->env_cfg.upload_path,
-            sizeof(user_conn->send_file_path) - 1);
-        user_conn->send_file_path[sizeof(user_conn->send_file_path) - 1] = '\0';
-        FILE *send_fp = fopen(user_conn->send_file_path, "rb");
-        if (send_fp == NULL) {
-            perror("fopen");
-            printf("[error] failed to open send file '%s'\n", user_conn->send_file_path);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
-        }
-        if (fseek(send_fp, 0, SEEK_END) != 0) {
-            perror("fseek");
-            fclose(send_fp);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
-        }
-        long file_length = ftell(send_fp);
-        if (file_length < 0) {
-            perror("ftell");
-            fclose(send_fp);
-            xqc_mini_cli_free_user_conn(user_conn);
-            return NULL;
-        }
-        fclose(send_fp);
-        size_t actual_size = (size_t)file_length;
-        if (user_conn->send_file_size == 0 || user_conn->send_file_size > actual_size) {
-            if (user_conn->send_file_size > actual_size) {
-                printf("[warn] requested payload size %zu exceeds file size %zu, clamp\n",
-                    user_conn->send_file_size, actual_size);
-            }
-            user_conn->send_file_size = actual_size;
-        }
-
-        if (user_conn->send_file_size == 0) {
-            printf("[warn] send data length is 0, will send empty body\n");
-        } else {
-            printf("[stats] source file '%s' size=%zu bytes\n",
-                user_conn->send_file_path, user_conn->send_file_size);
-        }
-       
-    }
-
-    int stream_concurrency = ctx->args->req_stream_cnt;
-    if (stream_concurrency <= 0) {
-        stream_concurrency = 1;
-    }
-    int stream_target = stream_concurrency;
-    // if (stream_target > XQC_MINI_MAX_STREAMS) {
-    //     printf("[warn] exceed max stream count %d, clamp to limit\n", XQC_MINI_MAX_STREAMS);
-    //     stream_target = XQC_MINI_MAX_STREAMS;
-    // }
-    //  if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
-    //     if (user_conn->send_file_size == 0 && stream_target != 1) {
-    //         printf("[warn] send file is empty, forcing single stream\n");
-    if (ctx->args->req_cfg.method == REQUEST_METHOD_POST) {
-        if (user_conn->send_file_size == 0) {
-            stream_target = 1;
-        }
-        // if (user_conn->send_file_size > 0
-        //     && (size_t)stream_target > user_conn->send_file_size) {
-        //     printf("[warn] stream count %d exceeds file bytes %zu, clamp\n",
-        //         stream_target, user_conn->send_file_size);
-        //     stream_target = (int)user_conn->send_file_size;
-        //     if (stream_target <= 0) {
-        //         stream_target = 1;
-        //     }
-        // }
-        else {
-            size_t stream_range_size = xqc_mini_cli_get_stream_range_size(user_conn);
-            size_t required = (user_conn->send_file_size + stream_range_size - 1)
-                / stream_range_size;
-            if (required > (size_t)INT_MAX) {
-                stream_target = INT_MAX;
-            } else {
-                stream_target = (int)required;
-    }
-        }
-        printf("[stats] POST upload uses fixed stream range %zu bytes, stream count=%d\n",
-            xqc_mini_cli_get_stream_range_size(user_conn), stream_target);
-
-    }else if (ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
-        /* wait for x-total-length from first response headers, then expand */
-        stream_target = 1;
-    }
-    if (stream_concurrency > XQC_MINI_MAX_STREAMS) {
-        stream_concurrency = XQC_MINI_MAX_STREAMS;
-    }
-    if (ctx->args->req_cfg.method != REQUEST_METHOD_GET
-        && stream_concurrency > stream_target) {
-        stream_concurrency = stream_target;
-    }
-    if (stream_concurrency <= 0) {
-        stream_concurrency = 1;
-    }
-
-    ctx->args->req_stream_cnt = stream_concurrency;
-    user_conn->max_concurrent_requests = stream_concurrency;
-
-    user_conn->target_requests = stream_target;
-    user_conn->next_stream_index = 0;
-    user_conn->active_requests = 0;
-
-    user_conn->completed_requests = 0;
-    user_conn->total_requests_known =
-        (ctx->args->req_cfg.method == REQUEST_METHOD_POST) ? 1 : 0;
-
-
     int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
     for (int i = 1; i < target_prepare; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];

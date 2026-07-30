@@ -490,6 +490,110 @@ netins_udp_accept(netins_udp_t *server)
 }
 
 int
+netins_udp_transfer(netins_udp_t *client,
+    const netins_udp_transfer_t *task,
+    netins_udp_transfer_result_t *result)
+{
+    if (!netins_udp_valid(client) || client->role != NETINS_UDP_ROLE_CLIENT
+        || client->state != NETINS_UDP_STATE_CONNECTED
+        || client->client_backend == NULL || task == NULL || result == NULL)
+    {
+        return netins_udp_set_error(client, EINVAL,
+            "transfer requires a connected client, task and result");
+    }
+    if (task->struct_size < sizeof(*task)
+        || task->api_version != NETINS_UDP_API_VERSION
+        || result->struct_size < sizeof(*result)
+        || result->api_version != NETINS_UDP_API_VERSION
+        || (task->direction != NETINS_UDP_TRANSFER_GET
+            && task->direction != NETINS_UDP_TRANSFER_POST)
+        || task->local_path == NULL || task->local_path[0] == '\0'
+        || task->remote_path == NULL || task->remote_path[0] != '/'
+        || task->remote_path[1] == '\0'
+        || strlen(task->local_path) >= NETINS_UDP_FILE_PATH_LEN
+        || strlen(task->remote_path) >= NETINS_UDP_REMOTE_PATH_LEN)
+    {
+        return netins_udp_set_error(client, EINVAL,
+            "invalid transfer version, direction, path, or result");
+    }
+
+    uint32_t result_size = result->struct_size;
+    memset(result, 0, sizeof(*result));
+    result->struct_size = result_size;
+    result->api_version = NETINS_UDP_API_VERSION;
+
+    mini_backend_transfer_result_t backend_result = {0};
+    int backend_direction =
+        task->direction == NETINS_UDP_TRANSFER_GET
+        ? MINI_BACKEND_TRANSFER_GET : MINI_BACKEND_TRANSFER_POST;
+    int ret = mini_backend_client_transfer(client->client_backend,
+        backend_direction, task->local_path, task->remote_path,
+        task->timeout_ms, &backend_result);
+
+    result->total_bytes = backend_result.total_bytes;
+    result->total_fragments = backend_result.total_fragments;
+    result->completed_fragments = backend_result.completed_fragments;
+    result->elapsed_us = backend_result.elapsed_us;
+    result->throughput_mbps = result->elapsed_us > 0
+        ? (double)result->total_bytes * 8.0 / (double)result->elapsed_us
+        : 0.0;
+
+    if (ret != 0) {
+        if (ret == ETIMEDOUT
+            || mini_backend_client_is_closed(client->client_backend))
+        {
+            client->state = NETINS_UDP_STATE_ERROR;
+        }
+        int error_code = ret > 0 ? ret : EIO;
+        return netins_udp_set_error(client, error_code,
+            "Mini transfer failed with backend code %d", ret);
+    }
+    netins_udp_clear_error(client);
+    return 0;
+}
+
+int
+netins_udp_serve(netins_udp_t *connection,
+    const netins_udp_serve_config_t *config)
+{
+    if (!netins_udp_valid(connection)
+        || connection->role != NETINS_UDP_ROLE_ACCEPTED
+        || connection->state != NETINS_UDP_STATE_CONNECTED
+        || connection->server_backend == NULL
+        || connection->server_connection == NULL || config == NULL)
+    {
+        return netins_udp_set_error(connection, EINVAL,
+            "serve requires a connected accepted handle");
+    }
+    if (config->struct_size < sizeof(*config)
+        || config->api_version != NETINS_UDP_API_VERSION
+        || config->root_path == NULL || config->root_path[0] == '\0'
+        || strlen(config->root_path) >= NETINS_UDP_FILE_PATH_LEN)
+    {
+        return netins_udp_set_error(connection, EINVAL,
+            "invalid serve configuration or root path");
+    }
+
+    int ret = mini_backend_server_connection_serve(
+        connection->server_backend, connection->server_connection,
+        config->root_path, config->timeout_ms);
+    if (ret != 0) {
+        if (mini_backend_server_connection_is_closed(
+                connection->server_connection))
+        {
+            connection->state = NETINS_UDP_STATE_ERROR;
+        }
+        int error_code = ret > 0 ? ret : EIO;
+        return netins_udp_set_error(connection, error_code,
+            "Mini serve loop failed with backend code %d", ret);
+    }
+
+    connection->state = NETINS_UDP_STATE_CLOSED;
+    netins_udp_clear_error(connection);
+    return 0;
+}
+
+int
 netins_udp_get_state(netins_udp_t *handle)
 {
     if (!netins_udp_valid(handle)) {

@@ -362,6 +362,12 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     auto_start_requests;
     int                     connection_closed;
     int                     last_error_code;
+    int                     transfer_active;
+    int                     transfer_finished;
+    int                     transfer_io_complete;
+    int                     transfer_error_code;
+    xqc_usec_t              transfer_start_time;
+    xqc_usec_t              transfer_end_time;
 
 
 
@@ -412,6 +418,7 @@ typedef struct xqc_mini_cli_user_stream_s {
     size_t                      recv_body_len;
     size_t                      expected_content_length;
     int                         recv_fin;
+    int                         download_accounted;
     int                         slot_released;
     xqc_msec_t                  start_time;
     int                         send_finished;
@@ -500,6 +507,15 @@ int xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_launch_requests(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_try_schedule_requests(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_prepare_transfer(xqc_mini_cli_user_conn_t *user_conn,
+    REQUEST_METHOD method, const char *local_path, const char *remote_path,
+    int stream_concurrency);
+void xqc_mini_cli_set_transfer_error(
+    xqc_mini_cli_user_conn_t *user_conn, int error_code);
+void xqc_mini_cli_mark_transfer_io_complete(
+    xqc_mini_cli_user_conn_t *user_conn);
+void xqc_mini_cli_maybe_finish_transfer(
+    xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us);
 
 void xqc_mini_cli_release_path_io(xqc_mini_cli_user_path_t *path, const char *reason);

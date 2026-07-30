@@ -210,6 +210,108 @@ mini_backend_client_poll(mini_backend_client_t *client)
 }
 
 int
+mini_backend_client_transfer(mini_backend_client_t *client,
+    int direction, const char *local_path, const char *remote_path,
+    uint32_t timeout_ms, mini_backend_transfer_result_t *result)
+{
+    if (client == NULL || client->connection == NULL || result == NULL
+        || !client->api_mode || !client->connect_started
+        || !client->connection->handshake_finished
+        || client->connection->connection_closed)
+    {
+        return EINVAL;
+    }
+    if (direction != MINI_BACKEND_TRANSFER_GET
+        && direction != MINI_BACKEND_TRANSFER_POST)
+    {
+        return EINVAL;
+    }
+
+    memset(result, 0, sizeof(*result));
+    REQUEST_METHOD method = direction == MINI_BACKEND_TRANSFER_GET
+        ? REQUEST_METHOD_GET : REQUEST_METHOD_POST;
+    int concurrency = direction == MINI_BACKEND_TRANSFER_GET
+        ? XQC_MINI_DEFAULT_GET_CONCURRENCY
+        : XQC_MINI_DEFAULT_POST_CONCURRENCY;
+    if (xqc_mini_cli_prepare_transfer(client->connection, method,
+            local_path, remote_path, concurrency) != XQC_OK)
+    {
+        return client->connection->transfer_error_code != 0
+            ? client->connection->transfer_error_code : EIO;
+    }
+
+    int ret = XQC_OK;
+    if (method == REQUEST_METHOD_GET
+        && !xqc_mini_cli_paths_ready_for_requests(client->connection))
+    {
+        xqc_mini_cli_schedule_path_retry(client->connection,
+            XQC_MINI_PATH_RETRY_INTERVAL_USEC);
+    } else {
+        ret = xqc_mini_cli_launch_requests(client->connection);
+    }
+    if (ret != XQC_OK) {
+        xqc_mini_cli_set_transfer_error(client->connection, EIO);
+        client->connection->transfer_active = 0;
+        client->connection->transfer_finished = 1;
+        client->connection->transfer_end_time = xqc_now();
+        return EIO;
+    }
+
+    xqc_usec_t start = client->connection->transfer_start_time;
+    xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    while (!client->connection->transfer_finished) {
+        if (client->connection->connection_closed) {
+            ret = client->connection->last_error_code != 0
+                ? client->connection->last_error_code : ECONNRESET;
+            xqc_mini_cli_set_transfer_error(client->connection, ret);
+            break;
+        }
+        if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
+            ret = ETIMEDOUT;
+            xqc_mini_cli_set_transfer_error(client->connection, ret);
+            client->connection->transfer_active = 0;
+            client->connection->transfer_finished = 1;
+            client->connection->auto_start_requests = 0;
+            client->connection->transfer_end_time = xqc_now();
+            (void)xqc_h3_conn_close(client->ctx.engine,
+                &client->connection->cid);
+            break;
+        }
+        int loop_ret = event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK);
+        if (loop_ret < 0) {
+            ret = EIO;
+            xqc_mini_cli_set_transfer_error(client->connection, ret);
+            client->connection->transfer_active = 0;
+            client->connection->transfer_finished = 1;
+            client->connection->auto_start_requests = 0;
+            client->connection->transfer_end_time = xqc_now();
+            break;
+        }
+#if !defined(XQC_SYS_WINDOWS)
+        usleep(1000);
+#endif
+    }
+
+    if (client->connection->transfer_end_time == 0) {
+        client->connection->transfer_end_time = xqc_now();
+    }
+    result->total_bytes = method == REQUEST_METHOD_GET
+        ? client->connection->download_total_bytes
+        : client->connection->upload_total_bytes;
+    result->total_fragments =
+        (uint32_t)client->connection->target_requests;
+    result->completed_fragments =
+        (uint32_t)client->connection->completed_requests;
+    result->elapsed_us = client->connection->transfer_end_time >= start
+        ? client->connection->transfer_end_time - start : 0;
+
+    if (ret == XQC_OK && client->connection->transfer_error_code != 0) {
+        ret = client->connection->transfer_error_code;
+    }
+    return ret == XQC_OK ? 0 : ret;
+}
+
+int
 mini_backend_client_shutdown(mini_backend_client_t *client,
     uint32_t timeout_ms)
 {

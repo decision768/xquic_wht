@@ -172,6 +172,15 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     user_conn->last_error_code = xqc_h3_conn_get_errno(conn);
     user_conn->h3_conn = NULL;
     user_conn->connection_closed = 1;
+    if (user_conn->transfer_active) {
+        xqc_mini_cli_set_transfer_error(user_conn,
+            user_conn->last_error_code != 0
+            ? user_conn->last_error_code : ECONNRESET);
+        user_conn->transfer_finished = 1;
+        user_conn->transfer_active = 0;
+        user_conn->auto_start_requests = 0;
+        user_conn->transfer_end_time = xqc_now();
+    }
     if (user_conn->ctx != NULL && user_conn->ctx->eb != NULL) {
         event_base_loopbreak(user_conn->ctx->eb);
     }
@@ -274,6 +283,9 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     if (user_conn->completed_requests < user_conn->target_requests) {
         if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
             printf("[error] schedule next request round failed\n");
+            xqc_mini_cli_set_transfer_error(user_conn, EIO);
+            user_conn->target_requests =
+                user_conn->completed_requests + user_conn->active_requests;
             xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
         }
     }
@@ -282,10 +294,14 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
         user_stream->stream_index, user_conn->completed_requests,
         user_conn->target_requests, user_conn->active_requests, stats.cwnd_blocked_ms);
 
-     if (user_conn->completed_requests >= user_conn->target_requests
+    if (user_conn->completed_requests >= user_conn->target_requests
         && user_conn->active_requests == 0)
     {
-        xqc_h3_conn_close(conn_ctx->engine, &user_conn->cid);
+        if (conn_ctx->args->defer_transfer_setup) {
+            xqc_mini_cli_maybe_finish_transfer(user_conn);
+        } else {
+            xqc_h3_conn_close(conn_ctx->engine, &user_conn->cid);
+        }
     }
 
     free(user_stream);
@@ -293,6 +309,78 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
     //printf("[stats] xqc_mini_cli_h3_request_close_notify success, cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
     return 0;
 }
+
+static int
+xqc_mini_cli_finish_download_stream(
+    xqc_mini_cli_user_stream_t *user_stream)
+{
+    if (user_stream == NULL || user_stream->user_conn == NULL
+        || user_stream->download_accounted)
+    {
+        return XQC_OK;
+    }
+
+    xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    user_stream->download_accounted = 1;
+
+    if (!user_stream->slot_released) {
+        if (user_conn->active_requests > 0) {
+            user_conn->active_requests--;
+        }
+        user_stream->slot_released = 1;
+        if (user_conn->next_stream_index < user_conn->target_requests
+            && xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK)
+        {
+            printf("[error] schedule next GET round failed\n");
+            xqc_mini_cli_set_transfer_error(user_conn, EIO);
+            user_conn->target_requests =
+                user_conn->completed_requests + user_conn->active_requests + 1;
+        }
+    }
+
+    user_conn->download_total_bytes += user_stream->recv_body_len;
+    user_conn->download_finished_streams++;
+    if (user_conn->download_finished_streams < user_conn->target_requests) {
+        return XQC_OK;
+    }
+
+    if (user_conn->download_fd >= 0) {
+        if (xqc_mini_cli_flush_async_writer(user_conn) != XQC_OK) {
+            printf("[error] async writer failed before download completion\n");
+            xqc_mini_cli_set_transfer_error(user_conn,
+                user_conn->download_write_error != 0
+                ? user_conn->download_write_error : EIO);
+        }
+        xqc_usec_t fsync_start_us = xqc_now();
+        int fsync_ret = fsync(user_conn->download_fd);
+        xqc_usec_t fsync_end_us = xqc_now();
+        xqc_mini_cli_diag_record_fsync(user_conn,
+            fsync_end_us >= fsync_start_us
+            ? fsync_end_us - fsync_start_us : 0);
+        if (fsync_ret != 0) {
+            xqc_mini_cli_set_transfer_error(user_conn,
+                errno != 0 ? errno : EIO);
+        }
+        xqc_mini_cli_stop_async_writer(user_conn);
+        close(user_conn->download_fd);
+        user_conn->download_fd = -1;
+    }
+
+    printf("[stats] multi-stream download complete, %zu bytes saved to %s\n",
+        user_conn->download_total_bytes,
+        user_conn->download_path[0] ? user_conn->download_path
+                                    : user_conn->ctx->args->env_cfg.download_path);
+    xqc_mini_cli_diag_maybe_log(user_conn, "download_done", 1);
+    xqc_mini_cli_mark_transfer_io_complete(user_conn);
+    xqc_mini_cli_maybe_finish_transfer(user_conn);
+
+    if (!user_conn->ctx->args->defer_transfer_setup) {
+        xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
+        xqc_engine_main_logic(user_conn->ctx->engine);
+    }
+    return XQC_OK;
+}
+
 /*用于触发接收事件回调，常用于GET方法或者接收response*/
 int
 xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request, 
@@ -313,6 +401,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             return XQC_ERROR;
         }
         int status_code = 0;
+        int total_length_present = 0;
         for (int i = 0; i < headers->count; i++) {
             printf("[receive report] %.*s = %.*s\n",
                 (int)headers->headers[i].name.iov_len,
@@ -347,17 +436,20 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 }
                 memcpy(total_buf, headers->headers[i].value.iov_base, len);
                 size_t total_length = strtoull(total_buf, NULL, 10);
-                if (total_length > 0) {
-                    user_conn->download_expected_bytes = total_length;
-                    user_conn->send_file_size = total_length;
-                }
+                user_conn->download_expected_bytes = total_length;
+                user_conn->send_file_size = total_length;
+                total_length_present = 1;
             }
         }
 
         user_stream->response_status = status_code;
+        if (status_code < 200 || status_code >= 300) {
+            xqc_mini_cli_set_transfer_error(user_conn,
+                status_code == 404 ? ENOENT : EPROTO);
+        }
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_conn->download_expected_bytes > 0
+            && total_length_present
             && !user_conn->total_requests_known)
         {
             size_t stream_range_size = user_conn->ctx->args->net_cfg.stream_range_size > 0
@@ -378,6 +470,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 user_conn->max_concurrent_requests);
             if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
                 printf("[error] schedule GET rounds failed\n");
+                xqc_mini_cli_set_transfer_error(user_conn, EIO);
             }
         }
 
@@ -390,9 +483,12 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             user_conn->download_fd = open(download_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (user_conn->download_fd < 0) {
                 perror("open");
+                xqc_mini_cli_set_transfer_error(user_conn,
+                    errno != 0 ? errno : EIO);
                 return XQC_ERROR;
             }
             if (xqc_mini_cli_start_async_writer(user_conn) != XQC_OK) {
+                xqc_mini_cli_set_transfer_error(user_conn, EIO);
                 close(user_conn->download_fd);
                 user_conn->download_fd = -1;
                 return XQC_ERROR;
@@ -408,7 +504,9 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             /* only header in request */
             user_stream->recv_fin = 1;
             printf("[stats] h3 request read header finish \n");
-            
+            if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+                return xqc_mini_cli_finish_download_stream(user_stream);
+            }
             return XQC_OK;
         }
         
@@ -429,6 +527,7 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
 
         } else if (read < 0) {
             printf("xqc_h3_request_recv_body error %zd\n", read);
+            xqc_mini_cli_set_transfer_error(user_conn, EIO);
             return XQC_OK;
         }
     
@@ -475,6 +574,9 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             if (xqc_mini_cli_async_pwrite(user_conn,
                     (const unsigned char *)recv_buff, (size_t)read, write_off) != XQC_OK) {
                 printf("[error] async pwrite enqueue failed\n");
+                xqc_mini_cli_set_transfer_error(user_conn,
+                    user_conn->download_write_error != 0
+                    ? user_conn->download_write_error : EIO);
                 return XQC_ERROR;
             }
         }
@@ -498,66 +600,11 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         user_stream->recv_fin = 1;
 
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && !user_stream->slot_released)
-        {
-            if (user_conn->active_requests > 0) {
-                user_conn->active_requests--;
-            }
-            user_stream->slot_released = 1;
-            if (user_conn->next_stream_index < user_conn->target_requests) {
-                if (xqc_mini_cli_try_schedule_requests(user_conn) != XQC_OK) {
-                    printf("[error] schedule next GET round failed\n");
-                    xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
-                }
-            }
-        }
-        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && user_stream->expected_content_length > 0) {
             printf("\n");
         }
-        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && user_conn->download_fd >= 0) {
-            user_conn->download_total_bytes += user_stream->recv_body_len;
-            user_conn->download_finished_streams++;
-            if (user_conn->download_finished_streams >= user_conn->target_requests) {
-                if (xqc_mini_cli_flush_async_writer(user_conn) != XQC_OK) {
-                    printf("[error] async writer failed before download completion\n");
-                    xqc_mini_cli_stop_async_writer(user_conn);
-                    close(user_conn->download_fd);
-                    user_conn->download_fd = -1;
-                    return XQC_ERROR;
-                }
-                xqc_usec_t fsync_start_us = xqc_now();
-                int fsync_ret = fsync(user_conn->download_fd);
-                xqc_usec_t fsync_end_us = xqc_now();
-                xqc_mini_cli_diag_record_fsync(user_conn,
-                    fsync_end_us >= fsync_start_us ? fsync_end_us - fsync_start_us : 0);
-                if (fsync_ret != 0) {
-                    perror("fsync");
-                }
-                double duration_ms = (user_conn->download_first_body_time > 0
-                    && user_conn->download_last_body_time
-                        > user_conn->download_first_body_time)
-                    ? (user_conn->download_last_body_time
-                        - user_conn->download_first_body_time) / 1000.0
-                    : 0.0;
-                double mbps = duration_ms > 0
-                    ? (user_conn->download_total_bytes * 8.0) / (duration_ms * 1000.0)
-                    : 0.0;
-                printf("[stats] multi-stream download complete, %zu bytes saved to %s\n",
-                    user_conn->download_total_bytes,
-                    user_conn->download_path[0] ? user_conn->download_path
-                                                : user_conn->ctx->args->env_cfg.download_path);
-                printf("[stats] all download streams finished: %zu bytes, time=%.3f ms, speed=%.3f Mbps\n",
-                    user_conn->download_total_bytes, duration_ms, mbps);
-                printf("[stats] GET timing=first_body_to_last_body excludes_async_flush_fsync=1\n");
-                xqc_mini_cli_diag_maybe_log(user_conn, "download_done", 1);
-                xqc_mini_cli_stop_async_writer(user_conn);
-                close(user_conn->download_fd);
-                user_conn->download_fd = -1;
-                xqc_h3_conn_close(user_conn->ctx->engine, &user_conn->cid);
-                xqc_engine_main_logic(user_conn->ctx->engine);
-            }
+        if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+            return xqc_mini_cli_finish_download_stream(user_stream);
         }
         
         

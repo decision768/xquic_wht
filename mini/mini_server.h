@@ -165,6 +165,8 @@ typedef struct xqc_mini_svr_user_conn_s {
     int                     handshake_finished;
     int                     connection_closed;
     int                     last_error_code;
+    int                     serve_configured;
+    char                    serve_root_path[PATH_LEN];
     struct event           *ev_timeout;
     xqc_cid_t               cid;
     xqc_h3_conn_t          *h3_conn;

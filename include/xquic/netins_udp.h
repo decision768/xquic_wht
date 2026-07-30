@@ -22,6 +22,7 @@ extern "C" {
 #define NETINS_UDP_FILE_PATH_LEN 1024U
 #define NETINS_UDP_SERVER_NAME_LEN 256U
 #define NETINS_UDP_ERROR_MSG_LEN 256U
+#define NETINS_UDP_REMOTE_PATH_LEN 1024U
 
 typedef struct netins_udp_s netins_udp_t;
 
@@ -81,6 +82,11 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_KERNEL_RCVBUF = 9
 } netins_udp_opt_t;
 
+typedef enum netins_udp_transfer_direction_e {
+    NETINS_UDP_TRANSFER_GET = 1,
+    NETINS_UDP_TRANSFER_POST = 2
+} netins_udp_transfer_direction_t;
+
 typedef struct netins_udp_interfaces_s {
     uint32_t struct_size;
     uint32_t api_version;
@@ -105,6 +111,48 @@ typedef struct netins_udp_tls_config_s {
 /* Client handles use server_name only; client certificates are unsupported. */
 #define NETINS_UDP_TLS_CONFIG_INITIALIZER \
     { sizeof(netins_udp_tls_config_t), NETINS_UDP_API_VERSION, {0}, {0}, {0}, {0} }
+
+typedef struct netins_udp_transfer_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    int direction;
+    uint32_t timeout_ms;
+    const char *local_path;
+    const char *remote_path;
+    uint64_t reserved[4];
+} netins_udp_transfer_t;
+
+#define NETINS_UDP_TRANSFER_INITIALIZER \
+    { sizeof(netins_udp_transfer_t), NETINS_UDP_API_VERSION, \
+      NETINS_UDP_TRANSFER_GET, 0, NULL, NULL, {0} }
+
+typedef struct netins_udp_transfer_result_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint64_t total_bytes;
+    uint32_t total_fragments;
+    uint32_t completed_fragments;
+    uint64_t elapsed_us;
+    double throughput_mbps;
+    uint64_t reserved[4];
+} netins_udp_transfer_result_t;
+
+#define NETINS_UDP_TRANSFER_RESULT_INITIALIZER \
+    { sizeof(netins_udp_transfer_result_t), NETINS_UDP_API_VERSION, \
+      0, 0, 0, 0, 0.0, {0} }
+
+typedef struct netins_udp_serve_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    const char *root_path;
+    uint32_t timeout_ms;
+    uint32_t reserved32;
+    uint64_t reserved[4];
+} netins_udp_serve_config_t;
+
+#define NETINS_UDP_SERVE_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_serve_config_t), NETINS_UDP_API_VERSION, \
+      NULL, 0, 0, {0} }
 
 NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
 
@@ -138,6 +186,22 @@ NETINS_UDP_PUBLIC int netins_udp_connect(netins_udp_t *client,
 NETINS_UDP_PUBLIC int netins_udp_listen(netins_udp_t *server,
     const char *host, uint16_t port);
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(netins_udp_t *server);
+
+/*
+ * transfer() runs one complete GET or POST task on a connected client.
+ * The 4 MiB fragments, POST concurrency 4, GET concurrency 8 and request
+ * replenishment policy are fixed internally. A timeout of zero waits
+ * indefinitely. remote_path must be an absolute URL path such as "/a.bin".
+ *
+ * serve() configures an accepted connection's remote file namespace and
+ * drives its shared event loop until the peer closes or timeout_ms expires.
+ * Remote paths are confined to root_path and ".." components are rejected.
+ */
+NETINS_UDP_PUBLIC int netins_udp_transfer(netins_udp_t *client,
+    const netins_udp_transfer_t *task,
+    netins_udp_transfer_result_t *result);
+NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
+    const netins_udp_serve_config_t *config);
 
 NETINS_UDP_PUBLIC int netins_udp_get_state(netins_udp_t *handle);
 NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *handle);
