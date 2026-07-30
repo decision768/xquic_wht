@@ -3,7 +3,8 @@ server_port=8443
 
 # request settings
 method=POST
-stream_cnt=1
+get_stream_cnt=8
+post_stream_cnt=4
 
 # algorithm settings
 cc=bbr

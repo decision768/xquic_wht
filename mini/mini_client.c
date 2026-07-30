@@ -884,7 +884,7 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->req_cfg.path, "/", sizeof(args->req_cfg.path));
     strncpy(args->req_cfg.url, "/", sizeof(args->req_cfg.url));
     strncpy(args->req_cfg.host, DEFAULT_HOST, sizeof(args->req_cfg.host));
-    args->req_stream_cnt = 1;
+    args->req_stream_cnt = XQC_MINI_DEFAULT_POST_CONCURRENCY;
     args->send_data_len = 0;
 }
 
@@ -2305,6 +2305,9 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
 
     char line[512];
     int mp_diag_interval_warned = 0;
+    int legacy_stream_cnt_set = 0;
+    int get_stream_cnt = XQC_MINI_DEFAULT_GET_CONCURRENCY;
+    int post_stream_cnt = XQC_MINI_DEFAULT_POST_CONCURRENCY;
     while (fgets(line, sizeof(line), fp)) {
         char *line_ptr = xqc_mini_cli_trim_space(line);
         if (line_ptr[0] == '\0' || line_ptr[0] == '#') {
@@ -2342,6 +2345,23 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
                     stream_cnt = XQC_MINI_MAX_STREAMS;
                 }
                 args->req_stream_cnt = (int)stream_cnt;
+                legacy_stream_cnt_set = 1;
+            }
+
+        } else if (strcmp(key, "get_stream_cnt") == 0
+            || strcmp(key, "post_stream_cnt") == 0)
+        {
+            char *endptr = NULL;
+            long stream_cnt = strtol(value, &endptr, 10);
+            if (endptr != value && *endptr == '\0' && stream_cnt > 0) {
+                if (stream_cnt > XQC_MINI_MAX_STREAMS) {
+                    stream_cnt = XQC_MINI_MAX_STREAMS;
+                }
+                if (strcmp(key, "get_stream_cnt") == 0) {
+                    get_stream_cnt = (int)stream_cnt;
+                } else {
+                    post_stream_cnt = (int)stream_cnt;
+                }
             }
 
         }
@@ -2481,6 +2501,10 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
     }
 
     fclose(fp);
+    if (!legacy_stream_cnt_set) {
+        args->req_stream_cnt = args->req_cfg.method == REQUEST_METHOD_GET
+            ? get_stream_cnt : post_stream_cnt;
+    }
     return XQC_OK;
 }
 // libevent socket 事件回调分发，查看socket是否可写或者可读
