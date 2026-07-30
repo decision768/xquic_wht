@@ -455,7 +455,14 @@ if(XQC_ENABLE_MINI_API)
         ${LIBEVENT_LIBRARY}
         ${LIBEVENT_PTHREADS_LIBRARY}
         ${ZLOG_STATIC_LIB}
-        -lpthread)
+        ${SSL_LIB_PATH}
+        -ldl
+        -lpthread
+        m)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set_property(TARGET xquic APPEND_STRING PROPERTY LINK_FLAGS
+            " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds")
+    endif()
 endif()
 
 if(PLATFORM MATCHES "mac")
@@ -485,3 +492,5 @@ if(CMAKE_BUILD_TYPE STREQUAL MinSizeRel)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_STRIP} libxquic.so)
 endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MiniApiInstall.cmake")

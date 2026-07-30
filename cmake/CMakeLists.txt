@@ -435,3 +435,12 @@ if (XQC_BUILD_SAMPLE)
     target_link_libraries(test_server xquic event)
 endif()
 
+if(XQC_ENABLE_MINI_API
+    AND NOT XQC_NO_SHARED
+    AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set_property(TARGET xquic APPEND_STRING PROPERTY LINK_FLAGS
+        " -Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds")
+endif()
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/MiniApiInstall.cmake")
+

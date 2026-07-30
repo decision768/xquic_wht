@@ -1,0 +1,38 @@
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+
+if(NOT SIM8810_SDK_ROOT AND DEFINED ENV{SIM8810_SDK_ROOT})
+    set(SIM8810_SDK_ROOT "$ENV{SIM8810_SDK_ROOT}")
+endif()
+if(NOT SIM8810_TOOLCHAIN_DIR AND DEFINED ENV{SIM8810_TOOLCHAIN_DIR})
+    set(SIM8810_TOOLCHAIN_DIR "$ENV{SIM8810_TOOLCHAIN_DIR}")
+endif()
+
+if(NOT SIM8810_SDK_ROOT)
+    message(FATAL_ERROR
+        "Set SIM8810_SDK_ROOT to the SDK directory containing sysroots_pvm")
+endif()
+if(NOT SIM8810_TOOLCHAIN_DIR)
+    message(FATAL_ERROR
+        "Set SIM8810_TOOLCHAIN_DIR to the directory containing "
+        "aarch64-oe-linux-gcc and aarch64-oe-linux-g++")
+endif()
+
+set(CMAKE_SYSROOT "${SIM8810_SDK_ROOT}/sysroots_pvm")
+set(CMAKE_C_COMPILER
+    "${SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc")
+set(CMAKE_CXX_COMPILER
+    "${SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
+
+if(NOT EXISTS "${CMAKE_SYSROOT}")
+    message(FATAL_ERROR "SIM8810 sysroot not found: ${CMAKE_SYSROOT}")
+endif()
+if(NOT EXISTS "${CMAKE_C_COMPILER}")
+    message(FATAL_ERROR "SIM8810 C compiler not found: ${CMAKE_C_COMPILER}")
+endif()
+
+set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
