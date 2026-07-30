@@ -129,6 +129,19 @@ XQUIC_VERS_1.0 {
         xqc_reed_solomon_code_cb;
         xqc_xor_code_cb;
         xqc_packet_mask_code_cb;
+        netins_udp_get_api_version;
+        netins_udp_init;
+        netins_udp_cleanup;
+        netins_udp_new;
+        netins_udp_set_opt;
+        netins_udp_connect;
+        netins_udp_listen;
+        netins_udp_accept;
+        netins_udp_get_state;
+        netins_udp_shutdown;
+        netins_udp_close;
+        netins_udp_get_last_error_code;
+        netins_udp_get_last_error_msg;
     local:
         *;
 };

@@ -2,28 +2,23 @@
 
 cmake_minimum_required (VERSION 3.6)
 set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
+if(NOT DEFINED CMAKE_C_COMPILER)
+    set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
-# set(TOOLCHAIN_DIR /opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux)
-# set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
-# set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
+    # === SIM8810 SDK default toolchain ===
+    set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
+    set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
+    set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
+    set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
+    set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
 
-# === SIM8810 SDK ===
-set(SDK_ROOT "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207")
-set(CMAKE_SYSROOT "${SDK_ROOT}/sysroots_pvm")
-
-# toolchain（跟 sdk.mk 一致）
-set(TOOLCHAIN_DIR "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux")
-set(CMAKE_C_COMPILER  ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
-set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
-
-# 让 cmake 查找 include/lib 时走 sysroot
-set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-# ====================
+    set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
+    set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+    set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+    set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+    # ====================
+endif()
 project (xquic)
 set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
@@ -41,6 +36,7 @@ option (XQC_ENABLE_FEC "enable fec" OFF)
 option (XQC_ENABLE_XOR "enable fec scheme xor" OFF)
 option (XQC_ENABLE_RSC "enable fec scheme reed-solomon code" OFF)
 option (XQC_ENABLE_PKM "enable fec scheme packet mask" OFF)
+option (XQC_ENABLE_MINI_API "build the NetIns Mini API" ON)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -156,11 +152,18 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
-set(LIBEVENT_ROOT /home/admin123/libevent_aarch64/libevent-2.1.12-stable)
-
-set(LIBEVENT_INCLUDE_DIR ${LIBEVENT_ROOT}/include)
-set(LIBEVENT_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent.a)
-set(LIBEVENT_PTHREADS_LIBRARY ${LIBEVENT_ROOT}/.libs/libevent_pthreads.a)
+set(LIBEVENT_ROOT
+    "/home/admin123/libevent_aarch64/libevent-2.1.12-stable"
+    CACHE PATH "Path to the libevent source/build tree")
+set(LIBEVENT_INCLUDE_DIR
+    "${LIBEVENT_ROOT}/include"
+    CACHE PATH "Path to libevent headers")
+set(LIBEVENT_LIBRARY
+    "${LIBEVENT_ROOT}/.libs/libevent.a"
+    CACHE FILEPATH "Path to the libevent library")
+set(LIBEVENT_PTHREADS_LIBRARY
+    "${LIBEVENT_ROOT}/.libs/libevent_pthreads.a"
+    CACHE FILEPATH "Path to the libevent pthreads library")
 
 include_directories(include
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -203,10 +206,14 @@ endif()
 
 
 
-# testing
-if(XQC_ENABLE_TESTING)
+# shared Mini API backend and optional mini command-line programs
+if(XQC_ENABLE_MINI_API OR XQC_ENABLE_TESTING)
+    set(MINI_XQUIC_TARGET xquic-static)
     add_subdirectory(mini)
-endif(XQC_ENABLE_TESTING)
+endif()
+if(XQC_ENABLE_MINI_API)
+    set(MINI_API_LIBRARY_OBJECTS ${MINI_API_OBJECTS})
+endif()
 
 
 # http3/qpack source
@@ -421,6 +428,7 @@ set (
     ${TLS_SOURCE}
     ${COMMON_SOURCES}
     ${CONGESTION_CONTROL_SOURCES}
+    ${MINI_API_LIBRARY_OBJECTS}
 )
 
 
@@ -437,6 +445,18 @@ add_library(
     SHARED
     ${XQC_SOURCE}
 )
+
+if(XQC_ENABLE_MINI_API)
+    target_link_libraries(xquic-static
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB})
+    target_link_libraries(xquic
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB}
+        -lpthread)
+endif()
 
 if(PLATFORM MATCHES "mac")
     target_link_libraries(

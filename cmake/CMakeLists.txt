@@ -364,6 +364,29 @@ if (XQC_NO_SHARED)
     set(XQC_BINARY_TYPE STATIC)
 endif()
 
+if(XQC_ENABLE_MINI_API)
+    set(LIBEVENT_INCLUDE_DIR "" CACHE PATH "Path to libevent headers")
+    set(LIBEVENT_LIBRARY "" CACHE FILEPATH "Path to the libevent library")
+    set(LIBEVENT_PTHREADS_LIBRARY "" CACHE FILEPATH
+        "Path to the libevent pthreads library")
+    if(NOT EXISTS "${LIBEVENT_INCLUDE_DIR}/event2/event.h"
+        OR NOT EXISTS "${LIBEVENT_LIBRARY}"
+        OR NOT EXISTS "${LIBEVENT_PTHREADS_LIBRARY}")
+        message(FATAL_ERROR
+            "XQC_ENABLE_MINI_API requires LIBEVENT_INCLUDE_DIR, "
+            "LIBEVENT_LIBRARY and LIBEVENT_PTHREADS_LIBRARY")
+    endif()
+
+    set(MINI_XQUIC_TARGET xquic)
+    add_subdirectory(mini)
+    if(NOT EXISTS "${ZLOG_INCLUDE_DIR}/zlog.h"
+        OR NOT EXISTS "${ZLOG_STATIC_LIB}")
+        message(FATAL_ERROR
+            "XQC_ENABLE_MINI_API requires ZLOG_INCLUDE_DIR and "
+            "ZLOG_STATIC_LIB")
+    endif()
+endif()
+
 add_library(
     xquic
     ${XQC_BINARY_TYPE}
@@ -373,9 +396,18 @@ add_library(
     ${COMMON_SOURCES}
     ${CONGESTION_CONTROL_SOURCES}
     ${XQC_SOURCE}
+    ${MINI_API_OBJECTS}
 )
 
 add_dependencies(xquic xquic_global)
+
+if(XQC_ENABLE_MINI_API)
+    target_link_libraries(xquic
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB}
+        -pthread)
+endif()
 
 if (NOT XQC_NO_SHARED)
     target_link_libraries(
