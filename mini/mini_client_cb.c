@@ -10,7 +10,7 @@
 /**
  * @brief engine callbacks to trigger engine main logic 
  */
-const char *line_break = "\n";
+static const char *line_break = "\n";
 void
 xqc_mini_cli_engine_cb(int fd, short what, void *arg)
 {
@@ -150,6 +150,9 @@ int
 xqc_mini_cli_h3_conn_create_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void *user_data)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL) {
+        return XQC_ERROR;
+    }
 
     user_conn->h3_conn = conn;
     memcpy(&user_conn->cid, cid, sizeof(xqc_cid_t));
@@ -161,10 +164,17 @@ int
 xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void *user_data)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL) {
+        return XQC_OK;
+    }
 
     xqc_mini_cli_diag_maybe_log(user_conn, "h3_conn_close", 1);
+    user_conn->last_error_code = xqc_h3_conn_get_errno(conn);
     user_conn->h3_conn = NULL;
-    event_base_loopbreak(user_conn->ctx->eb);
+    user_conn->connection_closed = 1;
+    if (user_conn->ctx != NULL && user_conn->ctx->eb != NULL) {
+        event_base_loopbreak(user_conn->ctx->eb);
+    }
     printf("[stats] xqc_mini_cli_h3_conn_close_notify success \n");
     return XQC_OK;
 }
@@ -182,6 +192,10 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     user_conn->handshake_finished = 1;
     user_conn->path_wait_rounds_after_handshake = 0;
     printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
+
+    if (!user_conn->auto_start_requests) {
+        return;
+    }
 
     if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
         && !xqc_mini_cli_paths_ready_for_requests(user_conn))
@@ -709,6 +723,12 @@ void
 xqc_mini_cli_save_token(const unsigned char *token, unsigned token_len, void *user_data)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL
+        || user_conn->ctx->args->disable_0rtt_storage)
+    {
+        return;
+    }
     printf("[stats] start xqc_mini_cli_save_token, use client ip as the key.\n");
 
     int fd = open(TOKEN_FILE, O_TRUNC | O_CREAT | O_WRONLY, 0666);
@@ -730,10 +750,16 @@ void
 xqc_mini_cli_save_session_cb(const char * data, size_t data_len, void *user_data)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL
+        || user_conn->ctx->args->disable_0rtt_storage)
+    {
+        return;
+    }
     printf("[stats] start save_session_cb. \n");
 
     FILE * fp  = fopen(SESSION_TICKET_FILE, "wb");
-    if (fp < 0) {
+    if (fp == NULL) {
         printf("save session error %s\n", strerror(get_sys_errno()));
         return;
     }
@@ -753,10 +779,16 @@ void
 xqc_mini_cli_save_tp_cb(const char * data, size_t data_len, void * user_data)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL
+        || user_conn->ctx->args->disable_0rtt_storage)
+    {
+        return;
+    }
     printf("[stats] start save_tp_cb\n");
 
     FILE * fp = fopen(TRANSPORT_PARAMS_FILE, "wb");
-    if (fp < 0) {
+    if (fp == NULL) {
         printf("save transport callback error %s\n", strerror(get_sys_errno()));
         return;
     }
@@ -787,6 +819,12 @@ xqc_mini_cli_timeout_callback(int fd, short what, void *arg)
     conn_timeout = ctx->args->net_cfg.conn_timeout;
     xqc_usec_t last_socket_time = ctx->args->net_cfg.last_socket_time;
     socket_idle_time = xqc_now() - last_socket_time;
+    if (!user_conn->auto_start_requests && !user_conn->requests_launched) {
+        tv.tv_sec = conn_timeout;
+        tv.tv_usec = 0;
+        event_add(user_conn->ev_timeout, &tv);
+        return;
+    }
     //printf("[stats] client connection idle time: %llu us, conn_timeout:%d,last_socket_time:%d\n", socket_idle_time,conn_timeout,last_socket_time);
     if (socket_idle_time < conn_timeout * 1000000) {
         user_conn->timeout_defer_count = 0;
@@ -880,7 +918,9 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
 
 
-    if (user_conn->handshake_finished && !user_conn->requests_launched) {
+    if (user_conn->auto_start_requests && user_conn->handshake_finished
+        && !user_conn->requests_launched)
+    {
         int should_wait = user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
             && !xqc_mini_cli_paths_ready_for_requests(user_conn)
             && user_conn->path_wait_rounds_after_handshake

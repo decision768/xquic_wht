@@ -20,6 +20,8 @@
 
 #define REQ_BUF_SIZE 4*1024*1024
 
+struct xqc_mini_svr_user_conn_s;
+
 typedef struct xqc_mini_svr_path_diag_s {
     int                          valid;
     uint64_t                     path_id;
@@ -204,5 +206,7 @@ int xqc_mini_svr_h3_request_write_notify(xqc_h3_request_t *h3_request, void *str
 
 // 发送响应体数据
 int xqc_mini_svr_send_body(xqc_mini_svr_user_stream_t *user_stream);
+void xqc_mini_svr_release_connection_state(
+    struct xqc_mini_svr_user_conn_s *user_conn);
 
 #endif

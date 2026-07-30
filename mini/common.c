@@ -1,9 +1,23 @@
 #include "common.h"
+#include "mini_backend.h"
+
+#include <string.h>
 
 char method_s[][16] = {
     {"GET"}, 
     {"POST"}
 };
+
+void
+mini_backend_config_init(mini_backend_config_t *config)
+{
+    if (config == NULL) {
+        return;
+    }
+    memset(config, 0, sizeof(*config));
+    config->load_config_file = 1;
+}
+
 int
 xqc_mini_read_file_data(char * data, size_t data_len, char *filename)
 {

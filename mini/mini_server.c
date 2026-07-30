@@ -29,7 +29,7 @@ xqc_mini_svr_trim_space(char *text)
 }
 
 // 读取并解析服务器配置文件
-static int
+int
 xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
 {
     if (path == NULL || path[0] == '\0') {
@@ -325,12 +325,16 @@ int
 xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
 {
     memset(ctx, 0, sizeof(xqc_mini_svr_ctx_t));
+    ctx->args = args;
 
     /* init event base */
     struct event_base *eb = event_base_new();
+    if (eb == NULL) {
+        printf("[error] event_base_new failed\n");
+        return XQC_ERROR;
+    }
     ctx->eb = eb;
 
-    ctx->args = args;
     /* init log writer fd */
     // ctx->log_fd = xqc_mini_svr_open_log_file(ctx);
     // if (ctx->log_fd < 0) {
@@ -351,7 +355,9 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
             return XQC_ERROR;
         }
     }
-    if (!ctx->args->env_cfg.use_zlog || ctx->zlog_cat == NULL) {
+    if (!ctx->args->env_cfg.disable_file_logging
+        && (!ctx->args->env_cfg.use_zlog || ctx->zlog_cat == NULL))
+    {
         // /* init log writer fd */
         ctx->log_fd = xqc_mini_svr_open_log_file(ctx);
         if (ctx->log_fd < 0) {
@@ -378,7 +384,7 @@ void
 xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb,
     xqc_mini_svr_args_t *args)
 {
-    static xqc_engine_callback_t callback = {
+    xqc_engine_callback_t callback = {
         .set_event_timer = xqc_mini_svr_set_event_timer,
         // .log_callbacks = {
         //     .xqc_log_write_err = xqc_mini_svr_write_log_file,
@@ -405,7 +411,7 @@ xqc_mini_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         callback.keylog_cb = NULL;
     }
 
-    static xqc_transport_callbacks_t transport_cbs = {
+    xqc_transport_callbacks_t transport_cbs = {
         .server_accept = xqc_mini_svr_accept,
         .write_socket = xqc_mini_svr_write_socket,
         .write_socket_ex = xqc_mini_svr_write_socket_ex,
@@ -453,6 +459,10 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
     }
 
     ctx->ev_engine = event_new(ctx->eb, -1, 0, xqc_mini_svr_engine_cb, ctx);
+    if (ctx->ev_engine == NULL) {
+        printf("[error] create server engine event failed\n");
+        return XQC_ERROR;
+    }
 
     return XQC_OK;
 }
@@ -717,7 +727,7 @@ xqc_mini_svr_create_socket(xqc_mini_svr_user_conn_t *user_conn, xqc_mini_svr_net
 
     printf("[stats] create ipv4 socket fd: %d success, bind socket to ip: %s, port: %u\n", user_conn->fd, cfg->ip, cfg->port);
 
-    if (!user_conn->fd) {
+    if (user_conn->fd < 0) {
         return -1;
     }
 
@@ -790,11 +800,6 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
         ? ctx->args->net_cfg.user_recv_buf_size
         : XQC_PACKET_BUF_LEN;
     unsigned char packet_buf[XQC_PACKET_BUF_LEN];
-    if (packet_buf == NULL) {
-        printf("[error] allocate recv buffer failed\n");
-        return;
-    }
-
 
     ctx->current_fd = fd;
 
@@ -878,13 +883,23 @@ xqc_mini_svr_socket_event_callback(int fd, short what, void *arg)
 
     } else {
         printf("event callback: fd=%d, what=%d\n", fd, what);
-        exit(1);
+        user_conn->last_error_code = EIO;
+        user_conn->accepting = 0;
+        event_base_loopbreak(user_conn->ctx->eb);
     }
 }
 // 释放服务器上下文资源
 void
 xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
 {
+    if (ctx == NULL) {
+        return;
+    }
+    if (ctx->ev_engine != NULL) {
+        event_del(ctx->ev_engine);
+        event_free(ctx->ev_engine);
+        ctx->ev_engine = NULL;
+    }
     xqc_mini_svr_close_keylog_file(ctx);
     xqc_mini_svr_close_log_file(ctx);
     if (ctx->args && ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
@@ -896,13 +911,29 @@ xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
         free(ctx->args);
         ctx->args = NULL;
     }
-
+    if (ctx->eb != NULL) {
+        event_base_free(ctx->eb);
+        ctx->eb = NULL;
+    }
 }
 
 // 释放用户连接资源
 void
 xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
 {
+    if (user_conn == NULL) {
+        return;
+    }
+    xqc_mini_svr_release_connection_state(user_conn);
+    if (!user_conn->is_connection_scope && user_conn->ev_socket != NULL) {
+        event_del(user_conn->ev_socket);
+        event_free(user_conn->ev_socket);
+        user_conn->ev_socket = NULL;
+    }
+    if (!user_conn->is_connection_scope && user_conn->fd >= 0) {
+        close(user_conn->fd);
+        user_conn->fd = -1;
+    }
     if (user_conn->local_addr) {
         free(user_conn->local_addr);
         user_conn->local_addr = NULL;
@@ -911,10 +942,7 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
         free(user_conn->peer_addr);
         user_conn->peer_addr = NULL;
     }
-    if (user_conn) {
-        free(user_conn);
-        user_conn = NULL;
-    }
+    free(user_conn);
 }
 // 创建并初始化用户连接结构
 xqc_mini_svr_user_conn_t *
@@ -922,11 +950,19 @@ xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx)
 {
     int ret;
     xqc_mini_svr_user_conn_t *user_conn = calloc(1, sizeof(xqc_mini_svr_user_conn_t));
+    if (user_conn == NULL) {
+        return NULL;
+    }
 
     user_conn->ctx = ctx;
+    user_conn->fd = -1;
+    user_conn->accepting = 1;
 
     user_conn->local_addr = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));
     user_conn->peer_addr = (struct sockaddr_in *)calloc(1, sizeof(struct sockaddr_in));
+    if (user_conn->local_addr == NULL || user_conn->peer_addr == NULL) {
+        goto error;
+    }
     
     /* init server socket and save to ctx->fd */
     ret = xqc_mini_svr_create_socket(user_conn, &ctx->args->net_cfg);
@@ -938,7 +974,12 @@ xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx)
     /* bind socket event callback to fd event */
     user_conn->ev_socket = event_new(ctx->eb, user_conn->fd, EV_READ | EV_PERSIST,
         xqc_mini_svr_socket_event_callback, user_conn);
-    event_add(user_conn->ev_socket, NULL);
+    if (user_conn->ev_socket == NULL
+        || event_add(user_conn->ev_socket, NULL) != 0)
+    {
+        printf("[error] create server socket event failed\n");
+        goto error;
+    }
 
     return user_conn;
 error:
@@ -948,16 +989,23 @@ error:
 
 // 连接结束时清理事件
 void
-xqc_mini_cli_on_connection_finish(xqc_mini_svr_user_conn_t *user_conn)
+xqc_mini_svr_on_connection_finish(xqc_mini_svr_user_conn_t *user_conn)
 {
+    if (user_conn == NULL) {
+        return;
+    }
+    user_conn->accepting = 0;
     if (user_conn->ev_timeout) {
         event_del(user_conn->ev_timeout);
+        event_free(user_conn->ev_timeout);
         user_conn->ev_timeout = NULL;
     }
 
     if (user_conn->ev_socket) {
         event_del(user_conn->ev_socket);
-        user_conn->ev_timeout = NULL;
+    }
+    if (user_conn->ctx != NULL && user_conn->ctx->eb != NULL) {
+        event_base_loopbreak(user_conn->ctx->eb);
     }
 }
 

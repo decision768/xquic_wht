@@ -1,61 +1,103 @@
-### hq mini client/server ###
-    set(ZLOG_INCLUDE_DIR "/home/admin123/zlog-1.2.18/src")
-    set(ZLOG_STATIC_LIB  "/home/admin123/zlog-1.2.18/build_aarch64/lib/libzlog.a")
-    set(
-        HQ_SOURCES
-        "../demo/xqc_hq_ctx.c"
-        "../demo/xqc_hq_conn.c"
-        "../demo/xqc_hq_request.c"
-    )
+### Shared mini backend and optional command-line programs ###
 
-    set(
-        MINI_CLIENT_SOURCES
-        ${HQ_SOURCES}
-        "common.c"
-        "mini_client.c"
-        "mini_client_cb.c"
-        "mini_client_main.c"
-    )
+set(ZLOG_INCLUDE_DIR
+    "/home/admin123/zlog-1.2.18/src"
+    CACHE PATH "Path to zlog headers")
+set(ZLOG_STATIC_LIB
+    "/home/admin123/zlog-1.2.18/build_aarch64/lib/libzlog.a"
+    CACHE FILEPATH "Path to the zlog static library")
 
-    set(
-        MINI_SERVER_SOURCES
-        ${HQ_SOURCES}
-        "common.c"
-        "mini_server.c"
-        "mini_server_cb.c"
-        "mini_server_main.c"
-    )
+set(MINI_BACKEND_INCLUDE_DIRS
+    "${CMAKE_SOURCE_DIR}"
+    "${CMAKE_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}"
+    "${LIBEVENT_INCLUDE_DIR}"
+    "${ZLOG_INCLUDE_DIR}"
+)
 
+add_library(mini_common_backend_obj OBJECT
+    common.c
+)
+add_library(mini_client_backend_obj OBJECT
+    mini_client.c
+    mini_client_cb.c
+    mini_client_backend.c
+)
+add_library(mini_server_backend_obj OBJECT
+    mini_server.c
+    mini_server_cb.c
+    mini_server_backend.c
+)
+set(MINI_BACKEND_OBJECT_TARGETS
+    mini_common_backend_obj
+    mini_client_backend_obj
+    mini_server_backend_obj
+)
 
-    if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
-        set(MINI_SERVER_SOURCES
-            ${MINI_SERVER_SOURCES}
-            ${GETOPT_SOURCES}
-        )
+if(XQC_ENABLE_MINI_API)
+    add_library(netins_udp_mini_api_obj OBJECT
+        ../src/netins_udp/netins_udp_api.c)
+    list(APPEND MINI_BACKEND_OBJECT_TARGETS netins_udp_mini_api_obj)
+endif()
 
-        set(MINI_CLIENT_SOURCES
-            ${MINI_CLIENT_SOURCES}
-            ${GETOPT_SOURCES}
-        )
+foreach(target_name IN LISTS MINI_BACKEND_OBJECT_TARGETS)
+    set_target_properties(${target_name} PROPERTIES
+        POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(${target_name} PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+endforeach()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(mini_client_backend_obj PRIVATE _GNU_SOURCE)
+    target_compile_definitions(mini_server_backend_obj PRIVATE _GNU_SOURCE)
+endif()
+
+set(MINI_API_OBJECTS
+    $<TARGET_OBJECTS:mini_common_backend_obj>
+    $<TARGET_OBJECTS:mini_client_backend_obj>
+    $<TARGET_OBJECTS:mini_server_backend_obj>
+)
+if(XQC_ENABLE_MINI_API)
+    list(APPEND MINI_API_OBJECTS
+        $<TARGET_OBJECTS:netins_udp_mini_api_obj>)
+endif()
+set(MINI_API_OBJECTS ${MINI_API_OBJECTS} PARENT_SCOPE)
+
+if(XQC_ENABLE_TESTING)
+    if(NOT MINI_XQUIC_TARGET)
+        set(MINI_XQUIC_TARGET xquic-static)
+    endif()
+    set(MINI_PLATFORM_SOURCES)
+    if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+        set(MINI_PLATFORM_SOURCES ${GETOPT_SOURCES})
     endif()
 
-    include_directories(
-        "${CMAKE_SOURCE_DIR}/"
-        "${CMAKE_SOURCE_DIR}/include"
-        ${CMAKE_SOURCE_DIR}
-        ${CUNIT_INCLUDE_DIRS}
-        ${LIBEVENT_INCLUDE_DIR}
-    )
+    add_executable(mini_server
+        mini_server_main.c
+        $<TARGET_OBJECTS:mini_common_backend_obj>
+        $<TARGET_OBJECTS:mini_server_backend_obj>
+        ${MINI_PLATFORM_SOURCES})
+    add_executable(mini_client
+        mini_client_main.c
+        $<TARGET_OBJECTS:mini_common_backend_obj>
+        $<TARGET_OBJECTS:mini_client_backend_obj>
+        ${MINI_PLATFORM_SOURCES})
 
-    add_executable(mini_server ${MINI_SERVER_SOURCES})
-    add_executable(mini_client ${MINI_CLIENT_SOURCES})
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_compile_definitions(mini_client PRIVATE _GNU_SOURCE)
-    endif()
+    target_include_directories(mini_server PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+    target_include_directories(mini_client PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
 
-
-    target_include_directories(mini_server PRIVATE ${ZLOG_INCLUDE_DIR})
-    target_include_directories(mini_client PRIVATE ${ZLOG_INCLUDE_DIR})
-
-    target_link_libraries(mini_server ${APP_DEPEND_LIBS} xquic-static ${LIBEVENT_LIBRARY} ${LIBEVENT_PTHREADS_LIBRARY} ${ZLOG_STATIC_LIB})
-    target_link_libraries(mini_client ${APP_DEPEND_LIBS} xquic-static ${LIBEVENT_LIBRARY} ${LIBEVENT_PTHREADS_LIBRARY} ${ZLOG_STATIC_LIB})
+    target_link_libraries(mini_server
+        ${APP_DEPEND_LIBS}
+        ${MINI_XQUIC_TARGET}
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB})
+    target_link_libraries(mini_client
+        ${APP_DEPEND_LIBS}
+        ${MINI_XQUIC_TARGET}
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB})
+endif()

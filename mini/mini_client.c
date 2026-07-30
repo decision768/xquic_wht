@@ -11,7 +11,6 @@
 #define XQC_STREAM_RANGE_SIZE_DEFAULT (4 * 1024 * 1024)
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
-#define MINI_CONFIG_FILE "client_config.txt"
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
 #define CLIENT_RX_BATCH_CAPACITY       256
 #define CLIENT_RX_SINGLE_PATH_PACKETS  40
@@ -55,7 +54,7 @@ static int xqc_mini_cli_query_interface_addr(const char *interface_name, int des
 static int xqc_mini_cli_set_local_addr(xqc_mini_cli_user_path_t *path);
 static void xqc_mini_cli_format_addr_port(const struct sockaddr *addr, socklen_t addrlen,
     char *buf, size_t buflen);
-static int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
+int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
 static void xqc_mini_cli_socket_event_callback(int fd, short what, void *arg);
 static void xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn);
 static void xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path,
@@ -743,7 +742,7 @@ xqc_mini_cli_init_engine_ssl_config(xqc_engine_ssl_config_t *ssl_cfg, xqc_mini_c
 void
 xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb, xqc_mini_cli_args_t *args)
 {
-    static xqc_engine_callback_t callback = {
+    xqc_engine_callback_t callback = {
         .set_event_timer = xqc_mini_cli_set_event_timer,
         // .log_callbacks = {
         //     .xqc_log_write_err = xqc_mini_cli_write_log_file,
@@ -766,7 +765,7 @@ xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         //callback.log_callbacks.xqc_qlog_event_write = xqc_mini_cli_write_qlog_file;
         callback.keylog_cb = NULL;
     }
-    static xqc_transport_callbacks_t transport_cbs = {
+    xqc_transport_callbacks_t transport_cbs = {
         .write_socket = xqc_mini_cli_write_socket,
         .write_socket_ex = xqc_mini_cli_write_socket_ex,
         .save_token = xqc_mini_cli_save_token,
@@ -810,6 +809,10 @@ xqc_mini_cli_init_xquic_engine(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *arg
     }
 
     ctx->ev_engine = event_new(ctx->eb, -1, 0, xqc_mini_cli_engine_cb, ctx);
+    if (ctx->ev_engine == NULL) {
+        printf("[error] create client engine event failed\n");
+        return XQC_ERROR;
+    }
     return XQC_OK;
 }
 //转输入地址和端口为sockaddr_in
@@ -893,12 +896,15 @@ int
 xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 {
     memset(ctx, 0, sizeof(xqc_mini_cli_ctx_t));
+    ctx->args = args;
 
     /* init event base */
     struct event_base *eb = event_base_new();
+    if (eb == NULL) {
+        printf("[error] event_base_new failed\n");
+        return XQC_ERROR;
+    }
     ctx->eb = eb;
-
-    ctx->args = args;
 
     // /* init log writer fd */
     // ctx->log_fd = xqc_mini_cli_open_log_file(ctx);
@@ -921,7 +927,9 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
             return XQC_ERROR;
         }
     }
-    if (!ctx->args->env_cfg.use_zlog || ctx->zlog_cat == NULL) {
+    if (!ctx->args->env_cfg.disable_file_logging
+        && (!ctx->args->env_cfg.use_zlog || ctx->zlog_cat == NULL))
+    {
         // /* init log writer fd */
         ctx->log_fd = xqc_mini_cli_open_log_file(ctx);
         if (ctx->log_fd < 0) {
@@ -932,10 +940,12 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
 
 
     /* init keylog writer fd */
-    ctx->keylog_fd = xqc_mini_cli_open_keylog_file(ctx);
-    if (ctx->keylog_fd < 0) {
-        printf("[error] open keylog file failed\n");
-        return XQC_ERROR;
+    if (!ctx->args->env_cfg.disable_file_logging) {
+        ctx->keylog_fd = xqc_mini_cli_open_keylog_file(ctx);
+        if (ctx->keylog_fd < 0) {
+            printf("[error] open keylog file failed\n");
+            return XQC_ERROR;
+        }
     }
 
     return 0;
@@ -1110,6 +1120,14 @@ xqc_mini_cli_init_engine_ctx(xqc_mini_cli_ctx_t *ctx)
 void
 xqc_mini_cli_free_ctx(xqc_mini_cli_ctx_t *ctx)
 {
+    if (ctx == NULL) {
+        return;
+    }
+    if (ctx->ev_engine != NULL) {
+        event_del(ctx->ev_engine);
+        event_free(ctx->ev_engine);
+        ctx->ev_engine = NULL;
+    }
     xqc_mini_cli_close_keylog_file(ctx);
     xqc_mini_cli_close_log_file(ctx);
 
@@ -1121,6 +1139,10 @@ xqc_mini_cli_free_ctx(xqc_mini_cli_ctx_t *ctx)
     if (ctx->args) {
         free(ctx->args);
         ctx->args = NULL;
+    }
+    if (ctx->eb != NULL) {
+        event_base_free(ctx->eb);
+        ctx->eb = NULL;
     }
 }
 // 初始化 0-RTT（加密的） 相关数据（ticket/TP/token）
@@ -2291,7 +2313,7 @@ xqc_mini_cli_apply_interface_list(xqc_mini_cli_args_t *args, const char *value)
     }
 }
 // 读取并解析客户端配置文件
-static int
+int
 xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
 {
     if (path == NULL || path[0] == '\0') {
@@ -2545,8 +2567,10 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
     ctx = user_conn->ctx;
     args = ctx->args;
 
-    /* load 0-rtt args */
-    xqc_mini_cli_init_0rtt(ctx->args);
+    /* load 0-rtt args for the command-line client only */
+    if (!ctx->args->disable_0rtt_storage) {
+        xqc_mini_cli_init_0rtt(ctx->args);
+    }
 
     /* init connection settings */
     xqc_mini_cli_init_conn_settings(&conn_settings, ctx->args);
@@ -3035,9 +3059,20 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     tv.tv_sec = ctx->args->net_cfg.conn_timeout;
     tv.tv_usec = 0;
     user_conn->ev_timeout = event_new(ctx->eb, -1, 0, xqc_mini_cli_timeout_callback, user_conn);
-    event_add(user_conn->ev_timeout, &tv);
+    if (user_conn->ev_timeout == NULL
+        || event_add(user_conn->ev_timeout, &tv) != 0)
+    {
+        printf("[error] create connection timeout event failed\n");
+        xqc_mini_cli_free_user_conn(user_conn);
+        return NULL;
+    }
     /* set path retry timer */
     user_conn->ev_path_retry = event_new(ctx->eb, -1, 0, xqc_mini_cli_path_retry_callback, user_conn);
+    if (user_conn->ev_path_retry == NULL) {
+        printf("[error] create path retry event failed\n");
+        xqc_mini_cli_free_user_conn(user_conn);
+        return NULL;
+    }
     xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_INTERVAL_USEC);
 
 
@@ -3081,8 +3116,30 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->handshake_finished = 0;
     user_conn->requests_launched = 0;
     user_conn->timeout_defer_count = 0;
+    user_conn->auto_start_requests = ctx->args->defer_transfer_setup ? 0 : 1;
+    user_conn->connection_closed = 0;
+    user_conn->last_error_code = 0;
     user_conn->path_wait_rounds_after_handshake = 0;
     user_conn->last_path_probe_ping_time = 0;
+
+    if (ctx->args->defer_transfer_setup) {
+        user_conn->target_requests = 0;
+        user_conn->max_concurrent_requests = 0;
+        user_conn->next_stream_index = 0;
+        user_conn->active_requests = 0;
+        user_conn->completed_requests = 0;
+        user_conn->total_requests_known = 0;
+
+        int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
+        for (int i = 1; i < target_prepare; i++) {
+            xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+            ret = xqc_mini_cli_prepare_user_path(user_conn, path);
+            if (ret != XQC_OK) {
+                printf("[warn] pre-bind for path[%d] failed, ret:%d\n", i, ret);
+            }
+        }
+        return user_conn;
+    }
 
    
     memset(user_conn->send_file_path, 0, sizeof(user_conn->send_file_path));

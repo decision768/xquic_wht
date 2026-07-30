@@ -1,70 +1,38 @@
-#include "mini_server.h"
-#include <stdint.h>
+#include "mini_backend.h"
 
-int init_args(xqc_mini_svr_args_t** args, xqc_mini_svr_ctx_t *ctx, int argc, char *argv[]){
-    int ret;
-    *args = calloc(1, sizeof(xqc_mini_svr_args_t));
-    if (args == NULL) {
-        printf("[error] calloc args failed\n");
-        return XQC_ERROR;
+#include <stdio.h>
+
+int
+main(int argc, char *argv[])
+{
+    (void)argc;
+    (void)argv;
+
+    int exit_code = 1;
+    mini_backend_config_t config;
+    mini_backend_server_t *server = NULL;
+    mini_backend_config_init(&config);
+
+    int ret = mini_backend_server_create(&config, &server);
+    if (ret != 0) {
+        fprintf(stderr, "[error] create mini server backend failed: %d\n",
+            ret);
+        goto finish;
     }
-
-    /* init server environment */
-    ret = xqc_mini_svr_init_env(ctx, *args);
-    if (ret < 0) {
-        printf("[error] init server environment failed\n");
-        return XQC_ERROR;
+    ret = mini_backend_server_listen(server, NULL, 0);
+    if (ret != 0) {
+        fprintf(stderr, "[error] listen mini server backend failed: %d\n",
+            ret);
+        goto finish;
     }
-
-    // ret = xqc_mini_svr_parse_cmd_args(*args, argc, argv);
-    // if (ret != XQC_OK) {
-    //     return XQC_ERROR;
-    // }
-    /* create & init engine to ctx->engine */
-    ret = xqc_mini_svr_init_xquic_engine(ctx, *args);
-    if (ret < 0) {
-        printf("[error] init xquic engine failed\n");
-        return XQC_ERROR;
+    ret = mini_backend_server_run(server);
+    if (ret != 0) {
+        fprintf(stderr, "[error] mini server event loop failed: %d\n", ret);
+        goto finish;
     }
+    exit_code = 0;
 
-    /* init engine ctx */
-    ret = xqc_mini_svr_init_engine_ctx(ctx, *args);
-    if (ret < 0) {
-        printf("[error] init engine ctx failed\n");
-        return XQC_ERROR;
-    }
-    return XQC_OK;
-}
-xqc_mini_svr_user_conn_t* connection_socket(xqc_mini_svr_ctx_t* ctx){
-    return xqc_mini_svr_create_user_conn(ctx);
-}
-
-void start_event(xqc_mini_svr_ctx_t* ctx){
-    event_base_dispatch(ctx->eb);
-}
-
-void close_all(xqc_mini_svr_ctx_t* ctx, xqc_mini_svr_user_conn_t* user_conn){
-    xqc_engine_destroy(ctx->engine);
-    xqc_mini_svr_free_ctx(ctx);
-    if (user_conn) {
-        xqc_mini_svr_free_user_conn(user_conn);
-    }
-}
-int main(int argc, char *argv[]){
-    xqc_mini_svr_ctx_t svr_ctx = {0}, *ctx = &svr_ctx;
-    xqc_mini_svr_args_t *args = NULL;
-    xqc_mini_svr_user_conn_t *user_conn = NULL;
-
-    if(init_args(&args, ctx, argc, argv) ==XQC_ERROR){
-        goto exit;
-    }
-    user_conn = connection_socket(ctx);
-    if (user_conn == NULL) {
-        goto exit;
-    }
-    start_event(ctx);
-exit:
-
-    close_all(ctx,user_conn);
-    return 0;
+finish:
+    mini_backend_server_release(server);
+    return exit_code;
 }

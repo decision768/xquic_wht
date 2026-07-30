@@ -42,6 +42,7 @@
 #define DEFAULT_IP   "10.12.54.143"
 #define DEFAULT_PORT 8443
 #define DEFAULT_HOST "test.xquic.com"
+#define MINI_CONFIG_FILE "client_config.txt"
 
 
 #define SESSION_TICKET_BUF_MAX_SIZE 8192
@@ -142,6 +143,7 @@ typedef struct xqc_mini_cli_env_config_s {
     /* log config */
     char log_path[PATH_LEN];
     int use_zlog;
+    int disable_file_logging;
     char zlog_conf[PATH_LEN];
     char zlog_category[64];
 
@@ -201,6 +203,10 @@ typedef struct xqc_mini_cli_args_s {
 
     /* payload size for POST body; 0 means use existing file size */
     size_t                      send_data_len;
+
+    /* API connections establish transport before a transfer task is supplied. */
+    int                         defer_transfer_setup;
+    int                         disable_0rtt_storage;
 } xqc_mini_cli_args_t;
 
 
@@ -353,6 +359,9 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     path_wait_rounds_after_handshake;
     xqc_usec_t              last_path_probe_ping_time;
     int                     timeout_defer_count;
+    int                     auto_start_requests;
+    int                     connection_closed;
+    int                     last_error_code;
 
 
 
@@ -483,6 +492,7 @@ void xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn);
 
 int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
+int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
 
 int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_get_ready_path_count(xqc_mini_cli_user_conn_t *user_conn);

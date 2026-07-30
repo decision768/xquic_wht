@@ -16,7 +16,6 @@
 #include <zlog.h>
 
 #include "common.h"
-#include "../demo/xqc_hq.h"
 #include "../tests/platform.h"
 #include "mini_server_cb.h"
 #define SERVER_DEFAULT_FILE "server_data.bin"
@@ -95,6 +94,7 @@ typedef struct xqc_mini_svr_env_config_s {
     /* log config */
     char log_path[PATH_LEN];
     int use_zlog;
+    int disable_file_logging;
     char zlog_conf[PATH_LEN];
     char zlog_category[64];
 
@@ -151,9 +151,23 @@ typedef struct xqc_mini_svr_ctx_s {
 
 typedef struct xqc_mini_svr_user_conn_s {
     struct xqc_mini_svr_user_conn_s *listener_conn;
+    struct xqc_mini_svr_user_conn_s *accept_next;
+    struct xqc_mini_svr_user_conn_s *all_next;
+    struct xqc_mini_svr_user_conn_s *accept_head;
+    struct xqc_mini_svr_user_conn_s *accept_tail;
+    struct xqc_mini_svr_user_conn_s *connection_head;
     int                     is_connection_scope;
+    int                     api_listener_mode;
+    int                     api_owned;
+    int                     accepting;
+    int                     queued;
+    int                     delivered;
+    int                     handshake_finished;
+    int                     connection_closed;
+    int                     last_error_code;
     struct event           *ev_timeout;
     xqc_cid_t               cid;
+    xqc_h3_conn_t          *h3_conn;
     xqc_mini_svr_ctx_t     *ctx;
 
     /* ipv4 server */
@@ -178,6 +192,8 @@ typedef struct xqc_mini_svr_user_conn_s {
     uint64_t                get_split_min_ns;
     uint64_t                get_split_max_ns;
 
+    void                   *file_task_state;
+
 } xqc_mini_svr_user_conn_t;
 
 
@@ -200,6 +216,7 @@ int xqc_mini_svr_init_env(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args);
 
 int xqc_mini_svr_init_engine_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args);
 int xqc_mini_svr_parse_cmd_args(xqc_mini_svr_args_t *args, int argc, char *argv[]);
+int xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path);
 xqc_mini_svr_user_conn_t * xqc_mini_svr_create_user_conn(xqc_mini_svr_ctx_t *ctx);
 void xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args);
 
@@ -210,4 +227,5 @@ static int xqc_mini_svr_init_socket(int family, struct sockaddr *local_addr,
 static void xqc_mini_svr_socket_event_callback(int fd, short what, void *arg);
 void xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx);
 void xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn);
+void xqc_mini_svr_on_connection_finish(xqc_mini_svr_user_conn_t *user_conn);
 #endif
