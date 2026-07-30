@@ -14,6 +14,7 @@ typedef struct client_options_s {
     const char *interfaces[NETINS_UDP_MAX_INTERFACES];
     uint32_t interface_count;
     uint32_t timeout_ms;
+    uint32_t repeat_count;
     uint16_t port;
     int direction;
     int scheduler;
@@ -33,7 +34,8 @@ usage(const char *program)
         "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
-        "  --timeout-ms MS         Connect and transfer timeout; 0 is infinite\n",
+        "  --timeout-ms MS         Connect and transfer timeout; 0 is infinite\n"
+        "  --repeat N              Sequential tasks on one connection (default 1)\n",
         program);
 }
 
@@ -115,6 +117,7 @@ parse_args(int argc, char **argv, client_options_t *options)
     memset(options, 0, sizeof(*options));
     options->host = "127.0.0.1";
     options->port = 8443;
+    options->repeat_count = 1;
     options->direction = 0;
     options->scheduler = NETINS_UDP_SCHEDULER_DEFAULT;
     options->congestion_control = NETINS_UDP_CC_DEFAULT;
@@ -161,6 +164,14 @@ parse_args(int argc, char **argv, client_options_t *options)
         } else if (strcmp(argv[i], "--timeout-ms") == 0) {
             if (need_value(argc, argv, &i, &value) != 0
                 || parse_u32(value, UINT32_MAX, &options->timeout_ms) != 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--repeat") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, UINT32_MAX,
+                    &options->repeat_count) != 0
+                || options->repeat_count == 0)
             {
                 return -1;
             }
@@ -318,8 +329,7 @@ main(int argc, char **argv)
     client_options_t options;
     netins_udp_t *client = NULL;
     netins_udp_transfer_t task = NETINS_UDP_TRANSFER_INITIALIZER;
-    netins_udp_transfer_result_t result =
-        NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
+    uint32_t iteration;
     int initialized = 0;
     int exit_code = EXIT_FAILURE;
 
@@ -352,17 +362,25 @@ main(int argc, char **argv)
     task.timeout_ms = options.timeout_ms;
     task.local_path = options.local_path;
     task.remote_path = options.remote_path;
-    if (netins_udp_transfer(client, &task, &result) != 0) {
-        print_handle_error(client, "transfer");
-        goto done;
-    }
+    for (iteration = 1; iteration <= options.repeat_count; ++iteration) {
+        netins_udp_transfer_result_t result =
+            NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
 
-    printf("transfer direction=%s bytes=%" PRIu64
-           " fragments=%" PRIu32 "/%" PRIu32
-           " elapsed_us=%" PRIu64 " throughput_mbps=%.3f\n",
-        options.direction == NETINS_UDP_TRANSFER_GET ? "GET" : "POST",
-        result.total_bytes, result.completed_fragments,
-        result.total_fragments, result.elapsed_us, result.throughput_mbps);
+        if (netins_udp_transfer(client, &task, &result) != 0) {
+            print_handle_error(client, "transfer");
+            goto done;
+        }
+
+        printf("transfer iteration=%" PRIu32 "/%" PRIu32
+               " direction=%s bytes=%" PRIu64
+               " fragments=%" PRIu32 "/%" PRIu32
+               " elapsed_us=%" PRIu64 " throughput_mbps=%.3f\n",
+            iteration, options.repeat_count,
+            options.direction == NETINS_UDP_TRANSFER_GET ? "GET" : "POST",
+            result.total_bytes, result.completed_fragments,
+            result.total_fragments, result.elapsed_us,
+            result.throughput_mbps);
+    }
     print_snapshot(client);
     exit_code = EXIT_SUCCESS;
 
