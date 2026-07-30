@@ -101,3 +101,27 @@ if(XQC_ENABLE_TESTING)
         ${LIBEVENT_PTHREADS_LIBRARY}
         ${ZLOG_STATIC_LIB})
 endif()
+
+if(XQC_ENABLE_MINI_API)
+    if(NOT MINI_XQUIC_TARGET)
+        set(MINI_XQUIC_TARGET xquic-static)
+    endif()
+
+    add_executable(netins_udp_mini_api_client
+        ../demo/netins_udp_mini_api_client.c)
+    add_executable(netins_udp_mini_api_server
+        ../demo/netins_udp_mini_api_server.c)
+
+    foreach(target_name
+        netins_udp_mini_api_client
+        netins_udp_mini_api_server)
+        target_include_directories(${target_name} PRIVATE
+            "${CMAKE_SOURCE_DIR}/include")
+        target_link_libraries(${target_name}
+            ${APP_DEPEND_LIBS}
+            ${MINI_XQUIC_TARGET}
+            ${LIBEVENT_LIBRARY}
+            ${LIBEVENT_PTHREADS_LIBRARY}
+            ${ZLOG_STATIC_LIB})
+    endforeach()
+endif()
