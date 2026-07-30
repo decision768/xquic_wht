@@ -9,10 +9,14 @@
 #define MINI_BACKEND_SCHEDULER_NAME_LEN 32
 #define MINI_BACKEND_HOST_NAME_LEN 256
 #define MINI_BACKEND_FILE_PATH_LEN 1024
+#define MINI_BACKEND_MAX_PATHS 8
+#define MINI_BACKEND_ADDRESS_LEN 128
 
 typedef struct mini_backend_client_s mini_backend_client_t;
 typedef struct mini_backend_server_s mini_backend_server_t;
 typedef struct xqc_mini_svr_user_conn_s mini_backend_server_connection_t;
+typedef void (*mini_backend_logger_fn)(void *user_data, int level,
+    const char *message);
 
 typedef enum mini_backend_cc_e {
     MINI_BACKEND_CC_BBR = 0,
@@ -30,6 +34,43 @@ typedef struct mini_backend_transfer_result_s {
     uint32_t completed_fragments;
     uint64_t elapsed_us;
 } mini_backend_transfer_result_t;
+
+typedef struct mini_backend_path_snapshot_s {
+    uint64_t path_id;
+    uint32_t path_index;
+    int path_state;
+    int app_status;
+    char interface_name[MINI_BACKEND_INTERFACE_NAME_LEN];
+    char local_address[MINI_BACKEND_ADDRESS_LEN];
+    char peer_address[MINI_BACKEND_ADDRESS_LEN];
+    uint64_t packets_sent;
+    uint64_t packets_received;
+    uint64_t bytes_sent;
+    uint64_t bytes_received;
+    uint64_t reinjected_bytes_sent;
+    uint64_t reinjected_bytes_received;
+    uint64_t effective_bytes_received;
+    uint64_t srtt_us;
+} mini_backend_path_snapshot_t;
+
+typedef struct mini_backend_snapshot_s {
+    uint64_t snapshot_time_us;
+    int handshake_finished;
+    int multipath_mode;
+    int multipath_state;
+    uint32_t path_count;
+    uint32_t active_path_count;
+    uint32_t packets_sent;
+    uint32_t packets_received;
+    uint32_t packets_lost;
+    uint32_t spurious_packets_lost;
+    uint64_t srtt_us;
+    uint64_t min_rtt_us;
+    uint64_t bytes_inflight;
+    uint64_t total_app_bytes;
+    uint64_t standby_path_app_bytes;
+    mini_backend_path_snapshot_t paths[MINI_BACKEND_MAX_PATHS];
+} mini_backend_snapshot_t;
 
 typedef struct mini_backend_config_s {
     int load_config_file;
@@ -55,9 +96,15 @@ typedef struct mini_backend_config_s {
     char tls_server_name[MINI_BACKEND_HOST_NAME_LEN];
     char certificate_file[MINI_BACKEND_FILE_PATH_LEN];
     char private_key_file[MINI_BACKEND_FILE_PATH_LEN];
+
+    mini_backend_logger_fn logger;
+    void *logger_user_data;
+    int logger_minimum_level;
 } mini_backend_config_t;
 
 void mini_backend_config_init(mini_backend_config_t *config);
+void mini_backend_log_scope_enter(const mini_backend_config_t *config);
+void mini_backend_log_scope_leave(void);
 
 int mini_backend_client_create(const mini_backend_config_t *config,
     mini_backend_client_t **out_client);
@@ -75,6 +122,8 @@ int mini_backend_client_is_connected(const mini_backend_client_t *client);
 int mini_backend_client_is_closed(const mini_backend_client_t *client);
 int mini_backend_client_last_error(const mini_backend_client_t *client);
 int mini_backend_client_active_path_count(const mini_backend_client_t *client);
+int mini_backend_client_get_snapshot(const mini_backend_client_t *client,
+    mini_backend_snapshot_t *snapshot);
 
 int mini_backend_server_create(const mini_backend_config_t *config,
     mini_backend_server_t **out_server);
@@ -102,5 +151,9 @@ int mini_backend_server_connection_is_closed(
     const mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_last_error(
     const mini_backend_server_connection_t *connection);
+int mini_backend_server_connection_get_snapshot(
+    const mini_backend_server_t *server,
+    const mini_backend_server_connection_t *connection,
+    mini_backend_snapshot_t *snapshot);
 
 #endif

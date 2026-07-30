@@ -1,6 +1,7 @@
 #include "mini_backend.h"
 
 #include <errno.h>
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -382,4 +383,108 @@ mini_backend_client_active_path_count(const mini_backend_client_t *client)
 {
     return client != NULL && client->connection != NULL
         ? client->connection->active_path_cnt : 0;
+}
+
+static void
+mini_backend_client_format_address(const struct sockaddr *address,
+    socklen_t address_len, char *output, size_t output_len)
+{
+    if (output == NULL || output_len == 0) {
+        return;
+    }
+    output[0] = '\0';
+    if (address == NULL || address_len == 0) {
+        return;
+    }
+
+    char host[NI_MAXHOST] = {0};
+    char service[16] = {0};
+    if (getnameinfo(address, address_len, host, sizeof(host),
+            service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+    {
+        return;
+    }
+    if (address->sa_family == AF_INET6) {
+        snprintf(output, output_len, "[%s]:%s", host, service);
+    } else {
+        snprintf(output, output_len, "%s:%s", host, service);
+    }
+}
+
+int
+mini_backend_client_get_snapshot(const mini_backend_client_t *client,
+    mini_backend_snapshot_t *snapshot)
+{
+    if (client == NULL || snapshot == NULL || client->connection == NULL
+        || client->ctx.engine == NULL)
+    {
+        return EINVAL;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->snapshot_time_us = xqc_now();
+    snapshot->handshake_finished =
+        client->connection->handshake_finished;
+    xqc_conn_stats_t stats = xqc_conn_get_stats(client->ctx.engine,
+        &client->connection->cid);
+    snapshot->multipath_mode = stats.enable_multipath;
+    snapshot->multipath_state = stats.mp_state;
+    snapshot->packets_sent = stats.send_count;
+    snapshot->packets_received = stats.recv_count;
+    snapshot->packets_lost = stats.lost_count;
+    snapshot->spurious_packets_lost = stats.spurious_loss_count;
+    snapshot->srtt_us = stats.srtt;
+    snapshot->min_rtt_us = stats.min_rtt;
+    snapshot->bytes_inflight = stats.inflight_bytes;
+    snapshot->total_app_bytes = stats.total_app_bytes;
+    snapshot->standby_path_app_bytes = stats.standby_path_app_bytes;
+
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT
+        && snapshot->path_count < MINI_BACKEND_MAX_PATHS; i++)
+    {
+        const xqc_path_metrics_t *source = &stats.paths_info[i];
+        if (source->path_id == UINT64_MAX) {
+            continue;
+        }
+
+        mini_backend_path_snapshot_t *path =
+            &snapshot->paths[snapshot->path_count];
+        path->path_id = source->path_id;
+        path->path_index = snapshot->path_count;
+        path->path_state = source->path_state;
+        path->app_status = source->path_app_status;
+        path->packets_sent = source->path_pkt_send_count;
+        path->packets_received = source->path_pkt_recv_count;
+        path->bytes_sent = source->path_send_bytes;
+        path->bytes_received = source->path_recv_bytes;
+        path->reinjected_bytes_sent =
+            source->path_send_reinject_bytes;
+        path->reinjected_bytes_received =
+            source->path_recv_reinject_bytes;
+        path->effective_bytes_received =
+            source->path_recv_effective_bytes;
+        path->srtt_us = source->path_srtt;
+
+        for (int slot = 0; slot < MAX_PATH_CNT; slot++) {
+            const xqc_mini_cli_user_path_t *user_path =
+                &client->connection->paths[slot];
+            if (user_path->path_id != source->path_id) {
+                continue;
+            }
+            strncpy(path->interface_name, user_path->interface_name,
+                sizeof(path->interface_name) - 1);
+            mini_backend_client_format_address(user_path->local_addr,
+                user_path->local_addrlen, path->local_address,
+                sizeof(path->local_address));
+            mini_backend_client_format_address(user_path->peer_addr,
+                user_path->peer_addrlen, path->peer_address,
+                sizeof(path->peer_address));
+            break;
+        }
+        if (path->path_state == XQC_MINI_TRANSPORT_PATH_STATE_ACTIVE) {
+            snapshot->active_path_count++;
+        }
+        snapshot->path_count++;
+    }
+    return 0;
 }

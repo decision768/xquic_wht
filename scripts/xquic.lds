@@ -140,6 +140,11 @@ XQUIC_VERS_1.0 {
         netins_udp_transfer;
         netins_udp_serve;
         netins_udp_get_state;
+        netins_udp_is_multipath;
+        netins_udp_get_path_count;
+        netins_udp_get_path_statis;
+        netins_udp_get_snapshot;
+        netins_udp_get_close_reason;
         netins_udp_shutdown;
         netins_udp_close;
         netins_udp_get_last_error_code;

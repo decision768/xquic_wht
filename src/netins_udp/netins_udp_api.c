@@ -13,6 +13,38 @@ static pthread_mutex_t netins_udp_global_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int netins_udp_init_references;
 static unsigned int netins_udp_handle_count;
 
+static int netins_udp_valid(const netins_udp_t *handle);
+
+static void
+netins_udp_log(netins_udp_t *handle, int level, const char *format, ...)
+{
+    if (!netins_udp_valid(handle) || handle->logger == NULL
+        || level < handle->logger_minimum_level || format == NULL)
+    {
+        return;
+    }
+    char message[NETINS_UDP_ERROR_MSG_LEN];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(message, sizeof(message), format, args);
+    va_end(args);
+    handle->logger(handle->logger_user_data, level, message);
+}
+
+static void
+netins_udp_set_close_reason(netins_udp_t *handle, int source,
+    int system_error, int transport_error, const char *message)
+{
+    if (!netins_udp_valid(handle)) {
+        return;
+    }
+    handle->close_source = source;
+    handle->close_system_error = system_error;
+    handle->close_transport_error = transport_error;
+    snprintf(handle->close_message, sizeof(handle->close_message), "%s",
+        message != NULL ? message : "");
+}
+
 static int
 netins_udp_valid(const netins_udp_t *handle)
 {
@@ -33,6 +65,8 @@ netins_udp_set_error(netins_udp_t *handle, int error_code,
         vsnprintf(handle->last_error_msg, sizeof(handle->last_error_msg),
             format != NULL ? format : "NetIns UDP error", args);
         va_end(args);
+        netins_udp_log(handle, NETINS_UDP_LOG_ERROR, "%s",
+            handle->last_error_msg);
     }
     errno = error_code;
     return -1;
@@ -160,6 +194,7 @@ netins_udp_new(int role)
     handle->connect_timeout_ms = 10000;
     handle->accept_timeout_ms = 0;
     handle->close_timeout_ms = 3000;
+    handle->logger_minimum_level = NETINS_UDP_LOG_INFO;
     mini_backend_config_init(&handle->backend_config);
     handle->backend_config.load_config_file = 0;
     handle->backend_config.api_mode = 1;
@@ -187,7 +222,9 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         errno = EINVAL;
         return -1;
     }
-    if (handle->state != NETINS_UDP_STATE_NEW) {
+    if (handle->state != NETINS_UDP_STATE_NEW
+        && option != NETINS_UDP_OPT_LOGGER)
+    {
         return netins_udp_set_error(handle, EBUSY,
             "options must be set before connect or listen");
     }
@@ -354,6 +391,29 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         }
         break;
     }
+    case NETINS_UDP_OPT_LOGGER: {
+        if (value == NULL || value_len < sizeof(netins_udp_logger_config_t)) {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid logger option size");
+        }
+        const netins_udp_logger_config_t *logger = value;
+        if (logger->struct_size < sizeof(*logger)
+            || logger->api_version != NETINS_UDP_API_VERSION
+            || logger->minimum_level < NETINS_UDP_LOG_DEBUG
+            || logger->minimum_level > NETINS_UDP_LOG_ERROR)
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid logger option version or level");
+        }
+        handle->logger = logger->callback;
+        handle->logger_user_data = logger->user_data;
+        handle->logger_minimum_level = logger->minimum_level;
+        handle->backend_config.logger = logger->callback;
+        handle->backend_config.logger_user_data = logger->user_data;
+        handle->backend_config.logger_minimum_level =
+            logger->minimum_level;
+        break;
+    }
     default:
         return netins_udp_set_error(handle, ENOPROTOOPT,
             "unsupported option");
@@ -376,19 +436,25 @@ netins_udp_connect(netins_udp_t *client, const char *host, uint16_t port)
     }
 
     client->state = NETINS_UDP_STATE_CONNECTING;
+    mini_backend_log_scope_enter(&client->backend_config);
     int ret = mini_backend_client_create(&client->backend_config,
         &client->client_backend);
     if (ret == 0) {
         ret = mini_backend_client_connect(client->client_backend, host, port,
             client->connect_timeout_ms);
     }
+    mini_backend_log_scope_leave();
     if (ret != 0) {
         client->state = NETINS_UDP_STATE_ERROR;
-        return netins_udp_set_error(client, ret,
+        netins_udp_set_close_reason(client, NETINS_UDP_CLOSE_TRANSPORT,
+            ret > 0 ? ret : EIO, ret, "Mini client connection failed");
+        return netins_udp_set_error(client, ret > 0 ? ret : EIO,
             "Mini backend client connection failed");
     }
     client->state = NETINS_UDP_STATE_CONNECTED;
     netins_udp_clear_error(client);
+    netins_udp_log(client, NETINS_UDP_LOG_INFO,
+        "client connected to %s:%u", host, (unsigned)port);
     return 0;
 }
 
@@ -409,18 +475,24 @@ netins_udp_listen(netins_udp_t *server, const char *host, uint16_t port)
             "server TLS certificate and private key must be configured");
     }
 
+    mini_backend_log_scope_enter(&server->backend_config);
     int ret = mini_backend_server_create(&server->backend_config,
         &server->server_backend);
     if (ret == 0) {
         ret = mini_backend_server_listen(server->server_backend, host, port);
     }
+    mini_backend_log_scope_leave();
     if (ret != 0) {
         server->state = NETINS_UDP_STATE_ERROR;
-        return netins_udp_set_error(server, ret,
+        netins_udp_set_close_reason(server, NETINS_UDP_CLOSE_INTERNAL,
+            ret > 0 ? ret : EIO, ret, "Mini server listen failed");
+        return netins_udp_set_error(server, ret > 0 ? ret : EIO,
             "Mini backend server listen failed");
     }
     server->state = NETINS_UDP_STATE_LISTENING;
     netins_udp_clear_error(server);
+    netins_udp_log(server, NETINS_UDP_LOG_INFO,
+        "server listening on %s:%u", host, (unsigned)port);
     return 0;
 }
 
@@ -437,19 +509,24 @@ netins_udp_accept(netins_udp_t *server)
     }
 
     mini_backend_server_connection_t *connection = NULL;
+    mini_backend_log_scope_enter(&server->backend_config);
     int ret = mini_backend_server_accept(server->server_backend,
         server->accept_timeout_ms, &connection);
+    mini_backend_log_scope_leave();
     if (ret != 0) {
-        netins_udp_set_error(server, ret, "Mini backend accept failed");
+        netins_udp_set_error(server, ret > 0 ? ret : EIO,
+            "Mini backend accept failed");
         return NULL;
     }
 
     netins_udp_t *accepted = calloc(1, sizeof(*accepted));
     if (accepted == NULL) {
+        mini_backend_log_scope_enter(&server->backend_config);
         (void)mini_backend_server_connection_shutdown(server->server_backend,
             connection, server->close_timeout_ms);
         mini_backend_server_connection_release(server->server_backend,
             connection);
+        mini_backend_log_scope_leave();
         netins_udp_set_error(server, ENOMEM,
             "allocate accepted connection failed");
         return NULL;
@@ -465,10 +542,12 @@ netins_udp_accept(netins_udp_t *server)
     pthread_mutex_unlock(&netins_udp_global_lock);
     if (handle_limit_reached) {
         free(accepted);
+        mini_backend_log_scope_enter(&server->backend_config);
         (void)mini_backend_server_connection_shutdown(server->server_backend,
             connection, server->close_timeout_ms);
         mini_backend_server_connection_release(server->server_backend,
             connection);
+        mini_backend_log_scope_leave();
         netins_udp_set_error(server, EOVERFLOW,
             "Mini API handle limit reached");
         return NULL;
@@ -481,11 +560,16 @@ netins_udp_accept(netins_udp_t *server)
     accepted->accept_timeout_ms = server->accept_timeout_ms;
     accepted->close_timeout_ms = server->close_timeout_ms;
     accepted->backend_config = server->backend_config;
+    accepted->logger = server->logger;
+    accepted->logger_user_data = server->logger_user_data;
+    accepted->logger_minimum_level = server->logger_minimum_level;
     accepted->server_backend = server->server_backend;
     accepted->server_connection = connection;
     mini_backend_server_retain(accepted->server_backend);
 
     netins_udp_clear_error(server);
+    netins_udp_log(accepted, NETINS_UDP_LOG_INFO,
+        "accepted Mini connection");
     return accepted;
 }
 
@@ -526,9 +610,11 @@ netins_udp_transfer(netins_udp_t *client,
     int backend_direction =
         task->direction == NETINS_UDP_TRANSFER_GET
         ? MINI_BACKEND_TRANSFER_GET : MINI_BACKEND_TRANSFER_POST;
+    mini_backend_log_scope_enter(&client->backend_config);
     int ret = mini_backend_client_transfer(client->client_backend,
         backend_direction, task->local_path, task->remote_path,
         task->timeout_ms, &backend_result);
+    mini_backend_log_scope_leave();
 
     result->total_bytes = backend_result.total_bytes;
     result->total_fragments = backend_result.total_fragments;
@@ -543,12 +629,21 @@ netins_udp_transfer(netins_udp_t *client,
             || mini_backend_client_is_closed(client->client_backend))
         {
             client->state = NETINS_UDP_STATE_ERROR;
+            netins_udp_set_close_reason(client,
+                ret == ETIMEDOUT ? NETINS_UDP_CLOSE_TIMEOUT
+                                 : NETINS_UDP_CLOSE_TRANSPORT,
+                ret > 0 ? ret : EIO, ret, "Mini transfer failed");
         }
         int error_code = ret > 0 ? ret : EIO;
         return netins_udp_set_error(client, error_code,
             "Mini transfer failed with backend code %d", ret);
     }
     netins_udp_clear_error(client);
+    netins_udp_log(client, NETINS_UDP_LOG_INFO,
+        "transfer complete: bytes=%llu fragments=%u elapsed_us=%llu",
+        (unsigned long long)result->total_bytes,
+        result->completed_fragments,
+        (unsigned long long)result->elapsed_us);
     return 0;
 }
 
@@ -574,14 +669,19 @@ netins_udp_serve(netins_udp_t *connection,
             "invalid serve configuration or root path");
     }
 
+    mini_backend_log_scope_enter(&connection->backend_config);
     int ret = mini_backend_server_connection_serve(
         connection->server_backend, connection->server_connection,
         config->root_path, config->timeout_ms);
+    mini_backend_log_scope_leave();
     if (ret != 0) {
         if (mini_backend_server_connection_is_closed(
                 connection->server_connection))
         {
             connection->state = NETINS_UDP_STATE_ERROR;
+            netins_udp_set_close_reason(connection,
+                NETINS_UDP_CLOSE_TRANSPORT, ret > 0 ? ret : EIO, ret,
+                "Mini accepted connection closed with an error");
         }
         int error_code = ret > 0 ? ret : EIO;
         return netins_udp_set_error(connection, error_code,
@@ -589,7 +689,210 @@ netins_udp_serve(netins_udp_t *connection,
     }
 
     connection->state = NETINS_UDP_STATE_CLOSED;
+    netins_udp_set_close_reason(connection, NETINS_UDP_CLOSE_PEER,
+        0, 0, "peer closed the accepted connection");
     netins_udp_clear_error(connection);
+    netins_udp_log(connection, NETINS_UDP_LOG_INFO,
+        "serve loop ended after peer close");
+    return 0;
+}
+
+static int
+netins_udp_get_backend_snapshot(netins_udp_t *handle,
+    mini_backend_snapshot_t *snapshot)
+{
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (handle->role == NETINS_UDP_ROLE_CLIENT
+        && handle->client_backend != NULL)
+    {
+        mini_backend_log_scope_enter(&handle->backend_config);
+        int ret = mini_backend_client_get_snapshot(handle->client_backend,
+            snapshot);
+        mini_backend_log_scope_leave();
+        return ret;
+    }
+    if (handle->role == NETINS_UDP_ROLE_ACCEPTED
+        && handle->server_backend != NULL
+        && handle->server_connection != NULL)
+    {
+        mini_backend_log_scope_enter(&handle->backend_config);
+        int ret = mini_backend_server_connection_get_snapshot(
+            handle->server_backend, handle->server_connection, snapshot);
+        mini_backend_log_scope_leave();
+        return ret;
+    }
+    return 0;
+}
+
+static void
+netins_udp_copy_path_statis(netins_udp_path_statis_t *destination,
+    const mini_backend_path_snapshot_t *source)
+{
+    uint32_t struct_size = destination->struct_size;
+    memset(destination, 0, sizeof(*destination));
+    destination->struct_size = struct_size;
+    destination->api_version = NETINS_UDP_API_VERSION;
+    destination->path_id = source->path_id;
+    destination->path_index = source->path_index;
+    destination->path_state = source->path_state;
+    destination->app_status = source->app_status;
+    strncpy(destination->interface_name, source->interface_name,
+        sizeof(destination->interface_name) - 1);
+    strncpy(destination->local_address, source->local_address,
+        sizeof(destination->local_address) - 1);
+    strncpy(destination->peer_address, source->peer_address,
+        sizeof(destination->peer_address) - 1);
+    destination->packets_sent = source->packets_sent;
+    destination->packets_received = source->packets_received;
+    destination->bytes_sent = source->bytes_sent;
+    destination->bytes_received = source->bytes_received;
+    destination->reinjected_bytes_sent = source->reinjected_bytes_sent;
+    destination->reinjected_bytes_received =
+        source->reinjected_bytes_received;
+    destination->effective_bytes_received =
+        source->effective_bytes_received;
+    destination->srtt_us = source->srtt_us;
+}
+
+int
+netins_udp_is_multipath(netins_udp_t *handle)
+{
+    if (!netins_udp_valid(handle)) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)netins_udp_get_state(handle);
+    mini_backend_snapshot_t snapshot;
+    int ret = netins_udp_get_backend_snapshot(handle, &snapshot);
+    if (ret != 0) {
+        return netins_udp_set_error(handle, ret > 0 ? ret : EIO,
+            "read Mini multipath state failed");
+    }
+    return snapshot.multipath_mode != 0
+        && snapshot.active_path_count > 1;
+}
+
+int
+netins_udp_get_path_count(netins_udp_t *handle, uint32_t *out_count)
+{
+    if (!netins_udp_valid(handle) || out_count == NULL) {
+        return netins_udp_set_error(handle, EINVAL,
+            "path count requires a valid handle and output");
+    }
+    (void)netins_udp_get_state(handle);
+    mini_backend_snapshot_t snapshot;
+    int ret = netins_udp_get_backend_snapshot(handle, &snapshot);
+    if (ret != 0) {
+        return netins_udp_set_error(handle, ret > 0 ? ret : EIO,
+            "read Mini path count failed");
+    }
+    *out_count = snapshot.path_count;
+    return 0;
+}
+
+int
+netins_udp_get_path_statis(netins_udp_t *handle, size_t path_index,
+    netins_udp_path_statis_t *out)
+{
+    if (!netins_udp_valid(handle) || out == NULL
+        || out->struct_size < sizeof(*out)
+        || out->api_version != NETINS_UDP_API_VERSION)
+    {
+        return netins_udp_set_error(handle, EINVAL,
+            "invalid path statistics output");
+    }
+    (void)netins_udp_get_state(handle);
+    mini_backend_snapshot_t snapshot;
+    int ret = netins_udp_get_backend_snapshot(handle, &snapshot);
+    if (ret != 0) {
+        return netins_udp_set_error(handle, ret > 0 ? ret : EIO,
+            "read Mini path statistics failed");
+    }
+    if (path_index >= snapshot.path_count) {
+        return netins_udp_set_error(handle, ENOENT,
+            "path index is not present");
+    }
+    netins_udp_copy_path_statis(out, &snapshot.paths[path_index]);
+    return 0;
+}
+
+int
+netins_udp_get_close_reason(netins_udp_t *handle,
+    netins_udp_close_reason_t *out)
+{
+    if (!netins_udp_valid(handle) || out == NULL
+        || out->struct_size < sizeof(*out)
+        || out->api_version != NETINS_UDP_API_VERSION)
+    {
+        return netins_udp_set_error(handle, EINVAL,
+            "invalid close reason output");
+    }
+    (void)netins_udp_get_state(handle);
+    uint32_t struct_size = out->struct_size;
+    memset(out, 0, sizeof(*out));
+    out->struct_size = struct_size;
+    out->api_version = NETINS_UDP_API_VERSION;
+    out->source = handle->close_source;
+    out->system_error = handle->close_system_error;
+    out->transport_error = handle->close_transport_error;
+    strncpy(out->message, handle->close_message,
+        sizeof(out->message) - 1);
+    return 0;
+}
+
+int
+netins_udp_get_snapshot(netins_udp_t *handle, netins_udp_snapshot_t *out)
+{
+    if (!netins_udp_valid(handle) || out == NULL
+        || out->struct_size < sizeof(*out)
+        || out->api_version != NETINS_UDP_API_VERSION)
+    {
+        return netins_udp_set_error(handle, EINVAL,
+            "invalid snapshot output");
+    }
+    (void)netins_udp_get_state(handle);
+    mini_backend_snapshot_t backend;
+    int ret = netins_udp_get_backend_snapshot(handle, &backend);
+    if (ret != 0) {
+        return netins_udp_set_error(handle, ret > 0 ? ret : EIO,
+            "read Mini connection snapshot failed");
+    }
+
+    uint32_t struct_size = out->struct_size;
+    memset(out, 0, sizeof(*out));
+    out->struct_size = struct_size;
+    out->api_version = NETINS_UDP_API_VERSION;
+    out->snapshot_time_us = backend.snapshot_time_us;
+    out->role = handle->role;
+    out->state = handle->state;
+    out->handshake_finished = backend.handshake_finished;
+    out->multipath_mode = backend.multipath_mode;
+    out->multipath_state = backend.multipath_state;
+    out->path_count = backend.path_count;
+    out->active_path_count = backend.active_path_count;
+    out->packets_sent = backend.packets_sent;
+    out->packets_received = backend.packets_received;
+    out->packets_lost = backend.packets_lost;
+    out->spurious_packets_lost = backend.spurious_packets_lost;
+    out->srtt_us = backend.srtt_us;
+    out->min_rtt_us = backend.min_rtt_us;
+    out->bytes_inflight = backend.bytes_inflight;
+    out->total_app_bytes = backend.total_app_bytes;
+    out->standby_path_app_bytes = backend.standby_path_app_bytes;
+    for (uint32_t i = 0; i < backend.path_count
+        && i < NETINS_UDP_MAX_PATHS; i++)
+    {
+        out->paths[i].struct_size = sizeof(out->paths[i]);
+        out->paths[i].api_version = NETINS_UDP_API_VERSION;
+        netins_udp_copy_path_statis(&out->paths[i], &backend.paths[i]);
+    }
+    out->close_reason.struct_size = sizeof(out->close_reason);
+    out->close_reason.api_version = NETINS_UDP_API_VERSION;
+    out->close_reason.source = handle->close_source;
+    out->close_reason.system_error = handle->close_system_error;
+    out->close_reason.transport_error = handle->close_transport_error;
+    strncpy(out->close_reason.message, handle->close_message,
+        sizeof(out->close_reason.message) - 1);
     return 0;
 }
 
@@ -601,6 +904,7 @@ netins_udp_get_state(netins_udp_t *handle)
         return NETINS_UDP_STATE_ERROR;
     }
     int poll_error = 0;
+    mini_backend_log_scope_enter(&handle->backend_config);
     if (handle->role == NETINS_UDP_ROLE_CLIENT
         && handle->client_backend != NULL)
     {
@@ -615,9 +919,14 @@ netins_udp_get_state(netins_udp_t *handle)
                 mini_backend_server_last_error(handle->server_backend);
         }
     }
+    mini_backend_log_scope_leave();
     if (poll_error != 0) {
         handle->state = NETINS_UDP_STATE_ERROR;
-        (void)netins_udp_set_error(handle, poll_error,
+        netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_INTERNAL,
+            poll_error > 0 ? poll_error : EIO, poll_error,
+            "Mini backend event processing failed");
+        (void)netins_udp_set_error(handle,
+            poll_error > 0 ? poll_error : EIO,
             "Mini backend event processing failed");
         return handle->state;
     }
@@ -629,11 +938,20 @@ netins_udp_get_state(netins_udp_t *handle)
             mini_backend_client_last_error(handle->client_backend);
         if (backend_error != 0) {
             handle->state = NETINS_UDP_STATE_ERROR;
+            netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_TRANSPORT,
+                ECONNRESET, backend_error,
+                "XQUIC client connection closed with an error");
             (void)netins_udp_set_error(handle, ECONNRESET,
                 "XQUIC client connection closed with code %d",
                 backend_error);
         } else {
-            handle->state = NETINS_UDP_STATE_CLOSED;
+            if (handle->state != NETINS_UDP_STATE_ERROR) {
+                handle->state = NETINS_UDP_STATE_CLOSED;
+            }
+            if (handle->close_source == NETINS_UDP_CLOSE_NONE) {
+                netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_PEER,
+                    0, 0, "peer closed the client connection");
+            }
         }
     } else if (handle->role == NETINS_UDP_ROLE_ACCEPTED
         && handle->server_connection != NULL
@@ -644,11 +962,20 @@ netins_udp_get_state(netins_udp_t *handle)
             handle->server_connection);
         if (backend_error != 0) {
             handle->state = NETINS_UDP_STATE_ERROR;
+            netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_TRANSPORT,
+                ECONNRESET, backend_error,
+                "XQUIC accepted connection closed with an error");
             (void)netins_udp_set_error(handle, ECONNRESET,
                 "XQUIC accepted connection closed with code %d",
                 backend_error);
         } else {
-            handle->state = NETINS_UDP_STATE_CLOSED;
+            if (handle->state != NETINS_UDP_STATE_ERROR) {
+                handle->state = NETINS_UDP_STATE_CLOSED;
+            }
+            if (handle->close_source == NETINS_UDP_CLOSE_NONE) {
+                netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_PEER,
+                    0, 0, "peer closed the accepted connection");
+            }
         }
     }
     return handle->state;
@@ -665,8 +992,13 @@ netins_udp_shutdown(netins_udp_t *handle)
         return 0;
     }
 
+    if (handle->close_source == NETINS_UDP_CLOSE_NONE) {
+        netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_LOCAL,
+            0, 0, "local shutdown requested");
+    }
     handle->state = NETINS_UDP_STATE_CLOSING;
     int ret = 0;
+    mini_backend_log_scope_enter(&handle->backend_config);
     if (handle->role == NETINS_UDP_ROLE_CLIENT
         && handle->client_backend != NULL)
     {
@@ -683,13 +1015,20 @@ netins_udp_shutdown(netins_udp_t *handle)
         ret = mini_backend_server_connection_shutdown(handle->server_backend,
             handle->server_connection, handle->close_timeout_ms);
     }
+    mini_backend_log_scope_leave();
     if (ret != 0) {
         handle->state = NETINS_UDP_STATE_ERROR;
-        return netins_udp_set_error(handle, ret,
+        netins_udp_set_close_reason(handle,
+            ret == ETIMEDOUT ? NETINS_UDP_CLOSE_TIMEOUT
+                             : NETINS_UDP_CLOSE_INTERNAL,
+            ret > 0 ? ret : EIO, ret, "Mini backend shutdown failed");
+        return netins_udp_set_error(handle, ret > 0 ? ret : EIO,
             "Mini backend shutdown failed");
     }
     handle->state = NETINS_UDP_STATE_CLOSED;
     netins_udp_clear_error(handle);
+    netins_udp_log(handle, NETINS_UDP_LOG_INFO,
+        "handle shutdown complete");
     return 0;
 }
 
@@ -703,6 +1042,7 @@ netins_udp_close(netins_udp_t *handle)
         (void)netins_udp_shutdown(handle);
     }
 
+    mini_backend_log_scope_enter(&handle->backend_config);
     if (handle->role == NETINS_UDP_ROLE_CLIENT) {
         mini_backend_client_destroy(handle->client_backend);
         handle->client_backend = NULL;
@@ -716,6 +1056,7 @@ netins_udp_close(netins_udp_t *handle)
         mini_backend_server_release(handle->server_backend);
         handle->server_backend = NULL;
     }
+    mini_backend_log_scope_leave();
 
     handle->magic = 0;
     pthread_mutex_lock(&netins_udp_global_lock);

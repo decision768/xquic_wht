@@ -1,6 +1,7 @@
 #include "mini_backend.h"
 
 #include <errno.h>
+#include <netdb.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -423,4 +424,99 @@ mini_backend_server_connection_last_error(
     const mini_backend_server_connection_t *connection)
 {
     return connection != NULL ? connection->last_error_code : 0;
+}
+
+static void
+mini_backend_server_format_address(const struct sockaddr *address,
+    socklen_t address_len, char *output, size_t output_len)
+{
+    if (output == NULL || output_len == 0) {
+        return;
+    }
+    output[0] = '\0';
+    if (address == NULL || address_len == 0) {
+        return;
+    }
+
+    char host[NI_MAXHOST] = {0};
+    char service[16] = {0};
+    if (getnameinfo(address, address_len, host, sizeof(host),
+            service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV) != 0)
+    {
+        return;
+    }
+    if (address->sa_family == AF_INET6) {
+        snprintf(output, output_len, "[%s]:%s", host, service);
+    } else {
+        snprintf(output, output_len, "%s:%s", host, service);
+    }
+}
+
+int
+mini_backend_server_connection_get_snapshot(
+    const mini_backend_server_t *server,
+    const mini_backend_server_connection_t *connection,
+    mini_backend_snapshot_t *snapshot)
+{
+    if (server == NULL || connection == NULL || snapshot == NULL
+        || server->ctx.engine == NULL)
+    {
+        return EINVAL;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->snapshot_time_us = xqc_now();
+    snapshot->handshake_finished = connection->handshake_finished;
+    xqc_conn_stats_t stats = xqc_conn_get_stats(server->ctx.engine,
+        &connection->cid);
+    snapshot->multipath_mode = stats.enable_multipath;
+    snapshot->multipath_state = stats.mp_state;
+    snapshot->packets_sent = stats.send_count;
+    snapshot->packets_received = stats.recv_count;
+    snapshot->packets_lost = stats.lost_count;
+    snapshot->spurious_packets_lost = stats.spurious_loss_count;
+    snapshot->srtt_us = stats.srtt;
+    snapshot->min_rtt_us = stats.min_rtt;
+    snapshot->bytes_inflight = stats.inflight_bytes;
+    snapshot->total_app_bytes = stats.total_app_bytes;
+    snapshot->standby_path_app_bytes = stats.standby_path_app_bytes;
+
+    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT
+        && snapshot->path_count < MINI_BACKEND_MAX_PATHS; i++)
+    {
+        const xqc_path_metrics_t *source = &stats.paths_info[i];
+        if (source->path_id == UINT64_MAX) {
+            continue;
+        }
+        mini_backend_path_snapshot_t *path =
+            &snapshot->paths[snapshot->path_count];
+        path->path_id = source->path_id;
+        path->path_index = snapshot->path_count;
+        path->path_state = source->path_state;
+        path->app_status = source->path_app_status;
+        path->packets_sent = source->path_pkt_send_count;
+        path->packets_received = source->path_pkt_recv_count;
+        path->bytes_sent = source->path_send_bytes;
+        path->bytes_received = source->path_recv_bytes;
+        path->reinjected_bytes_sent =
+            source->path_send_reinject_bytes;
+        path->reinjected_bytes_received =
+            source->path_recv_reinject_bytes;
+        path->effective_bytes_received =
+            source->path_recv_effective_bytes;
+        path->srtt_us = source->path_srtt;
+        mini_backend_server_format_address(
+            (const struct sockaddr *)connection->local_addr,
+            connection->local_addrlen, path->local_address,
+            sizeof(path->local_address));
+        mini_backend_server_format_address(
+            (const struct sockaddr *)connection->peer_addr,
+            connection->peer_addrlen, path->peer_address,
+            sizeof(path->peer_address));
+        if (path->path_state == 2) {
+            snapshot->active_path_count++;
+        }
+        snapshot->path_count++;
+    }
+    return 0;
 }

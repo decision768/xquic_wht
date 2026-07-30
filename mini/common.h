@@ -72,4 +72,25 @@ extern xqc_usec_t xqc_now();
 
 int xqc_mini_read_file_data(char * data, size_t data_len, char *filename);
 
+typedef void (*xqc_mini_logger_fn)(void *user_data, int level,
+    const char *message);
+
+/*
+ * API calls install a thread-local logging scope while they drive the
+ * original synchronous mini callbacks. CLI calls have no scope and retain
+ * their existing stdout behavior.
+ */
+void xqc_mini_log_scope_enter(xqc_mini_logger_fn callback,
+    void *user_data, int minimum_level);
+void xqc_mini_log_scope_leave(void);
+int xqc_mini_log_printf(const char *format, ...)
+#if defined(__GNUC__) || defined(__clang__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+
+#if !defined(XQC_MINI_LOG_IMPLEMENTATION)
+#define printf(...) xqc_mini_log_printf(__VA_ARGS__)
+#endif
+
 #endif

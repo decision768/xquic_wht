@@ -13,6 +13,13 @@ struct netins_udp_s {
     int state;
     int last_error_code;
     char last_error_msg[NETINS_UDP_ERROR_MSG_LEN];
+    int close_source;
+    int close_system_error;
+    int close_transport_error;
+    char close_message[NETINS_UDP_ERROR_MSG_LEN];
+    netins_udp_logger_cb logger;
+    void *logger_user_data;
+    int logger_minimum_level;
 
     uint32_t connect_timeout_ms;
     uint32_t accept_timeout_ms;
