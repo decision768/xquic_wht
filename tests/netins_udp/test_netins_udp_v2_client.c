@@ -892,6 +892,19 @@ netins_udp_v2_transport_server_connection_close(
     g_connection_close_count++;
 }
 
+void
+netins_udp_v2_transport_server_connection_close_after_peer(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms)
+{
+    /*
+     * The production transport waits for the peer's connection close before
+     * releasing the accepted connection. This mock has no engine thread or
+     * peer, so reuse the existing deterministic close implementation.
+     */
+    netins_udp_v2_transport_server_connection_close(connection, timeout_ms);
+}
+
 static void
 set_http3_test_options(netins_udp_t *client)
 {

@@ -1647,6 +1647,7 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
         netins->client_transport;
     netins_udp_v2_transport_server_connection_t *accepted_transport =
         netins->accepted_transport;
+    netins_udp_data_backend_t *data_backend = NULL;
     if (error_code == 0) {
         netins->state = NETINS_UDP_STATE_CLOSING;
         netins_udp_v2_set_close_reason_locked(netins,
@@ -1695,8 +1696,7 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
                 break;
             }
         }
-        netins_udp_data_backend_t *data_backend =
-            netins->data_backend;
+        data_backend = netins->data_backend;
         pthread_mutex_unlock(&netins->data_lock);
 
         if (error_code == 0 && data_backend != NULL
@@ -1722,7 +1722,12 @@ netins_udp_shutdown(netins_udp_t *netins, uint64_t application_error)
         }
     }
 
-    if (!transport_shutdown_requested || application_error != 0) {
+    int wait_for_peer_data_close = application_error == 0
+        && !transport_shutdown_requested
+        && accepted_transport != NULL && data_backend != NULL;
+    if ((!transport_shutdown_requested || application_error != 0)
+        && !wait_for_peer_data_close)
+    {
         if (client_transport != NULL) {
             netins_udp_v2_transport_client_request_shutdown(client_transport,
                 application_error);
@@ -2866,6 +2871,8 @@ netins_udp_close(netins_udp_t *netins)
     }
 
     pthread_mutex_lock(&netins->lock);
+    int graceful_shutdown_started =
+        netins->state == NETINS_UDP_STATE_CLOSING;
     netins->closing = 1;
     if (netins->state != NETINS_UDP_STATE_ERROR
         && netins->state != NETINS_UDP_STATE_CLOSED)
@@ -2881,6 +2888,12 @@ netins_udp_close(netins_udp_t *netins)
     uint32_t close_timeout_ms = netins->close_timeout_ms;
     pthread_mutex_unlock(&netins->lock);
 
+    pthread_mutex_lock(&netins->data_lock);
+    int wait_for_peer_data_close = graceful_shutdown_started
+        && accepted_transport != NULL && netins->data_backend != NULL
+        && !netins->data_backend_creating;
+    pthread_mutex_unlock(&netins->data_lock);
+
     if (client_transport != NULL) {
         netins_udp_v2_transport_client_set_notify(client_transport,
             NULL, NULL);
@@ -2891,11 +2904,14 @@ netins_udp_close(netins_udp_t *netins)
             NULL, NULL);
         netins_udp_v2_transport_server_begin_close(listener_transport);
     }
-    if (accepted_transport != NULL) {
+    if (accepted_transport != NULL && !wait_for_peer_data_close) {
         netins_udp_v2_transport_server_connection_set_notify(
             accepted_transport, NULL, NULL);
         netins_udp_v2_transport_server_connection_request_shutdown(
             accepted_transport, 0);
+    } else if (accepted_transport != NULL) {
+        netins_udp_v2_transport_server_connection_set_notify(
+            accepted_transport, NULL, NULL);
     }
 
     pthread_mutex_lock(&netins->lock);
@@ -2917,12 +2933,16 @@ netins_udp_close(netins_udp_t *netins)
     pthread_mutex_unlock(&netins->data_lock);
 
     /*
-     * Child request handles refer to transport-owned request objects. Release
-     * every private lane while its parent transport is still alive. A prior
-     * graceful shutdown has already flushed the backend; direct close is an
-     * abort and may intentionally discard unsent application bytes.
+     * Keep the private data-lane handles alive until the parent transport has
+     * completed its bounded graceful close. Closing a lane handle requests an
+     * HTTP/3 request close; doing that first can cancel a peer request whose
+     * FIN has reached QUIC but whose final body callback is still waiting to
+     * run (the wider multipath reordering window makes that race visible).
+     *
+     * The request transports hold independent references and are detached by
+     * the parent close callbacks, so their public wrappers remain valid for
+     * the backend destroy immediately below.
      */
-    netins_udp_data_backend_destroy(data_backend);
     if (client_transport != NULL) {
         netins_udp_v2_transport_client_close(client_transport);
     }
@@ -2930,9 +2950,15 @@ netins_udp_close(netins_udp_t *netins)
         netins_udp_v2_transport_server_close(listener_transport);
     }
     if (accepted_transport != NULL) {
-        netins_udp_v2_transport_server_connection_close(
-            accepted_transport, close_timeout_ms);
+        if (wait_for_peer_data_close) {
+            netins_udp_v2_transport_server_connection_close_after_peer(
+                accepted_transport, close_timeout_ms);
+        } else {
+            netins_udp_v2_transport_server_connection_close(
+                accepted_transport, close_timeout_ms);
+        }
     }
+    netins_udp_data_backend_destroy(data_backend);
 
     netins_udp_v2_log(netins, NETINS_UDP_LOG_LEVEL_INFO,
         NETINS_UDP_V2_LOGGED_CLOSED, "NetIns UDP handle closed");

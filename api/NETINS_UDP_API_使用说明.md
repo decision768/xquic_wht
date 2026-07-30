@@ -588,8 +588,8 @@ int netins_udp_shutdown(netins_udp_t *netins,
 netins_udp_shutdown(conn, 0);
 ```
 
-`application_error=0` 时，库会结束发送方向，并在已经接收的待发送数据交给
-XQUIC 后关闭传输。非零值表示错误关闭。
+`application_error=0` 时，库会结束发送方向。服务端 accepted connection 会等待
+客户端完成接收并关闭连接，等待时间受关闭超时配置限制。非零值表示错误关闭。
 
 调用后仍可以查询最终连接状态，直到调用 `netins_udp_close()` 释放对象。
 

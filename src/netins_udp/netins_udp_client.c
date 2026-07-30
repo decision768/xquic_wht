@@ -2432,10 +2432,16 @@ netins_udp_client_streams_send_drained_locked(
             || stream->state == NETINS_UDP_STREAM_STATE_ERROR
             || stream->state == NETINS_UDP_STREAM_STATE_CLOSED
             || stream->close_notified;
+        int fin_acked = 0;
+        if (stream->send_finished && stream->request != NULL) {
+            xqc_request_stats_t stats =
+                xqc_h3_request_get_stats(stream->request);
+            fin_acked = stats.stream_fin_ack_time != 0;
+        }
         int stream_drained = terminal
             || (stream->send_queue_bytes == 0
                 && (!stream->send_fin_requested
-                    || stream->send_finished));
+                    || (stream->send_finished && fin_acked)));
         pthread_mutex_unlock(&stream->lock);
         if (!stream_drained) {
             drained = 0;

@@ -710,6 +710,13 @@ def main(argv=None):
     ):
         ok = fail("data-mode mutual exclusion lacks client/server tests")
     if (
+        "netins_udp_v2_transport_server_connection_close_after_peer("
+        not in v2_client_test
+    ):
+        ok = fail(
+            "V2 client unit-test transport does not mock accepted peer-close"
+        )
+    if (
         v2_h3_test.count("g_select_h3_error = EBUSY") < 2
         or "g_connection_release_count == release_count + 1"
             not in v2_h3_test
@@ -733,6 +740,25 @@ def main(argv=None):
     ):
         if token not in data_backend:
             ok = fail(f"parallel connection-data backend omits {token}")
+    if not re.search(
+        r"if\s*\(lane->tx_fin_frame\)\s*\{\s*"
+        r"send_flags\s*\|=\s*NETINS_UDP_MSG_FIN;\s*\}"
+        r"[\s\S]{0,240}netins_udp_h3_request_send\("
+        r"[\s\S]{0,180}send_flags\)",
+        data_backend,
+    ):
+        ok = fail(
+            "ordered-data final frame is not submitted atomically with H3 FIN"
+        )
+    if (
+        "--empty-upload" not in data_loopback_test
+        or "context.client_send_size" not in data_loopback_test
+    ):
+        ok = fail("ordered-data loopback omits the empty-upload regression")
+    if data_backend.count("if (lane->rx_protocol_finished)") < 2:
+        ok = fail(
+            "ordered-data receive batch can read H3 EOF after its final frame"
+        )
 
     get_events_body = v2_client[
         v2_client.index("netins_udp_get_events("):
@@ -798,6 +824,25 @@ def main(argv=None):
         not in server_backend
     ):
         ok = fail("server normal shutdown can close before queued sends drain")
+    if (
+        "stats.stream_fin_ack_time != 0" not in client_backend
+        or "stats.stream_fin_ack_time != 0" not in server_backend
+    ):
+        ok = fail("normal shutdown can close before stream FIN is acknowledged")
+    if (
+        "NETINS_UDP_OPT_CLOSE_TIMEOUT_MS" not in data_client_demo
+        or "NETINS_UDP_OPT_CLOSE_TIMEOUT_MS" not in data_server_demo
+        or "client has consumed every response lane" not in data_loopback_test
+    ):
+        ok = fail("data demo shutdown-drain behavior lacks regression coverage")
+    if (
+        "wait_for_peer_data_close" not in v2_client
+        or "server_connection_close_after_peer" not in v2_client
+        or "server_connection_close_after_peer" not in server_backend
+    ):
+        ok = fail(
+            "accepted data close can cancel peer multipath receive callbacks"
+        )
     close_body = v2_client[v2_client.index("netins_udp_close("):]
     backend_close_at = close_body.find(
         "netins_udp_data_backend_destroy(data_backend)"
@@ -812,10 +857,12 @@ def main(argv=None):
         backend_close_at < 0
         or client_close_at < 0
         or accepted_close_at < 0
-        or backend_close_at > client_close_at
-        or backend_close_at > accepted_close_at
+        or backend_close_at < client_close_at
+        or backend_close_at < accepted_close_at
     ):
-        ok = fail("owner close releases parent transport before private lanes")
+        ok = fail(
+            "owner close can cancel private lanes before graceful parent close"
+        )
     if "netins_udp_client_request_shutdown(client, 0)" not in client_backend:
         ok = fail("client owner close bypasses normal drain semantics")
 

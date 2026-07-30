@@ -624,7 +624,6 @@ if(NETINS_UDP_BUILD_TESTS)
     )
     target_link_libraries(netins_udp_v2_loopback_test PRIVATE
         xquic-static
-        ${SSL_LIB_PATH}
         pthread
         dl
         m
@@ -632,6 +631,7 @@ if(NETINS_UDP_BUILD_TESTS)
 
     # Manual public connection-data acceptance test:
     # netins_udp_data_loopback_test server.crt server.key 18444
+    # netins_udp_data_loopback_test server.crt server.key 18444 --empty-upload
     add_executable(netins_udp_data_loopback_test
         tests/netins_udp/test_netins_udp_data_loopback.c
     )
@@ -641,7 +641,6 @@ if(NETINS_UDP_BUILD_TESTS)
     )
     target_link_libraries(netins_udp_data_loopback_test PRIVATE
         xquic-static
-        ${SSL_LIB_PATH}
         pthread
         dl
         m
@@ -672,7 +671,6 @@ if(NETINS_UDP_BUILD_CONNECT_EXAMPLE)
     )
     target_link_libraries(netins_udp_connect_cli PRIVATE
         xquic-static
-        ${SSL_LIB_PATH}
         pthread
         dl
         m
@@ -696,14 +694,12 @@ if(NETINS_UDP_BUILD_DATA_DEMO)
     )
     target_link_libraries(netins_udp_data_client PRIVATE
         xquic-static
-        ${SSL_LIB_PATH}
         pthread
         dl
         m
     )
     target_link_libraries(netins_udp_data_server PRIVATE
         xquic-static
-        ${SSL_LIB_PATH}
         pthread
         dl
         m

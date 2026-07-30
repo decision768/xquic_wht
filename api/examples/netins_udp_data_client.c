@@ -143,6 +143,8 @@ configure_client(netins_udp_t *connection, const char *server_name,
         || netins_udp_set_opt(connection, NETINS_UDP_OPT_SEND_TIMEOUT_MS,
             &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
         || netins_udp_set_opt(connection, NETINS_UDP_OPT_RECV_TIMEOUT_MS,
+            &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
+        || netins_udp_set_opt(connection, NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
             &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK)
     {
         return -1;

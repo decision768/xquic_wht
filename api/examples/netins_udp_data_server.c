@@ -149,6 +149,8 @@ configure_listener(netins_udp_t *listener, const char *certificate,
             &timeout_ms, sizeof(timeout_ms)) == NETINS_UDP_OK
         && netins_udp_set_opt(listener, NETINS_UDP_OPT_RECV_TIMEOUT_MS,
             &timeout_ms, sizeof(timeout_ms)) == NETINS_UDP_OK
+        && netins_udp_set_opt(listener, NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
+            &timeout_ms, sizeof(timeout_ms)) == NETINS_UDP_OK
         ? 0 : -1;
 }
 

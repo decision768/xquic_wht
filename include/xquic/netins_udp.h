@@ -538,8 +538,10 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(
 /*
  * Initiates graceful transport shutdown without releasing the handle. For the
  * connection-level data API, application_error==0 first finishes the hidden
- * send direction and the transport closes only after library-owned send queues
- * are handed to XQUIC. A nonzero application_error is an immediate error close.
+ * send direction. An accepted server connection then allows the client to
+ * consume the completed receive direction and close the connection, bounded by
+ * the configured close timeout. A nonzero application_error is an immediate
+ * error close.
  * Final state/statistics/close reason remain queryable until close().
  */
 NETINS_UDP_PUBLIC int netins_udp_shutdown(netins_udp_t *netins,

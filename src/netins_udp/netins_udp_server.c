@@ -2518,10 +2518,16 @@ netins_udp_server_connection_send_drained_locked(
         pthread_mutex_lock(&request->lock);
         int terminal = request->stream_error != 0
             || request->close_notified;
+        int fin_acked = 0;
+        if (request->send_finished && request->xqc_request != NULL) {
+            xqc_request_stats_t stats =
+                xqc_h3_request_get_stats(request->xqc_request);
+            fin_acked = stats.stream_fin_ack_time != 0;
+        }
         int request_drained = terminal
             || (request->send_queue_bytes == 0
                 && (!request->send_fin_requested
-                    || request->send_finished));
+                    || (request->send_finished && fin_acked)));
         pthread_mutex_unlock(&request->lock);
         if (!request_drained) {
             return 0;
@@ -3401,6 +3407,55 @@ netins_udp_v2_transport_server_connection_close(
         pthread_mutex_unlock(&connection->lock);
     }
 
+    netins_udp_server_connection_release(connection);
+    netins_udp_server_release(server);
+}
+
+void
+netins_udp_v2_transport_server_connection_close_after_peer(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms)
+{
+    if (connection == NULL) {
+        return;
+    }
+    netins_udp_v2_transport_server_t *server = connection->server;
+    int terminal = 0;
+
+    /*
+     * A data-API server has already closed every response body before it gets
+     * here. Let the client consume and reorder those bodies, then let the
+     * client initiate the connection close. This is the application-level
+     * completion acknowledgement which a transport FIN ACK alone cannot
+     * provide when several multipath receive callbacks are pending.
+     */
+    struct timespec deadline;
+    if (timeout_ms > 0
+        && netins_udp_server_make_deadline(timeout_ms, &deadline) == 0)
+    {
+        pthread_mutex_lock(&connection->lock);
+        while (connection->state != NETINS_UDP_V2_TRANSPORT_CLOSED
+            && connection->state != NETINS_UDP_V2_TRANSPORT_ERROR)
+        {
+            int wait_result = pthread_cond_timedwait(&connection->state_cond,
+                &connection->lock, &deadline);
+            if (wait_result != 0) {
+                break;
+            }
+        }
+        terminal = connection->state == NETINS_UDP_V2_TRANSPORT_CLOSED
+            || connection->state == NETINS_UDP_V2_TRANSPORT_ERROR;
+        pthread_mutex_unlock(&connection->lock);
+    }
+
+    if (!terminal) {
+        /*
+         * Peer loss must not make close unbounded. Once the configured grace
+         * period expires, fall back to the existing local graceful close.
+         */
+        netins_udp_v2_transport_server_connection_request_shutdown(
+            connection, 0);
+    }
     netins_udp_server_connection_release(connection);
     netins_udp_server_release(server);
 }

@@ -12,11 +12,10 @@
 #define DATA_LOOPBACK_TIMEOUT_MS 30000U
 
 typedef struct data_loopback_context_s {
-    pthread_mutex_t lock;
-    pthread_cond_t cond;
     netins_udp_t *listener;
+    size_t client_send_size;
+    size_t server_send_size;
     size_t client_received;
-    int client_receive_done;
     int server_result;
 } data_loopback_context_t;
 
@@ -125,20 +124,24 @@ data_loopback_server_main(void *argument)
     }
 
     size_t received = 0;
-    if (receive_pattern(connection, DATA_LOOPBACK_SIZE, 17U,
+    if (receive_pattern(connection, context->client_send_size, 17U,
             &received) != 0
-        || received != DATA_LOOPBACK_SIZE
-        || send_pattern(connection, DATA_LOOPBACK_SIZE, 83U) != 0)
+        || received != context->client_send_size
+        || send_pattern(connection, context->server_send_size, 83U) != 0)
     {
         context->server_result = -1;
     }
 
-    pthread_mutex_lock(&context->lock);
-    while (context->server_result == 0 && !context->client_receive_done) {
-        pthread_cond_wait(&context->cond, &context->lock);
+    /*
+     * Mirror the standalone server: finish the response and begin graceful
+     * shutdown immediately. The accepted data connection remains alive until
+     * the client has consumed every response lane and closes the connection.
+     */
+    if (context->server_result == 0
+        && netins_udp_shutdown(connection, 0) != NETINS_UDP_OK)
+    {
+        context->server_result = -1;
     }
-    pthread_mutex_unlock(&context->lock);
-    (void)netins_udp_shutdown(connection, 0);
     netins_udp_close(connection);
     return NULL;
 }
@@ -146,8 +149,12 @@ data_loopback_server_main(void *argument)
 int
 main(int argc, char **argv)
 {
-    if (argc != 4) {
-        fprintf(stderr, "usage: %s CERTIFICATE PRIVATE_KEY PORT\n", argv[0]);
+    if (argc != 4
+        && (argc != 5 || strcmp(argv[4], "--empty-upload") != 0))
+    {
+        fprintf(stderr,
+            "usage: %s CERTIFICATE PRIVATE_KEY PORT [--empty-upload]\n",
+            argv[0]);
         return 2;
     }
     int port = atoi(argv[3]);
@@ -157,10 +164,10 @@ main(int argc, char **argv)
 
     data_loopback_context_t context;
     memset(&context, 0, sizeof(context));
-    if (pthread_mutex_init(&context.lock, NULL) != 0
-        || pthread_cond_init(&context.cond, NULL) != 0
-        || netins_udp_init() != NETINS_UDP_OK)
-    {
+    context.client_send_size =
+        argc == 5 ? 0 : DATA_LOOPBACK_SIZE;
+    context.server_send_size = DATA_LOOPBACK_SIZE;
+    if (netins_udp_init() != NETINS_UDP_OK) {
         return 1;
     }
 
@@ -182,6 +189,9 @@ main(int argc, char **argv)
         || netins_udp_set_opt(context.listener,
             NETINS_UDP_OPT_RECV_TIMEOUT_MS,
             &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
+        || netins_udp_set_opt(context.listener,
+            NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
+            &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
         || netins_udp_listen(context.listener, "127.0.0.1", port) == NULL)
     {
         goto cleanup;
@@ -199,6 +209,8 @@ main(int argc, char **argv)
             &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
         || netins_udp_set_opt(client, NETINS_UDP_OPT_RECV_TIMEOUT_MS,
             &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
+        || netins_udp_set_opt(client, NETINS_UDP_OPT_CLOSE_TIMEOUT_MS,
+            &timeout_ms, sizeof(timeout_ms)) != NETINS_UDP_OK
         || netins_udp_connect(client, "127.0.0.1", port) != NETINS_UDP_OK)
     {
         goto cleanup;
@@ -211,21 +223,22 @@ main(int argc, char **argv)
         goto cleanup;
     }
     int client_transfer_result = 0;
-    if (send_pattern(client, DATA_LOOPBACK_SIZE, 17U) != 0
-        || receive_pattern(client, DATA_LOOPBACK_SIZE, 83U,
+    if (send_pattern(client, context.client_send_size, 17U) != 0
+        || receive_pattern(client, context.server_send_size, 83U,
             &context.client_received) != 0)
     {
         client_transfer_result = -1;
         (void)netins_udp_shutdown(client, 1);
     }
+    if (client_transfer_result == 0
+        && netins_udp_shutdown(client, 0) != NETINS_UDP_OK)
+    {
+        client_transfer_result = -1;
+    }
 
-    pthread_mutex_lock(&context.lock);
-    context.client_receive_done = 1;
-    pthread_cond_broadcast(&context.cond);
-    pthread_mutex_unlock(&context.lock);
     (void)pthread_join(server_thread, NULL);
     if (client_transfer_result == 0 && context.server_result == 0
-        && context.client_received == DATA_LOOPBACK_SIZE)
+        && context.client_received == context.server_send_size)
     {
         result = 0;
     }
@@ -240,8 +253,6 @@ cleanup:
     if (netins_udp_cleanup() != NETINS_UDP_OK) {
         result = 1;
     }
-    pthread_cond_destroy(&context.cond);
-    pthread_mutex_destroy(&context.lock);
     printf("netins_udp_data_loopback_test: %s\n",
         result == 0 ? "PASS" : "FAIL");
     return result;

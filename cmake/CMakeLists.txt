@@ -585,6 +585,7 @@ if(NETINS_UDP_BUILD_TESTS)
 
     # Manual public connection-data acceptance test:
     # netins_udp_data_loopback_test server.crt server.key 18444
+    # netins_udp_data_loopback_test server.crt server.key 18444 --empty-upload
     add_executable(netins_udp_data_loopback_test
         tests/netins_udp/test_netins_udp_data_loopback.c
     )

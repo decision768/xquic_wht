@@ -536,9 +536,23 @@ netins_udp_data_pump_send_lane(netins_udp_data_backend_t *backend,
 
     if (lane->tx_wire != NULL) {
         size_t remaining = lane->tx_wire_length - lane->tx_wire_offset;
+        /*
+         * Submit the private protocol FIN frame and the HTTP/3 body FIN in
+         * the same operation.  A separate zero-length finish call leaves a
+         * scheduling window in which an empty transfer can expose the H3 EOF
+         * before the receiver has consumed the private final-offset frame.
+         *
+         * The H3 layer only accepts FIN when the complete remaining buffer
+         * was queued.  If its bounded queue accepts a prefix, the next pump
+         * retries the unsent suffix with FIN and preserves the same ordering.
+         */
+        int send_flags = NETINS_UDP_MSG_DONTWAIT;
+        if (lane->tx_fin_frame) {
+            send_flags |= NETINS_UDP_MSG_FIN;
+        }
         ssize_t sent = netins_udp_h3_request_send(lane->request,
             lane->tx_wire + lane->tx_wire_offset, remaining,
-            NETINS_UDP_MSG_DONTWAIT);
+            send_flags);
         if (sent < 0) {
             if (errno == EAGAIN || errno == ETIMEDOUT) {
                 return NETINS_UDP_OK;
@@ -560,6 +574,7 @@ netins_udp_data_pump_send_lane(netins_udp_data_backend_t *backend,
             }
             if (lane->tx_fin_frame) {
                 lane->tx_fin_wire_sent = 1;
+                lane->tx_body_finished = 1;
             }
             free(lane->tx_wire);
             lane->tx_wire = NULL;
@@ -1044,6 +1059,16 @@ netins_udp_data_pump_recv_lane(netins_udp_data_backend_t *backend,
                 {
                     return NETINS_UDP_ERROR;
                 }
+                /*
+                 * A zero-payload final-offset frame completes this lane and
+                 * resets its frame parser.  Do not continue the batch into
+                 * the following HTTP/3 EOF and misclassify that clean EOF as
+                 * a missing NetIns final frame.
+                 */
+                if (lane->rx_protocol_finished) {
+                    *made_progress = 1;
+                    return NETINS_UDP_OK;
+                }
                 if (lane->rx_header_have == 0) {
                     *made_progress = 1;
                     continue;
@@ -1112,6 +1137,10 @@ netins_udp_data_pump_recv_lane(netins_udp_data_backend_t *backend,
                         lane_index) != NETINS_UDP_OK)
                 {
                     return NETINS_UDP_ERROR;
+                }
+                /* Stop this receive batch as soon as the final frame lands. */
+                if (lane->rx_protocol_finished) {
+                    return NETINS_UDP_OK;
                 }
             }
         } else {

@@ -288,6 +288,14 @@ void netins_udp_v2_transport_server_connection_request_shutdown(
 void netins_udp_v2_transport_server_connection_close(
     netins_udp_v2_transport_server_connection_t *connection,
     uint32_t timeout_ms);
+/*
+ * Releases an accepted connection after first allowing a normally-shutting
+ * peer to close it. If the bounded wait expires, local transport shutdown is
+ * requested before the owner references are released.
+ */
+void netins_udp_v2_transport_server_connection_close_after_peer(
+    netins_udp_v2_transport_server_connection_t *connection,
+    uint32_t timeout_ms);
 int netins_udp_v2_transport_server_request_accept(
     netins_udp_v2_transport_server_connection_t *connection,
     uint32_t timeout_ms, int wait_forever,
