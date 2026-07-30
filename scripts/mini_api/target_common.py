@@ -138,4 +138,3 @@ def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
-
