@@ -10,13 +10,23 @@
 set(CMAKE_SYSTEM_NAME Linux)
 set(CMAKE_SYSTEM_PROCESSOR aarch64)
 
-set(XQC_SIM8810_SDK_ROOT
-    "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207"
-    CACHE PATH "SIM8810 SDK root")
-set(XQC_SIM8810_TOOLCHAIN_DIR
-    "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux"
-    CACHE PATH
+set(XQC_SIM8810_SDK_ROOT "" CACHE PATH "SIM8810 SDK root")
+set(XQC_SIM8810_TOOLCHAIN_DIR "" CACHE PATH
     "directory containing aarch64-oe-linux-gcc and aarch64-oe-linux-g++")
+
+if(NOT IS_DIRECTORY "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm")
+    message(FATAL_ERROR
+        "SIM8810 sysroot not found. Set XQC_SIM8810_SDK_ROOT to the SDK root.")
+endif()
+if(NOT EXISTS
+        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc"
+    OR NOT EXISTS
+        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
+    message(FATAL_ERROR
+        "SIM8810 compiler not found. Set XQC_SIM8810_TOOLCHAIN_DIR to the "
+        "directory containing aarch64-oe-linux-gcc and "
+        "aarch64-oe-linux-g++.")
+endif()
 
 set(CMAKE_SYSROOT "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm"
     CACHE PATH "SIM8810 target sysroot")
@@ -35,11 +45,3 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
 
 set(SSL_TYPE "babassl" CACHE STRING "TLS implementation")
-set(LIBEVENT_ROOT
-    "/home/admin123/libevent_aarch64/libevent-2.1.12-stable"
-    CACHE PATH "SIM8810 AArch64 libevent root")
-set(ZLOG_INCLUDE_DIR "/home/admin123/zlog-1.2.18/src" CACHE PATH
-    "SIM8810 AArch64 zlog include directory")
-set(ZLOG_STATIC_LIB
-    "/home/admin123/zlog-1.2.18/build_aarch64/lib/libzlog.a"
-    CACHE FILEPATH "SIM8810 AArch64 zlog static library")

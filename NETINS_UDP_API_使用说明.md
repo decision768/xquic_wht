@@ -988,7 +988,170 @@ done:
 
 ---
 
-## 13. 编译和链接
+## 13. UDP API Demo
+
+交付包提供两个可以独立编译和运行的 Demo：
+
+| 程序 | 运行环境 | 作用 |
+|---|---|---|
+| `netins_udp_data_client` | AArch64 板卡或 Linux 客户端 | 建立连接、发送文件、接收文件并查询多路径状态 |
+| `netins_udp_data_server` | Linux x86_64 服务器 | 监听和接受连接、接收文件、发送文件 |
+
+两个 Demo 只包含公共头文件：
+
+```c
+#include <xquic/netins_udp.h>
+```
+
+它们不包含 mini 或 `src/netins_udp/` 中的私有头文件，可作为第三方程序接入
+`netins_udp.h` 和 XQUIC 库的参考。
+
+### 13.1 编译Demo
+
+配置CMake时，`NETINS_UDP_BUILD_DATA_DEMO` 默认开启。也可以显式指定：
+
+```sh
+cmake -S . -B build \
+  -DNETINS_UDP_BUILD_DATA_DEMO=ON \
+  [其他平台和依赖参数]
+```
+
+AArch64客户端：
+
+```sh
+cmake --build build-api-client-aarch64-final \
+  --target netins_udp_data_client \
+  -j$(nproc)
+```
+
+x86_64服务端：
+
+```sh
+cmake --build build-api-server-x86_64 \
+  --target netins_udp_data_server \
+  -j$(nproc)
+```
+
+### 13.2 服务端Demo
+
+参数格式：
+
+```text
+netins_udp_data_server
+  BIND_HOST PORT CERTIFICATE PRIVATE_KEY RECEIVE_FILE SEND_FILE
+```
+
+运行示例：
+
+```sh
+./netins_udp_data_server \
+  '*' 18446 \
+  server.crt server.key \
+  received-from-client.bin server-send.bin
+```
+
+- `BIND_HOST`：监听地址；`*` 表示监听所有本地地址；
+- `RECEIVE_FILE`：保存客户端上传的数据，原文件会被覆盖；
+- `SEND_FILE`：客户端上传结束后，服务端发送给客户端的数据；
+- 当前Demo处理一个连接后退出，下一轮测试需要重新启动。
+
+### 13.3 客户端Demo
+
+参数格式：
+
+```text
+netins_udp_data_client
+  HOST PORT SERVER_NAME CA_FILE
+  SEND_FILE RECEIVE_FILE
+  [INTERFACE ...]
+```
+
+双路径运行示例：
+
+```sh
+./netins_udp_data_client \
+  124.70.219.194 18446 \
+  124.70.219.194 ca.crt \
+  client-send.bin received-download.bin \
+  rmnet_data0 usb0
+```
+
+单路径运行时只填写一个网卡，例如：
+
+```sh
+./netins_udp_data_client \
+  124.70.219.194 18446 \
+  124.70.219.194 ca.crt \
+  client-send.bin received-download.bin \
+  usb0
+```
+
+- `HOST`、`PORT`：服务端地址和端口；
+- `SERVER_NAME`：证书中的服务器名称；
+- `CA_FILE`：用于校验服务端证书的CA文件；
+- `SEND_FILE`：发送给服务端的文件；
+- `RECEIVE_FILE`：保存服务端返回数据的文件；
+- `[INTERFACE ...]`：一个或多个本地网络接口名称。
+
+`CA_FILE` 使用 `-` 会关闭服务端证书校验，只允许用于临时联调；正式部署必须
+配置可信CA文件。
+
+### 13.4 GET和POST测试
+
+Demo按照以下顺序完成双向传输：
+
+```text
+客户端发送 SEND_FILE
+→ 服务端保存到 RECEIVE_FILE
+→ 服务端发送 SEND_FILE
+→ 客户端保存到 RECEIVE_FILE
+```
+
+只测试GET时，客户端可以使用空上传文件：
+
+```sh
+: > empty.bin
+```
+
+只测试POST时，服务端可以使用空发送文件：
+
+```sh
+: > server-empty.bin
+```
+
+成功输出示例：
+
+```text
+sent=104857600 received=0 paths=2 active_paths=2 multipath=1
+```
+
+其中：
+
+- `sent`：应用成功发送的字节数；
+- `received`：应用成功接收的字节数；
+- `paths`：连接生命周期内记录的路径数量；
+- `active_paths`：当前活动路径数量；
+- `multipath`：1表示多路径已经启用，0表示当前为单路径。
+
+### 13.5 本机回环压力测试
+
+交付包中的 `scripts/netins_udp_api_stress.sh` 可在Linux x86_64服务器上反复
+启动两个Demo，执行双向文件传输并逐字节校验结果：
+
+```sh
+./scripts/netins_udp_api_stress.sh \
+  build-api-server-x86_64 \
+  server.crt server.key \
+  18446 5 200
+```
+
+最后两个参数分别表示循环次数和每个方向的文件大小（MiB）。脚本生成的文件与
+日志保存在其输出的临时目录中。该脚本用于验证API收发正确性和重复创建、销毁
+稳定性；它是本机回环测试，不用于衡量5G多路径吞吐。
+
+---
+
+## 14. 编译和链接
 
 动态库链接示例：
 
@@ -1003,7 +1166,7 @@ cc app.c -I/opt/netins-udp/include \
 
 ```sh
 cc app.c -I/opt/netins-udp/include \
-  /opt/netins-udp/lib/libxquic.a \
+  /opt/netins-udp/lib/libxquic-static.a \
   -lssl -lcrypto -lpthread -ldl -lm \
   -o app
 ```
@@ -1012,7 +1175,7 @@ cc app.c -I/opt/netins-udp/include \
 
 ---
 
-## 14. 使用注意事项
+## 15. 使用注意事项
 
 ### 资源管理
 

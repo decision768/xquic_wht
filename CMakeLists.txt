@@ -2,68 +2,9 @@
 
 cmake_minimum_required (VERSION 3.6)
 
-# set(TOOLCHAIN_DIR /opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux)
-# set(CMAKE_C_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-gcc)
-# set(CMAKE_CXX_COMPILER ${TOOLCHAIN_DIR}/aarch64-oe-linux-g++)
-
-# === SIM8810 SDK ===
-set(XQC_SIM8810_SDK_ROOT
-    "/home/admin123/SIM8810_SDK_OCPU_LE3.0_1.1.0_251207"
-    CACHE PATH "SIM8810 SDK root")
-set(XQC_SIM8810_TOOLCHAIN_DIR
-    "/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux"
-    CACHE PATH
-    "directory containing aarch64-oe-linux-gcc and aarch64-oe-linux-g++")
-set(_xqc_sim8810_default OFF)
-if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
-    AND EXISTS "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm"
-    AND EXISTS "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc"
-    AND EXISTS "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
-    set(_xqc_sim8810_default ON)
-endif()
-option(XQC_USE_SIM8810_TOOLCHAIN
-    "build with the SIM8810 AArch64 SDK toolchain"
-    ${_xqc_sim8810_default})
-unset(_xqc_sim8810_default)
-
-if(XQC_USE_SIM8810_TOOLCHAIN)
-    if(DEFINED CMAKE_TOOLCHAIN_FILE
-        AND NOT CMAKE_TOOLCHAIN_FILE STREQUAL "")
-        message(FATAL_ERROR
-            "choose either XQC_USE_SIM8810_TOOLCHAIN or "
-            "CMAKE_TOOLCHAIN_FILE, not both")
-    endif()
-    if(NOT EXISTS "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm"
-        OR NOT EXISTS
-            "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc"
-        OR NOT EXISTS
-            "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
-        message(FATAL_ERROR
-            "XQC_USE_SIM8810_TOOLCHAIN is ON, but the configured SDK or "
-            "compiler does not exist")
-    endif()
-    set(CMAKE_SYSTEM_NAME Linux)
-    set(CMAKE_SYSTEM_PROCESSOR aarch64)
-    set(CMAKE_SYSROOT "${XQC_SIM8810_SDK_ROOT}/sysroots_pvm")
-
-    # toolchain（跟 sdk.mk 一致）
-    set(CMAKE_C_COMPILER
-        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-gcc")
-    set(CMAKE_CXX_COMPILER
-        "${XQC_SIM8810_TOOLCHAIN_DIR}/aarch64-oe-linux-g++")
-
-    # 让 cmake 查找 include/lib 时走 sysroot
-    set(CMAKE_FIND_ROOT_PATH ${CMAKE_SYSROOT})
-    set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-    set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-    set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-    set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-endif()
-# ====================
 project (xquic)
 set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
-set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _xqc_system_processor)
@@ -223,32 +164,10 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
-set(XQC_LIBEVENT_ROOT_X86_64
-    "/data/quic/libevent-2.1.12-stable"
-    CACHE PATH "libevent root for native Linux x86_64 builds")
-set(XQC_LIBEVENT_ROOT_AARCH64
-    "/home/admin123/libevent_aarch64/libevent-2.1.12-stable"
-    CACHE PATH "libevent root for Linux AArch64 builds")
-
-if(NOT LIBEVENT_ROOT)
-    if(XQC_LINUX_ARCH STREQUAL "aarch64")
-        set(LIBEVENT_ROOT "${XQC_LIBEVENT_ROOT_AARCH64}")
-    else()
-        set(LIBEVENT_ROOT "${XQC_LIBEVENT_ROOT_X86_64}")
-    endif()
-endif()
-message(STATUS "XQUIC libevent root: ${LIBEVENT_ROOT}")
-
-set(LIBEVENT_INCLUDE_DIR "${LIBEVENT_ROOT}/include")
-set(LIBEVENT_LIBRARY "${LIBEVENT_ROOT}/.libs/libevent.a")
-set(LIBEVENT_PTHREADS_LIBRARY
-    "${LIBEVENT_ROOT}/.libs/libevent_pthreads.a")
-
 include_directories(include
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${SSL_INC_PATH}
     ${CMAKE_SOURCE_DIR}
-    ${LIBEVENT_INCLUDE_DIR}
 )
 
 
@@ -283,12 +202,6 @@ if(GCOV STREQUAL "on")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
 endif()
 
-
-
-# testing
-if(XQC_ENABLE_TESTING)
-    add_subdirectory(mini)
-endif(XQC_ENABLE_TESTING)
 
 
 # http3/qpack source
@@ -541,150 +454,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/xquic.lds")
 endif()
 
-option(NETINS_UDP_BUILD_TESTS "build netins UDP API unit test" OFF)
-if(NETINS_UDP_BUILD_TESTS)
-    enable_testing()
-    add_executable(netins_udp_unit_test
-        src/netins_udp/netins_udp_api_version.c
-        src/netins_udp/netins_udp_observer.c
-        tests/netins_udp/test_netins_udp.c
-    )
-    target_include_directories(netins_udp_unit_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
-    )
-    target_link_libraries(netins_udp_unit_test pthread)
-    add_test(NAME netins_udp_unit_test COMMAND netins_udp_unit_test)
-
-    add_executable(netins_udp_v2_client_unit_test
-        src/netins_udp/netins_udp_v2_notifier.c
-        src/netins_udp/netins_udp_data_backend.c
-        src/netins_udp/netins_udp_v2_client.c
-        tests/netins_udp/test_netins_udp_v2_client.c
-    )
-    target_include_directories(netins_udp_v2_client_unit_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
-    )
-    target_link_libraries(netins_udp_v2_client_unit_test pthread)
-    add_test(NAME netins_udp_v2_client_unit_test
-        COMMAND netins_udp_v2_client_unit_test)
-
-    add_executable(netins_udp_v2_h3_unit_test
-        src/netins_udp/netins_udp_v2_notifier.c
-        src/netins_udp/netins_udp_v2_h3.c
-        tests/netins_udp/test_netins_udp_v2_h3.c
-    )
-    target_include_directories(netins_udp_v2_h3_unit_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
-    )
-    target_link_libraries(netins_udp_v2_h3_unit_test pthread)
-    add_test(NAME netins_udp_v2_h3_unit_test
-        COMMAND netins_udp_v2_h3_unit_test)
-
-    add_executable(netins_udp_v2_notifier_unit_test
-        src/netins_udp/netins_udp_v2_notifier.c
-        tests/netins_udp/test_netins_udp_v2_notifier.c
-    )
-    target_include_directories(netins_udp_v2_notifier_unit_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src/netins_udp
-    )
-    target_link_libraries(netins_udp_v2_notifier_unit_test pthread)
-    add_test(NAME netins_udp_v2_notifier_unit_test
-        COMMAND netins_udp_v2_notifier_unit_test)
-
-    find_package(PythonInterp 3 QUIET)
-    if(PYTHONINTERP_FOUND)
-        add_test(NAME netins_udp_api_guard
-            COMMAND ${PYTHON_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_netins_udp_api.py)
-
-        find_program(NETINS_UDP_READELF_EXECUTABLE readelf)
-        if(NETINS_UDP_READELF_EXECUTABLE
-            AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-            add_test(NAME netins_udp_abi_symbols
-                COMMAND ${PYTHON_EXECUTABLE}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/netins_udp/verify_netins_udp_api.py
-                    --library $<TARGET_FILE:xquic>
-                    --readelf ${NETINS_UDP_READELF_EXECUTABLE})
-        endif()
-    endif()
-
-    # Manual real-transport acceptance test. It requires a certificate/key:
-    # netins_udp_v2_loopback_test server.crt server.key 18443
-    add_executable(netins_udp_v2_loopback_test
-        tests/netins_udp/test_netins_udp_v2_loopback.c
-    )
-    target_include_directories(netins_udp_v2_loopback_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    target_link_libraries(netins_udp_v2_loopback_test PRIVATE
-        xquic-static
-        pthread
-        dl
-        m
-    )
-
-    # Manual public connection-data acceptance test:
-    # netins_udp_data_loopback_test server.crt server.key 18444
-    # netins_udp_data_loopback_test server.crt server.key 18444 --empty-upload
-    add_executable(netins_udp_data_loopback_test
-        tests/netins_udp/test_netins_udp_data_loopback.c
-    )
-    target_include_directories(netins_udp_data_loopback_test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    target_link_libraries(netins_udp_data_loopback_test PRIVATE
-        xquic-static
-        pthread
-        dl
-        m
-    )
-
-    add_library(netins_udp_example OBJECT
-        api/examples/netins_udp_snapshot_example.c
-        api/examples/netins_udp_connect_example.c
-        api/examples/netins_udp_client_lifecycle_example.c
-        api/examples/netins_udp_server_lifecycle_example.c
-        api/examples/netins_udp_h3_request_example.c
-    )
-    target_include_directories(netins_udp_example PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-endif()
-
-option(NETINS_UDP_BUILD_CONNECT_EXAMPLE
-    "build the standalone netins UDP connection example" OFF)
-if(NETINS_UDP_BUILD_CONNECT_EXAMPLE)
-    add_executable(netins_udp_connect_cli
-        api/examples/netins_udp_connect_example.c
-        api/examples/netins_udp_connect_main.c
-    )
-    target_include_directories(netins_udp_connect_cli PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-    )
-    target_link_libraries(netins_udp_connect_cli PRIVATE
-        xquic-static
-        pthread
-        dl
-        m
-    )
-endif()
-
 option(NETINS_UDP_BUILD_DATA_DEMO
-    "build the public NetIns UDP send/recv demos" OFF)
+    "build the public NetIns UDP send/recv demos" ON)
 if(NETINS_UDP_BUILD_DATA_DEMO)
     add_executable(netins_udp_data_client
-        api/examples/netins_udp_data_client.c
+        demo/netins_udp_data_client.c
     )
     add_executable(netins_udp_data_server
-        api/examples/netins_udp_data_server.c
+        demo/netins_udp_data_server.c
     )
     target_include_directories(netins_udp_data_client PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -736,25 +513,33 @@ endif()
 
 include(GNUInstallDirs)
 install(TARGETS xquic xquic-static
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
-install(FILES include/xquic/netins_udp.h
+if(NETINS_UDP_BUILD_DATA_DEMO)
+    install(TARGETS netins_udp_data_client netins_udp_data_server
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    )
+endif()
+install(DIRECTORY include/xquic/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/xquic
+    FILES_MATCHING PATTERN "*.h"
 )
 install(FILES
-    api/README.md
-    api/NETINS_UDP_API_使用说明.md
-    api/examples/netins_udp_snapshot_example.c
-    api/examples/netins_udp_connect_example.c
-    api/examples/netins_udp_connect_main.c
-    api/examples/netins_udp_client_lifecycle_example.c
-    api/examples/netins_udp_server_lifecycle_example.c
-    api/examples/netins_udp_h3_request_example.c
-    api/examples/netins_udp_data_client.c
-    api/examples/netins_udp_data_server.c
+    README.md
+    NETINS_UDP_API_使用说明.md
+    NETINS_UDP_编译指南.md
+    RELEASE_NOTES.md
+    VERSION
+    LICENSE
     DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
 )
+install(FILES
+    demo/netins_udp_data_client.c
+    demo/netins_udp_data_server.c
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp/demo
+)
 install(PROGRAMS scripts/netins_udp_api_stress.sh
-    DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp
+    DESTINATION ${CMAKE_INSTALL_DOCDIR}/netins_udp/scripts
 )
