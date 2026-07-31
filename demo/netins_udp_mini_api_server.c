@@ -165,7 +165,7 @@ configure_server(netins_udp_t *server, const server_options_t *options)
 
     logger.callback = api_logger;
     logger.user_data = stderr;
-    logger.minimum_level = NETINS_UDP_LOG_INFO;
+    logger.minimum_level = NETINS_UDP_LOG_DEBUG;
     if (copy_option_string(tls.certificate_file,
             sizeof(tls.certificate_file), options->certificate_file) != 0
         || copy_option_string(tls.private_key_file,

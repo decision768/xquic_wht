@@ -15,7 +15,7 @@
 #define CLIENT_RX_BATCH_CAPACITY       256
 #define CLIENT_RX_SINGLE_PATH_PACKETS  40
 #define CLIENT_RX_DUAL_PATH_PACKETS    256
-#define CLIENT_PATH_FAILOVER_PTO        2
+#define CLIENT_PATH_FAILOVER_PTO        3
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
@@ -2211,6 +2211,21 @@ xqc_mini_cli_count_rx_ready_paths(xqc_mini_cli_user_conn_t *user_conn)
     return ready_paths;
 }
 
+static int
+xqc_mini_cli_count_transport_available_paths(
+    xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->engine == NULL)
+    {
+        return 0;
+    }
+
+    xqc_int_t available_paths = xqc_conn_available_paths(
+        user_conn->ctx->engine, &user_conn->cid);
+    return available_paths > 0 ? (int)available_paths : 0;
+}
+
 static void
 xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -2229,20 +2244,27 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     user_conn->rx_arbiter_running = 1;
     stats->rx_arbiter_calls++;
     xqc_usec_t callback_start = xqc_now();
-    int ready_paths = xqc_mini_cli_count_rx_ready_paths(user_conn);
-    int packets_per_path = ready_paths >= 2
+    int transport_paths =
+        xqc_mini_cli_count_transport_available_paths(user_conn);
+    int io_ready_paths = xqc_mini_cli_count_rx_ready_paths(user_conn);
+    int budget_paths = transport_paths >= 2 ? 2 : 1;
+    int packets_per_path = budget_paths >= 2
         ? CLIENT_RX_DUAL_PATH_PACKETS
         : CLIENT_RX_SINGLE_PATH_PACKETS;
 
-    if (user_conn->rx_last_budget_active_paths != ready_paths
+    if (user_conn->rx_last_budget_active_paths != transport_paths
+        || user_conn->rx_last_budget_io_ready_paths != io_ready_paths
         || user_conn->rx_last_budget_packets_per_path != packets_per_path)
     {
         printf("[diag_rx_budget] active_paths=%d per_path_limit=%d"
-               " round_limit=%d mode=%s\n",
-               ready_paths, packets_per_path,
-               ready_paths * packets_per_path,
-               ready_paths >= 2 ? "dual" : "single");
-        user_conn->rx_last_budget_active_paths = ready_paths;
+               " round_limit=%d mode=%s budget_paths=%d"
+               " io_ready_paths=%d source=transport_active\n",
+               transport_paths, packets_per_path,
+               io_ready_paths * packets_per_path,
+               budget_paths >= 2 ? "dual" : "single",
+               budget_paths, io_ready_paths);
+        user_conn->rx_last_budget_active_paths = transport_paths;
+        user_conn->rx_last_budget_io_ready_paths = io_ready_paths;
         user_conn->rx_last_budget_packets_per_path = packets_per_path;
     }
 
@@ -3256,6 +3278,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->rx_arbiter_running = 0;
     user_conn->rx_shutdown = 0;
     user_conn->rx_last_budget_active_paths = -1;
+    user_conn->rx_last_budget_io_ready_paths = -1;
     user_conn->rx_last_budget_packets_per_path = -1;
     pthread_mutex_init(&user_conn->download_write_lock, NULL);
     pthread_cond_init(&user_conn->download_write_cond, NULL);

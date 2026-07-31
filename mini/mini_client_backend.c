@@ -20,6 +20,56 @@ struct mini_backend_client_s {
 };
 
 static void
+mini_backend_client_timeout_wakeup(evutil_socket_t fd, short events, void *arg)
+{
+    (void)fd;
+    (void)events;
+    (void)arg;
+}
+
+static int
+mini_backend_client_arm_timeout(struct event_base *event_base,
+    xqc_usec_t start, uint32_t timeout_ms, struct event **timeout_event)
+{
+    *timeout_event = NULL;
+    if (timeout_ms == 0) {
+        return 0;
+    }
+
+    xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    xqc_usec_t now = xqc_now();
+    if (now - start >= timeout_us) {
+        return ETIMEDOUT;
+    }
+
+    xqc_usec_t remaining_us = timeout_us - (now - start);
+    struct timeval remaining = {
+        .tv_sec = (long)(remaining_us / 1000000),
+        .tv_usec = (long)(remaining_us % 1000000),
+    };
+    struct event *event = event_new(event_base, -1, EV_TIMEOUT,
+        mini_backend_client_timeout_wakeup, NULL);
+    if (event == NULL) {
+        return ENOMEM;
+    }
+    if (event_add(event, &remaining) != 0) {
+        event_free(event);
+        return EIO;
+    }
+    *timeout_event = event;
+    return 0;
+}
+
+static void
+mini_backend_client_disarm_timeout(struct event **timeout_event)
+{
+    if (timeout_event != NULL && *timeout_event != NULL) {
+        event_free(*timeout_event);
+        *timeout_event = NULL;
+    }
+}
+
+static void
 mini_backend_client_abort_transfer(mini_backend_client_t *client,
     int error_code)
 {
@@ -119,6 +169,21 @@ mini_backend_client_create(const mini_backend_config_t *config,
         (void)xqc_mini_cli_load_config_file(args, MINI_CONFIG_FILE);
     }
     mini_backend_client_apply_config(args, config);
+    if (client->api_mode) {
+        printf("[resolved-event-loop] role=client mode=blocking_once"
+               " fixed_sleep_us=0\n");
+        int configured_interfaces = args->net_cfg.multi_interface_cnt;
+        int target_paths = configured_interfaces > 0
+            ? configured_interfaces : MAX_PATH_CNT;
+        if (target_paths > MAX_PATH_CNT) {
+            target_paths = MAX_PATH_CNT;
+        }
+        printf("[resolved-interface-config] configured_interfaces=%d"
+               " target_paths=%d multipath=%d default_auto_dual=%d\n",
+               configured_interfaces, target_paths,
+               args->quic_cfg.multipath,
+               configured_interfaces == 0 && target_paths >= 2);
+    }
 
     if (xqc_mini_cli_init_ctx(&client->ctx, args) != XQC_OK) {
         xqc_mini_cli_free_ctx(&client->ctx);
@@ -147,28 +212,39 @@ mini_backend_client_pump_until(mini_backend_client_t *client,
 {
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    struct event *timeout_event = NULL;
+    int result = mini_backend_client_arm_timeout(client->ctx.eb, start,
+        timeout_ms, &timeout_event);
+    if (result != 0) {
+        return result;
+    }
+
     for (;;) {
         int reached = wait_for_close
             ? client->connection->connection_closed
             : client->connection->handshake_finished;
         if (reached) {
-            return 0;
+            result = 0;
+            break;
         }
         if (!wait_for_close && client->connection->connection_closed) {
-            return ECONNRESET;
+            result = ECONNRESET;
+            break;
         }
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
-            return ETIMEDOUT;
+            result = ETIMEDOUT;
+            break;
         }
 
-        int ret = event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK);
-        if (ret < 0) {
-            return EIO;
+        int ret = event_base_loop(client->ctx.eb, EVLOOP_ONCE);
+        if (ret != 0) {
+            result = EIO;
+            break;
         }
-#if !defined(XQC_SYS_WINDOWS)
-        usleep(1000);
-#endif
     }
+
+    mini_backend_client_disarm_timeout(&timeout_event);
+    return result;
 }
 
 int
@@ -281,7 +357,15 @@ mini_backend_client_transfer(mini_backend_client_t *client,
 
     xqc_usec_t start = client->connection->transfer_start_time;
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
-    while (!client->connection->transfer_finished) {
+    struct event *timeout_event = NULL;
+    int timeout_ret = mini_backend_client_arm_timeout(client->ctx.eb, start,
+        timeout_ms, &timeout_event);
+    if (timeout_ret != 0) {
+        ret = timeout_ret;
+        mini_backend_client_abort_transfer(client, ret);
+    }
+
+    while (ret == XQC_OK && !client->connection->transfer_finished) {
         if (client->connection->transfer_error_code != 0) {
             ret = client->connection->transfer_error_code;
             mini_backend_client_abort_transfer(client, ret);
@@ -298,16 +382,14 @@ mini_backend_client_transfer(mini_backend_client_t *client,
             mini_backend_client_abort_transfer(client, ret);
             break;
         }
-        int loop_ret = event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK);
-        if (loop_ret < 0) {
+        int loop_ret = event_base_loop(client->ctx.eb, EVLOOP_ONCE);
+        if (loop_ret != 0) {
             ret = EIO;
             mini_backend_client_abort_transfer(client, ret);
             break;
         }
-#if !defined(XQC_SYS_WINDOWS)
-        usleep(1000);
-#endif
     }
+    mini_backend_client_disarm_timeout(&timeout_event);
 
     if (client->connection->transfer_end_time == 0) {
         client->connection->transfer_end_time = xqc_now();

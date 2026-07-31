@@ -251,7 +251,7 @@ configure_client(netins_udp_t *client, const client_options_t *options)
 
     logger.callback = api_logger;
     logger.user_data = stderr;
-    logger.minimum_level = NETINS_UDP_LOG_INFO;
+    logger.minimum_level = NETINS_UDP_LOG_DEBUG;
     if (netins_udp_set_opt(client, NETINS_UDP_OPT_LOGGER,
             &logger, sizeof(logger)) != 0
         || netins_udp_set_opt(client, NETINS_UDP_OPT_SCHEDULER,

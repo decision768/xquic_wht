@@ -23,6 +23,56 @@ struct mini_backend_server_s {
 };
 
 static void
+mini_backend_server_timeout_wakeup(evutil_socket_t fd, short events, void *arg)
+{
+    (void)fd;
+    (void)events;
+    (void)arg;
+}
+
+static int
+mini_backend_server_arm_timeout(struct event_base *event_base,
+    xqc_usec_t start, uint32_t timeout_ms, struct event **timeout_event)
+{
+    *timeout_event = NULL;
+    if (timeout_ms == 0) {
+        return 0;
+    }
+
+    xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    xqc_usec_t now = xqc_now();
+    if (now - start >= timeout_us) {
+        return ETIMEDOUT;
+    }
+
+    xqc_usec_t remaining_us = timeout_us - (now - start);
+    struct timeval remaining = {
+        .tv_sec = (long)(remaining_us / 1000000),
+        .tv_usec = (long)(remaining_us % 1000000),
+    };
+    struct event *event = event_new(event_base, -1, EV_TIMEOUT,
+        mini_backend_server_timeout_wakeup, NULL);
+    if (event == NULL) {
+        return ENOMEM;
+    }
+    if (event_add(event, &remaining) != 0) {
+        event_free(event);
+        return EIO;
+    }
+    *timeout_event = event;
+    return 0;
+}
+
+static void
+mini_backend_server_disarm_timeout(struct event **timeout_event)
+{
+    if (timeout_event != NULL && *timeout_event != NULL) {
+        event_free(*timeout_event);
+        *timeout_event = NULL;
+    }
+}
+
+static void
 mini_backend_server_apply_config(xqc_mini_svr_args_t *args,
     const mini_backend_config_t *config)
 {
@@ -89,6 +139,10 @@ mini_backend_server_create(const mini_backend_config_t *config,
         (void)xqc_mini_svr_load_config_file(args, MINI_SERVER_CONFIG_FILE);
     }
     mini_backend_server_apply_config(args, config);
+    if (server->api_mode) {
+        printf("[resolved-event-loop] role=server mode=blocking_once"
+               " fixed_sleep_us=0\n");
+    }
 
     if (xqc_mini_svr_init_ctx(&server->ctx, args) != XQC_OK) {
         xqc_mini_svr_free_ctx(&server->ctx);
@@ -184,14 +238,7 @@ mini_backend_server_remove_connection(mini_backend_server_t *server,
 static int
 mini_backend_server_pump(mini_backend_server_t *server)
 {
-    int ret = event_base_loop(server->ctx.eb, EVLOOP_NONBLOCK);
-    if (ret < 0) {
-        return EIO;
-    }
-#if !defined(XQC_SYS_WINDOWS)
-    usleep(1000);
-#endif
-    return 0;
+    return event_base_loop(server->ctx.eb, EVLOOP_ONCE) == 0 ? 0 : EIO;
 }
 
 int
@@ -206,6 +253,12 @@ mini_backend_server_accept(mini_backend_server_t *server,
     *out_connection = NULL;
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    struct event *timeout_event = NULL;
+    int result = mini_backend_server_arm_timeout(server->ctx.eb, start,
+        timeout_ms, &timeout_event);
+    if (result != 0) {
+        return result;
+    }
 
     for (;;) {
         xqc_mini_svr_user_conn_t *connection =
@@ -224,22 +277,30 @@ mini_backend_server_accept(mini_backend_server_t *server,
             }
             connection->delivered = 1;
             *out_connection = connection;
-            return 0;
+            result = 0;
+            break;
         }
         if (!server->listener->accepting) {
-            return ECANCELED;
+            result = ECANCELED;
+            break;
         }
         if (server->listener->last_error_code != 0) {
-            return server->listener->last_error_code;
+            result = server->listener->last_error_code;
+            break;
         }
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
-            return ETIMEDOUT;
+            result = ETIMEDOUT;
+            break;
         }
         int ret = mini_backend_server_pump(server);
         if (ret != 0) {
-            return ret;
+            result = ret;
+            break;
         }
     }
+
+    mini_backend_server_disarm_timeout(&timeout_event);
+    return result;
 }
 
 void
@@ -288,16 +349,25 @@ mini_backend_server_connection_shutdown(mini_backend_server_t *server,
 
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    struct event *timeout_event = NULL;
+    ret = mini_backend_server_arm_timeout(server->ctx.eb, start,
+        timeout_ms, &timeout_event);
+    if (ret != 0) {
+        return ret;
+    }
+
     while (!connection->connection_closed) {
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
-            return ETIMEDOUT;
+            ret = ETIMEDOUT;
+            break;
         }
         ret = mini_backend_server_pump(server);
         if (ret != 0) {
-            return ret;
+            break;
         }
     }
-    return 0;
+    mini_backend_server_disarm_timeout(&timeout_event);
+    return ret;
 }
 
 int
@@ -370,18 +440,33 @@ mini_backend_server_connection_serve(mini_backend_server_t *server,
 
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
+    struct event *timeout_event = NULL;
+    int result = mini_backend_server_arm_timeout(server->ctx.eb, start,
+        timeout_ms, &timeout_event);
+    if (result != 0) {
+        connection->serve_cancelled = 1;
+        connection->serve_configured = 0;
+        return result;
+    }
+
     while (!connection->connection_closed) {
         if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
             connection->serve_cancelled = 1;
             connection->serve_configured = 0;
-            return ETIMEDOUT;
+            result = ETIMEDOUT;
+            break;
         }
         int ret = mini_backend_server_pump(server);
         if (ret != 0) {
             connection->serve_cancelled = 1;
             connection->serve_configured = 0;
-            return ret;
+            result = ret;
+            break;
         }
+    }
+    mini_backend_server_disarm_timeout(&timeout_event);
+    if (result != 0) {
+        return result;
     }
     return connection->last_error_code != 0
         ? connection->last_error_code : 0;

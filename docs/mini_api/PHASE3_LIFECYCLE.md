@@ -41,7 +41,10 @@ ticket/token/transport-parameter 文件，避免第三方进程的多 handle 竞
 
 阶段 4 使用同步阻塞模型：
 
-- `connect()` 在调用线程中以 `EVLOOP_NONBLOCK` 推进原 Libevent 循环，直到握手或超时；
+- `connect()`、`transfer()`、服务端 `accept()/serve()` 在调用线程中以
+  `EVLOOP_ONCE` 阻塞推进原 Libevent 循环，事件处理完成后立即进入下一轮，
+  不再使用 `EVLOOP_NONBLOCK + 1ms sleep`；独立超时事件保证 API
+  仍能在调用方配置的期限内返回；
 - `accept()` 在调用线程中推进同一个 server event base，直到 accepted queue 有连接或超时；
 - `shutdown()` 在调用线程中推进关闭回调；
 - `get_state()` 进行一次非阻塞 event poll；

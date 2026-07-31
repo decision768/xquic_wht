@@ -216,7 +216,7 @@ netins_udp_new(int role)
     handle->connect_timeout_ms = 10000;
     handle->accept_timeout_ms = 0;
     handle->close_timeout_ms = 3000;
-    handle->logger_minimum_level = NETINS_UDP_LOG_INFO;
+    handle->logger_minimum_level = NETINS_UDP_LOG_DEBUG;
     mini_backend_config_init(&handle->backend_config);
     handle->backend_config.load_config_file = 0;
     handle->backend_config.api_mode = 1;

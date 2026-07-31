@@ -2,7 +2,7 @@
 #include <stdint.h>
 #include <strings.h>
 
-#define SERVER_PATH_FAILOVER_PTO 2
+#define SERVER_PATH_FAILOVER_PTO 3
 // 去除字符串首尾空白字符
 static char *
 xqc_mini_svr_trim_space(char *text)

@@ -208,7 +208,7 @@ typedef struct netins_udp_logger_config_s {
 
 #define NETINS_UDP_LOGGER_CONFIG_INITIALIZER \
     { sizeof(netins_udp_logger_config_t), NETINS_UDP_API_VERSION, \
-      NULL, NULL, NETINS_UDP_LOG_INFO, 0, {0} }
+      NULL, NULL, NETINS_UDP_LOG_DEBUG, 0, {0} }
 
 typedef struct netins_udp_path_statis_s {
     uint32_t struct_size;

@@ -37,7 +37,9 @@ bin/netins_udp_mini_api_client --help
 当前 demo 对未知参数（包括 `--help`）打印完整 usage 并返回非 0，这是命令帮助行为，不代表
 库初始化失败。
 
-详细集成方法见 `NETINS_UDP_API_使用说明.md`，构建和打包见 `NETINS_UDP_编译指南.md`。
+详细集成方法见根目录 `NETINS_UDP_API_使用说明.md`。该文档列出全部 20 个公开函数，
+并给出客户端建连、GET/POST 文件收发、服务端 listen/accept/serve、状态查询、错误处理、
+shutdown/close 以及完整 C 示例。构建和打包见 `NETINS_UDP_编译指南.md`。
 
 目标 5G 环境的性能与断链报告必须使用仓库阶段 8/9 工具生成。源代码仓库中的
 `TARGET_ENV_PENDING` 表示尚未在当前构建机上伪造或代填实测结果。
