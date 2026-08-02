@@ -144,6 +144,8 @@ typedef struct xqc_mini_cli_env_config_s {
     char log_path[PATH_LEN];
     int use_zlog;
     int disable_file_logging;
+    int zlog_minimum_level;
+    int zlog_level_filter_enabled;
     char zlog_conf[PATH_LEN];
     char zlog_category[64];
 
@@ -326,7 +328,8 @@ typedef struct xqc_mini_cli_user_conn_s {
     char                    send_file_path[PATH_LEN];
     
 
-    xqc_msec_t              upload_start_time;
+    xqc_usec_t              upload_start_time;
+    xqc_usec_t              upload_end_time;
     int                     upload_finished_streams;
     size_t                  upload_total_bytes;
 

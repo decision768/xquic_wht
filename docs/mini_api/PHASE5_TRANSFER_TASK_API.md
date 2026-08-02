@@ -42,7 +42,7 @@ netins_udp_transfer()
 - GET request 并发固定为 8；
 - GET 先用首 request 获取 `x-total-length`，再扩展完整 request 数；
 - request 完成后由原补充逻辑维持并发；
-- RX 继续使用原 Libevent socket、单路径 40 和双路径每路径 256；
+- RX 继续使用原 Libevent socket、单路径 256 和双路径每路径 256，选择分支保持独立；
 - 公共 API 不提供分片、并发和 RX budget 配置项。
 
 ## 3. 文件与路径语义
@@ -74,6 +74,10 @@ netins_udp_transfer()
 - `elapsed_us`；
 - `throughput_mbps`。
 
+调用仍在全部 request 完成后返回；成功结果的测速区间与原 Mini 一致：GET 为首个响应体字节
+至最后一个响应体字节，POST 为首次请求体提交至全部请求体提交完成。POST 指标是应用提交速率，
+不代表服务端已经完整接收。
+
 HTTP 非 2xx、文件打开/读写错误、连接关闭和超时通过 errno 风格错误返回，同时写入连接级
 错误消息。HTTP 文件不存在不会主动关闭可复用连接；任务超时会关闭连接。
 
@@ -92,5 +96,5 @@ HTTP 非 2xx、文件打开/读写错误、连接关闭和超时通过 errno 风
 - 0、1、4 MiB 边界、200 MiB、1 GiB 的 GET/POST；
 - client/API ↔ server/API 及与原 mini 的交叉组合；
 - SHA-256 一致性；
-- 4/8 并发和 40/256 日志观察；
+- 4/8 并发和单/双路径 256/256 日志观察；
 - 同一连接连续任务和超时后的关闭行为。

@@ -9,6 +9,7 @@
 - 进程级初始化/清理与 client/server/accepted handle 生命周期；
 - 配置网卡、调度器、拥塞控制、TLS、超时、socket buffer 和日志回调；
 - 同步 GET/POST 完整文件任务；
+- API 成功结果使用原 Mini 测速口径（GET 首/末响应体，POST 应用提交）；
 - 固定 4 MiB 分片、GET 8 并发、POST 4 并发；
 - 状态、multipath、路径统计、snapshot、错误和 close reason；
 - 只依赖公开头文件的 client/server demo；
@@ -19,7 +20,7 @@
 
 - API 和原 mini 共享同一组 client/server backend 对象；
 - 复用原 Libevent、UDP socket、单 engine、H3 request 和 `pread/pwrite` 数据面；
-- 单路径 40、双路径每路径 256 的公平 RX 机制未开放为配置；
+- 单路径 256、双路径每路径 256 的公平 RX 机制未开放为配置，单双路径选择分支仍保留；
 - 未修改 XQUIC 既有公共 ABI；
 - 未引入第二个 UDP 接收者或自定义持续字节流协议。
 

@@ -69,7 +69,7 @@ POST 或跨机器用例必须在 client 命令返回前把 server 端结果复�
 - 能解析吞吐；
 - SHA-256 一致；
 - 5G1/5G2 显示 1 条路径，Agg 显示 2 条路径；
-- 日志实际出现 `active_paths=1 per_path_limit=40` 或
+- 日志实际出现 `active_paths=1 per_path_limit=256` 或
   `active_paths=2 per_path_limit=256`；
 - 如果目标机存在 GNU `/usr/bin/time`，记录最大 RSS、user CPU 和 system CPU。
 
@@ -99,7 +99,7 @@ Agg > max(5G1, 5G2)
 Agg / (5G1 + 5G2) >= 80%
 可选：Agg >= 205 Mbps
 所有文件 SHA-256 一致
-40/256 预算和预期路径数一致
+单/双路径 256/256 预算和预期路径数一致
 ```
 
 CPU/RSS 没有跨平台通用的固定阈值，因此必须同时对照相同方向、网络和文件大小的

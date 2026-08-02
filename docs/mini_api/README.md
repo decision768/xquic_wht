@@ -25,7 +25,7 @@ VERSION
 ```
 
 API 使用完整 GET/POST 文件任务模型。4 MiB 分片、GET 8 并发、POST 4 并发和单路径
-40/双路径每路径 256 的 RX 策略固定在内部，调用方不能改变。
+256/双路径每路径 256 的 RX 策略固定在内部，调用方不能改变；单双路径预算仍独立选择。
 
 快速验证：
 
@@ -33,6 +33,11 @@ API 使用完整 GET/POST 文件任务模型。4 MiB 分片、GET 8 并发、POS
 bin/netins_udp_mini_api_server --help
 bin/netins_udp_mini_api_client --help
 ```
+
+两个 demo 默认保持原有压测行为：API 日志回调使用 DEBUG 阈值，zlog 关闭，服务端调度器为
+adaptive。可选参数 `--log-level 0..3` 用于等级过滤；传入 `--zlog-config FILE` 才会启用
+zlog；服务端可用 `--scheduler NAME` 覆盖 adaptive。未传这些新参数时，既有压测命令和
+速率摘要格式不变。
 
 当前 demo 对未知参数（包括 `--help`）打印完整 usage 并返回非 0，这是命令帮助行为，不代表
 库初始化失败。

@@ -107,6 +107,21 @@ mini_backend_client_apply_config(xqc_mini_cli_args_t *args,
         args->defer_transfer_setup = 1;
         args->disable_0rtt_storage = 1;
     }
+    if (config->has_zlog) {
+        args->env_cfg.use_zlog = config->zlog_enabled;
+        args->env_cfg.zlog_minimum_level = config->zlog_minimum_level;
+        args->env_cfg.zlog_level_filter_enabled = 1;
+        if (config->zlog_enabled) {
+            strncpy(args->env_cfg.zlog_conf, config->zlog_config_file,
+                sizeof(args->env_cfg.zlog_conf) - 1);
+            args->env_cfg.zlog_conf[sizeof(args->env_cfg.zlog_conf) - 1] =
+                '\0';
+            strncpy(args->env_cfg.zlog_category, config->zlog_category,
+                sizeof(args->env_cfg.zlog_category) - 1);
+            args->env_cfg.zlog_category[
+                sizeof(args->env_cfg.zlog_category) - 1] = '\0';
+        }
+    }
     if (config->has_interfaces) {
         args->net_cfg.multi_interface_cnt = 0;
         memset(args->net_cfg.multi_interface, 0,
@@ -401,8 +416,29 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         (uint32_t)client->connection->target_requests;
     result->completed_fragments =
         (uint32_t)client->connection->completed_requests;
-    result->elapsed_us = client->connection->transfer_end_time >= start
-        ? client->connection->transfer_end_time - start : 0;
+    /*
+     * Keep API completion semantics (wait for the whole task above), but
+     * report throughput with the same timing boundaries as the original
+     * Mini client:
+     *   GET  - first response-body byte to last response-body byte;
+     *   POST - first body submission to completion of all body submissions.
+     */
+    if (method == REQUEST_METHOD_GET) {
+        result->elapsed_us =
+            client->connection->download_first_body_time > 0
+            && client->connection->download_last_body_time
+                > client->connection->download_first_body_time
+            ? client->connection->download_last_body_time
+                - client->connection->download_first_body_time
+            : 0;
+    } else {
+        result->elapsed_us = client->connection->upload_start_time > 0
+            && client->connection->upload_end_time
+                >= client->connection->upload_start_time
+            ? client->connection->upload_end_time
+                - client->connection->upload_start_time
+            : 0;
+    }
 
     if (ret == XQC_OK && client->connection->transfer_error_code != 0) {
         ret = client->connection->transfer_error_code;

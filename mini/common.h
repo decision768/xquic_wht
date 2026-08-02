@@ -9,6 +9,7 @@
 #include <memory.h>
 #include <stdio.h>
 #include <xquic/xquic_typedef.h>
+#include <zlog.h>
 
 /* definition for connection */
 #define DEFAULT_SERVER_ADDR "127.0.0.1"
@@ -88,6 +89,16 @@ int xqc_mini_log_printf(const char *format, ...)
     __attribute__((format(printf, 1, 2)))
 #endif
     ;
+
+/*
+ * zlog uses process-wide initialization. These helpers serialize ownership
+ * and keep it alive until every Mini client/server context has released it.
+ */
+int xqc_mini_zlog_acquire(const char *config_file, const char *category,
+    zlog_category_t **out_category);
+void xqc_mini_zlog_release(void);
+int xqc_mini_log_level_from_xqc(xqc_log_level_t level);
+xqc_log_level_t xqc_mini_xqc_log_level_for_minimum(int minimum_level);
 
 #if !defined(XQC_MINI_LOG_IMPLEMENTATION)
 #define printf(...) xqc_mini_log_printf(__VA_ARGS__)

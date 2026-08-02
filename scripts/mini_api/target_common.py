@@ -22,6 +22,9 @@ RX_BUDGET_RE = re.compile(
     r"\s+per_path_limit=([0-9]+)"
 )
 
+SINGLE_PATH_RX_LIMIT = 256
+DUAL_PATH_RX_LIMIT = 256
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -59,7 +62,11 @@ def parse_log(text: str, client_kind: str) -> dict[str, Any]:
 
 
 def expected_rx_limit(expected_paths: int) -> int:
-    return 256 if expected_paths >= 2 else 40
+    return (
+        DUAL_PATH_RX_LIMIT
+        if expected_paths >= 2
+        else SINGLE_PATH_RX_LIMIT
+    )
 
 
 def rx_budget_matches(

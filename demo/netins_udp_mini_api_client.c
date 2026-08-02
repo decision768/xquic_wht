@@ -11,6 +11,8 @@ typedef struct client_options_s {
     const char *local_path;
     const char *remote_path;
     const char *server_name;
+    const char *zlog_config_file;
+    const char *zlog_category;
     const char *interfaces[NETINS_UDP_MAX_INTERFACES];
     uint32_t interface_count;
     uint32_t timeout_ms;
@@ -19,6 +21,7 @@ typedef struct client_options_s {
     int direction;
     int scheduler;
     int congestion_control;
+    int log_level;
 } client_options_t;
 
 static void
@@ -36,7 +39,10 @@ usage(const char *program)
         "                          fastprobe20|fastonly|adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
         "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
-        "  --repeat N              Sequential tasks on one connection (default 1)\n",
+        "  --repeat N              Sequential tasks on one connection (default 1)\n"
+        "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
+        "  --zlog-config FILE      Enable zlog with this config file\n"
+        "  --zlog-category NAME    zlog category (default xquic_mini_api_client)\n",
         program);
 }
 
@@ -126,6 +132,7 @@ parse_args(int argc, char **argv, client_options_t *options)
     options->direction = 0;
     options->scheduler = NETINS_UDP_SCHEDULER_DEFAULT;
     options->congestion_control = NETINS_UDP_CC_DEFAULT;
+    options->log_level = NETINS_UDP_LOG_DEBUG;
 
     for (i = 1; i < argc; ++i) {
         const char *value = NULL;
@@ -192,6 +199,23 @@ parse_args(int argc, char **argv, client_options_t *options)
             {
                 return -1;
             }
+        } else if (strcmp(argv[i], "--log-level") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, NETINS_UDP_LOG_ERROR, &number) != 0)
+            {
+                return -1;
+            }
+            options->log_level = (int)number;
+        } else if (strcmp(argv[i], "--zlog-config") == 0) {
+            if (need_value(argc, argv, &i,
+                    &options->zlog_config_file) != 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--zlog-category") == 0) {
+            if (need_value(argc, argv, &i, &options->zlog_category) != 0) {
+                return -1;
+            }
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             return -1;
@@ -199,7 +223,9 @@ parse_args(int argc, char **argv, client_options_t *options)
     }
 
     if (options->direction == 0 || options->local_path == NULL
-        || options->remote_path == NULL)
+        || options->remote_path == NULL
+        || (options->zlog_category != NULL
+            && options->zlog_config_file == NULL))
     {
         return -1;
     }
@@ -245,13 +271,14 @@ static int
 configure_client(netins_udp_t *client, const client_options_t *options)
 {
     netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
+    netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
     netins_udp_interfaces_t interfaces = NETINS_UDP_INTERFACES_INITIALIZER;
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     uint32_t i;
 
     logger.callback = api_logger;
     logger.user_data = stderr;
-    logger.minimum_level = NETINS_UDP_LOG_DEBUG;
+    logger.minimum_level = options->log_level;
     if (netins_udp_set_opt(client, NETINS_UDP_OPT_LOGGER,
             &logger, sizeof(logger)) != 0
         || netins_udp_set_opt(client, NETINS_UDP_OPT_SCHEDULER,
@@ -261,6 +288,25 @@ configure_client(netins_udp_t *client, const client_options_t *options)
             sizeof(options->congestion_control)) != 0)
     {
         return -1;
+    }
+    if (options->zlog_config_file != NULL) {
+        zlog.enabled = 1;
+        zlog.minimum_level = options->log_level;
+        if (copy_option_string(zlog.config_file, sizeof(zlog.config_file),
+                options->zlog_config_file) != 0
+            || copy_option_string(zlog.category, sizeof(zlog.category),
+                options->zlog_category != NULL
+                    ? options->zlog_category
+                    : "xquic_mini_api_client") != 0)
+        {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (netins_udp_set_opt(client, NETINS_UDP_OPT_ZLOG,
+                &zlog, sizeof(zlog)) != 0)
+        {
+            return -1;
+        }
     }
     if (options->timeout_ms != 0
         && netins_udp_set_opt(client, NETINS_UDP_OPT_CONNECT_TIMEOUT_MS,
@@ -383,12 +429,16 @@ main(int argc, char **argv)
         printf("transfer iteration=%" PRIu32 "/%" PRIu32
                " direction=%s bytes=%" PRIu64
                " fragments=%" PRIu32 "/%" PRIu32
-               " elapsed_us=%" PRIu64 " throughput_mbps=%.3f\n",
+               " elapsed_us=%" PRIu64 " throughput_mbps=%.3f"
+               " metric=%s\n",
             iteration, options.repeat_count,
             options.direction == NETINS_UDP_TRANSFER_GET ? "GET" : "POST",
             result.total_bytes, result.completed_fragments,
             result.total_fragments, result.elapsed_us,
-            result.throughput_mbps);
+            result.throughput_mbps,
+            options.direction == NETINS_UDP_TRANSFER_GET
+                ? "first_body_to_last_body"
+                : "app_submit_not_remote_receive");
     }
     print_snapshot(client);
     exit_code = EXIT_SUCCESS;

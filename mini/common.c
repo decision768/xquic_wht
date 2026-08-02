@@ -2,6 +2,8 @@
 #include "common.h"
 #include "mini_backend.h"
 
+#include <errno.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -22,6 +24,111 @@ static _Thread_local xqc_mini_log_scope_t
     xqc_mini_log_scopes[XQC_MINI_LOG_SCOPE_MAX_DEPTH];
 static _Thread_local unsigned int xqc_mini_log_scope_depth;
 static _Thread_local unsigned int xqc_mini_log_scope_overflow;
+
+static pthread_mutex_t xqc_mini_zlog_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned int xqc_mini_zlog_references;
+static char xqc_mini_zlog_config_file[PATH_LEN];
+
+int
+xqc_mini_zlog_acquire(const char *config_file, const char *category,
+    zlog_category_t **out_category)
+{
+    if (config_file == NULL || config_file[0] == '\0'
+        || category == NULL || category[0] == '\0'
+        || out_category == NULL)
+    {
+        return EINVAL;
+    }
+    *out_category = NULL;
+
+    int lock_error = pthread_mutex_lock(&xqc_mini_zlog_lock);
+    if (lock_error != 0) {
+        return lock_error;
+    }
+
+    int result = 0;
+    int initialized_here = 0;
+    if (xqc_mini_zlog_references == 0) {
+        if (zlog_init(config_file) != 0) {
+            result = EIO;
+            goto done;
+        }
+        initialized_here = 1;
+        snprintf(xqc_mini_zlog_config_file,
+            sizeof(xqc_mini_zlog_config_file), "%s", config_file);
+    } else if (strcmp(xqc_mini_zlog_config_file, config_file) != 0) {
+        result = EBUSY;
+        goto done;
+    }
+
+    zlog_category_t *resolved = zlog_get_category(category);
+    if (resolved == NULL) {
+        if (initialized_here) {
+            zlog_fini();
+            xqc_mini_zlog_config_file[0] = '\0';
+        }
+        result = ENOENT;
+        goto done;
+    }
+
+    xqc_mini_zlog_references++;
+    *out_category = resolved;
+
+done:
+    (void)pthread_mutex_unlock(&xqc_mini_zlog_lock);
+    return result;
+}
+
+void
+xqc_mini_zlog_release(void)
+{
+    if (pthread_mutex_lock(&xqc_mini_zlog_lock) != 0) {
+        return;
+    }
+    if (xqc_mini_zlog_references > 0) {
+        xqc_mini_zlog_references--;
+        if (xqc_mini_zlog_references == 0) {
+            zlog_fini();
+            xqc_mini_zlog_config_file[0] = '\0';
+        }
+    }
+    (void)pthread_mutex_unlock(&xqc_mini_zlog_lock);
+}
+
+int
+xqc_mini_log_level_from_xqc(xqc_log_level_t level)
+{
+    switch (level) {
+    case XQC_LOG_DEBUG:
+        return 0;
+    case XQC_LOG_WARN:
+        return 2;
+    case XQC_LOG_ERROR:
+    case XQC_LOG_FATAL:
+        return 3;
+    case XQC_LOG_REPORT:
+    case XQC_LOG_STATS:
+    case XQC_LOG_INFO:
+    default:
+        return 1;
+    }
+}
+
+xqc_log_level_t
+xqc_mini_xqc_log_level_for_minimum(int minimum_level)
+{
+    switch (minimum_level) {
+    case 3:
+        return XQC_LOG_ERROR;
+    case 2:
+        return XQC_LOG_WARN;
+    case 1:
+        return XQC_LOG_INFO;
+    case 0:
+    default:
+        return XQC_LOG_DEBUG;
+    }
+}
 
 void
 xqc_mini_log_scope_enter(xqc_mini_logger_fn callback,

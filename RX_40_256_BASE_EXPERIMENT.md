@@ -1,4 +1,4 @@
-# RX 40/256 Dynamic Budget Experiment
+# RX Dynamic Budget Experiment
 
 This directory is based on the direct fair RX version of
 `xquic-1.8.3-v5.3.3-path-delivery-diag` at commit `c3f78344`.
@@ -6,7 +6,7 @@ This directory is based on the direct fair RX version of
 The current Mini API integration selects the client receive budget from
 XQUIC's transport-layer ACTIVE path count:
 
-- fewer than two transport ACTIVE paths: read at most 40 packets from each
+- fewer than two transport ACTIVE paths: read at most 256 packets from each
   local receive-ready path per round;
 - two or more transport ACTIVE paths: read at most 256 packets from each
   local receive-ready path per round;
@@ -15,7 +15,9 @@ XQUIC's transport-layer ACTIVE path count:
 - no packet-processing time budget and no extra RX rounds.
 
 The receive buffer has 256 slots per path, which is the maximum per-path
-budget. A dual-path round can therefore process at most 512 packets before
+budget. Single-path and dual-path budgets currently have the same value, but
+remain separate constants selected by transport ACTIVE path count. A
+dual-path round can therefore process at most 512 packets before
 `xqc_engine_finish_recv()`.
 
 The client prints `[diag_rx_budget]` when the transport ACTIVE count, local

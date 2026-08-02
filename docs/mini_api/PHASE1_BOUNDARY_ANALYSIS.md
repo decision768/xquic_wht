@@ -88,7 +88,7 @@ backend 入口。
 - POST 文件大小、路径和汇总状态
 - GET 输出 fd、异步写线程、队列、mutex/condition、进度和耗时
 - connection timeout 与 path retry event
-- RX 仲裁、延迟释放和40/256模式状态
+- RX 仲裁、延迟释放和单双路径独立预算模式状态（当前均为 256）
 
 `xqc_mini_cli_user_stream_t`：
 

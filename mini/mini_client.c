@@ -13,7 +13,7 @@
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
 #define CLIENT_RX_BATCH_CAPACITY       256
-#define CLIENT_RX_SINGLE_PATH_PACKETS  40
+#define CLIENT_RX_SINGLE_PATH_PACKETS  256
 #define CLIENT_RX_DUAL_PATH_PACKETS    256
 #define CLIENT_PATH_FAILOVER_PTO        3
 
@@ -677,6 +677,7 @@ xqc_mini_cli_notify_upload_finished(xqc_mini_cli_user_stream_t *user_stream)
 
     if (user_conn->upload_finished_streams >= user_conn->target_requests) {
         xqc_usec_t end_time = xqc_now();
+        user_conn->upload_end_time = end_time;
         double duration_ms = (user_conn->upload_start_time > 0)
             ? (end_time - user_conn->upload_start_time) / 1000.0
             : 0.0;
@@ -807,6 +808,12 @@ xqc_mini_cli_init_xquic_engine(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *arg
     if (ret < 0) {
         return XQC_ERROR;
     }
+    if (args->env_cfg.use_zlog
+        && args->env_cfg.zlog_level_filter_enabled)
+    {
+        egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
+            args->env_cfg.zlog_minimum_level);
+    }
 
     /* init ssl config */
     xqc_mini_cli_init_engine_ssl_config(&ssl_cfg, args);
@@ -882,6 +889,8 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     //定义了输出的日志相关内容
     strncpy(args->env_cfg.log_path, LOG_PATH, sizeof(args->env_cfg.log_path));
     args->env_cfg.use_zlog = 1;
+    args->env_cfg.zlog_minimum_level = 0;
+    args->env_cfg.zlog_level_filter_enabled = 0;
     strncpy(args->env_cfg.zlog_conf, "zlog.conf", sizeof(args->env_cfg.zlog_conf));
     strncpy(args->env_cfg.zlog_category, "xquic_mini_client", sizeof(args->env_cfg.zlog_category));
 
@@ -930,14 +939,14 @@ xqc_mini_cli_init_ctx(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *args)
     ctx->zlog_cat = NULL;
     ctx->log_fd = 0;
     if (ctx->args->env_cfg.use_zlog) {
-        if (zlog_init(ctx->args->env_cfg.zlog_conf) != 0) {
-            printf("[error] zlog_init failed: %s\n", ctx->args->env_cfg.zlog_conf);
-            return XQC_ERROR;
-        }
-        ctx->zlog_cat = zlog_get_category(ctx->args->env_cfg.zlog_category);
-        if (ctx->zlog_cat == NULL) {
-            printf("[error] zlog_get_category failed: %s\n", ctx->args->env_cfg.zlog_category);
-            zlog_fini();
+        int zlog_error = xqc_mini_zlog_acquire(
+            ctx->args->env_cfg.zlog_conf,
+            ctx->args->env_cfg.zlog_category, &ctx->zlog_cat);
+        if (zlog_error != 0) {
+            printf("[error] zlog acquire failed: config=%s category=%s"
+                   " code=%d\n",
+                ctx->args->env_cfg.zlog_conf,
+                ctx->args->env_cfg.zlog_category, zlog_error);
             return XQC_ERROR;
         }
     }
@@ -1146,7 +1155,7 @@ xqc_mini_cli_free_ctx(xqc_mini_cli_ctx_t *ctx)
     xqc_mini_cli_close_log_file(ctx);
 
     if (ctx->args && ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_fini();
+        xqc_mini_zlog_release();
         ctx->zlog_cat = NULL;
     }
     
@@ -3130,6 +3139,7 @@ xqc_mini_cli_prepare_transfer(xqc_mini_cli_user_conn_t *user_conn,
     user_conn->send_file_size = 0;
     user_conn->send_file_path[0] = '\0';
     user_conn->upload_start_time = 0;
+    user_conn->upload_end_time = 0;
     user_conn->upload_finished_streams = 0;
     user_conn->upload_total_bytes = 0;
     user_conn->download_path[0] = '\0';
@@ -3348,6 +3358,7 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
     user_conn->send_file_size = ctx->args->send_data_len;
     
     user_conn->upload_start_time = 0;
+    user_conn->upload_end_time = 0;
     user_conn->upload_finished_streams = 0;
     user_conn->upload_total_bytes = 0;
     user_conn->download_fd = -1;

@@ -100,6 +100,12 @@ typedef struct mini_backend_config_s {
     mini_backend_logger_fn logger;
     void *logger_user_data;
     int logger_minimum_level;
+
+    int has_zlog;
+    int zlog_enabled;
+    int zlog_minimum_level;
+    char zlog_config_file[MINI_BACKEND_FILE_PATH_LEN];
+    char zlog_category[64];
 } mini_backend_config_t;
 
 void mini_backend_config_init(mini_backend_config_t *config);

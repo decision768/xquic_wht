@@ -9,13 +9,9 @@ GET/POST 文件收发、状态查询、错误处理和连接关闭流程。
 #include <xquic/netins_udp.h>
 ```
 
-不要包含 `mini/*.h`，也不要直接操作 XQUIC engine、CID、HTTP/3 request、Libevent 或
-mini 私有上下文。
-
 ## 1. API 能做什么
 
 Mini API 是基于 QUIC/HTTP3 的阻塞式完整文件任务 API，不是 TCP socket 风格的字节流 API。
-当前没有公开 `send()`、`recv()`、`read()` 或 `write()` 接口：
 
 - `netins_udp_connect()` 建立客户端 QUIC/HTTP3 连接；
 - `netins_udp_transfer()` 在已连接客户端上执行一次完整 GET 或 POST；
@@ -36,8 +32,11 @@ GET/POST 的文件含义如下：
 - GET `/upload/1` 读取 `/root/test_xquic_server/upload/1`；
 - POST `/download/kkk.txt` 写入 `/root/test_xquic_server/download/kkk.txt`。
 
-`remote_path` 必须以 `/` 开头，不能只有 `/`。服务端拒绝空路径、`.`、`..`、反斜杠以及
-符号链接穿越；POST 会创建或截断目标文件，但其父目录必须已经存在。
+`remote_path` 表示 `root_path` 下的资源路径，但采用 URL path 写法，因此即使文件就在
+`root_path` 本目录下也必须以 `/` 开头。例如 `root_path=/root/test_xquic_server` 时，
+`/kkk.txt` 对应 `/root/test_xquic_server/kkk.txt`，不是操作系统根目录下的 `/kkk.txt`。
+`remote_path` 不能只有 `/`；服务端拒绝空路径、`.`、`..`、反斜杠以及符号链接穿越。
+POST 会创建或截断目标文件，但其父目录必须已经存在。
 
 ## 2. 生命周期总览
 
@@ -191,6 +190,7 @@ netins_udp_cleanup()
 netins_udp_interfaces_t interfaces = NETINS_UDP_INTERFACES_INITIALIZER;
 netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
 netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
+netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
 netins_udp_transfer_t task = NETINS_UDP_TRANSFER_INITIALIZER;
 netins_udp_transfer_result_t result =
     NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
@@ -202,12 +202,166 @@ netins_udp_close_reason_t reason = NETINS_UDP_CLOSE_REASON_INITIALIZER;
 
 不要对结构体只做局部赋值，也不要手工猜测 `struct_size`。
 
-### 5.1 `netins_udp_set_opt()` 选项
+所有结构体开头的 `struct_size` 和 `api_version` 均由初始化器填写；名称包含 `reserved` 的
+字段由 API 保留，调用方不要修改。配置/任务结构体由调用方填写业务字段，结果/状态结构体则
+只需初始化，具体内容由 API 回填。
+
+### 5.1 公开结构体字段与使用位置
+
+#### `netins_udp_interfaces_t`：客户端网卡配置（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `interface_count` | 设置为 1 或 2 | 本次连接期望使用的网卡数量 |
+| `names[i]` | 写入系统网卡名，例如 `rmnet_data0`、`usb0` | 第 `i` 张网卡；下标必须小于 `interface_count` |
+
+填写后，在客户端 `connect()` 前传给：
+
+```c
+netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
+    &interfaces, sizeof(interfaces));
+```
+
+#### `netins_udp_tls_config_t`：TLS 配置（输入）
+
+| 字段 | 使用角色 | 调用方如何填写 |
+|---|---|---|
+| `server_name` | CLIENT | TLS SNI/证书名称；当前可以填写服务器 IP 字符串 |
+| `certificate_file` | SERVER | 服务端证书文件路径，例如 `./server.crt` |
+| `private_key_file` | SERVER | 与证书匹配的私钥路径，例如 `./server.key` |
+
+客户端不使用 `certificate_file` 和 `private_key_file`；服务端必须在 `listen()` 前填写证书和
+私钥。填写后传给 `NETINS_UDP_OPT_TLS`。
+
+#### `netins_udp_logger_config_t`：API 日志回调（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `callback` | 日志回调函数，或 `NULL` | 同步接收 API/mini 运行日志；`NULL` 表示不接收 |
+| `user_data` | 任意调用方指针 | API 调用回调时原样传回，常用于传递文件句柄或对象上下文 |
+| `minimum_level` | `DEBUG/INFO/WARN/ERROR` | 只回调不低于该等级的日志 |
+
+通过 `NETINS_UDP_OPT_LOGGER` 设置。它是唯一允许在活动 handle 上替换的选项；回调执行期间
+不能重新调用当前 handle，`message` 只在本次回调期间有效。
+
+#### `netins_udp_zlog_config_t`：zlog 配置（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `enabled` | `0` 或 `1` | `0` 关闭，`1` 启用 zlog；初始化后默认为 0 |
+| `minimum_level` | `DEBUG/INFO/WARN/ERROR` | zlog 最低记录等级 |
+| `config_file` | zlog 配置文件路径 | 决定日志文件、格式和滚动策略 |
+| `category` | zlog category 名称 | 例如 `xquic_mini_api_client` |
+
+仅在需要 zlog 时填写，并在 `connect()` 或 `listen()` 前通过 `NETINS_UDP_OPT_ZLOG` 设置；
+不设置该选项不会初始化 zlog。
+
+#### `netins_udp_transfer_t`：单次文件任务（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `direction` | `NETINS_UDP_TRANSFER_GET` 或 `NETINS_UDP_TRANSFER_POST` | 下载或上传 |
+| `timeout_ms` | 毫秒数；0 表示无限等待 | 本次完整文件任务的超时 |
+| `local_path` | 客户端本地文件路径 | GET 的下载目标；POST 的上传源文件 |
+| `remote_path` | 以 `/` 开头的服务端资源路径 | GET 的服务端源文件；POST 的服务端目标文件 |
+
+它不传给 `set_opt()`，而是直接传给：
+
+```c
+netins_udp_transfer(client, &task, &result);
+```
+
+`local_path` 和 `remote_path` 指向的字符串必须保持有效，直到本次 `netins_udp_transfer()`
+返回。
+
+#### `netins_udp_transfer_result_t`：文件任务结果（输出）
+
+| 字段 | API 返回的含义 |
+|---|---|
+| `total_bytes` | 本次任务的文件总字节数 |
+| `total_fragments` | 计划传输的业务分片数 |
+| `completed_fragments` | 已完成的业务分片数；成功时应等于 `total_fragments` |
+| `elapsed_us` | 与原 Mini 一致的有效传输区间，单位微秒 |
+| `throughput_mbps` | 按 `total_bytes * 8 / elapsed_us` 得到的 Mbps |
+
+调用方只需在调用前使用初始化器，不要预填结果字段；`netins_udp_transfer()` 返回后读取。
+
+#### `netins_udp_serve_config_t`：accepted 连接的服务配置（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `root_path` | 服务端文件根目录 | 所有 `remote_path` 都限制在该目录内解析 |
+| `timeout_ms` | 毫秒数；0 表示无限等待 | `netins_udp_serve()` 的服务超时 |
+
+它不传给 `set_opt()`。在 `netins_udp_accept()` 返回 accepted handle 后使用：
+
+```c
+netins_udp_serve(connection, &serve);
+```
+
+`root_path` 指向的字符串必须保持有效，直到 `netins_udp_serve()` 返回。
+
+#### `netins_udp_path_statis_t`：单条路径统计（输出）
+
+| 字段 | API 返回的含义 |
+|---|---|
+| `path_id` / `path_index` | 传输层路径标识和数组下标 |
+| `path_state` | `INIT`、`VALIDATING`、`ACTIVE`、`CLOSING` 或 `CLOSED` |
+| `app_status` | `NONE`、`STANDBY`、`AVAILABLE` 或 `FROZEN` |
+| `interface_name` | 路径绑定的网卡名 |
+| `local_address` / `peer_address` | 路径本地地址和对端地址 |
+| `packets_sent` / `packets_received` | 该路径累计收发包数 |
+| `bytes_sent` / `bytes_received` | 该路径累计收发字节数 |
+| `reinjected_bytes_sent` / `reinjected_bytes_received` | 路径重注入字节统计 |
+| `effective_bytes_received` | 去除重复影响后的有效接收字节统计 |
+| `srtt_us` | 该路径平滑 RTT，单位微秒 |
+| `cwnd_bytes` / `bytes_inflight` | API v1 固定为 0；当前只能读取连接级 inflight |
+
+调用方初始化后，通过 `netins_udp_get_path_statis(handle, path_index, &path)` 获取；也可以从
+`snapshot.paths[i]` 读取。上述字段均由 API 填写，不要由调用方修改。
+
+#### `netins_udp_close_reason_t`：关闭原因（输出）
+
+| 字段 | API 返回的含义 |
+|---|---|
+| `source` | `NONE`、`LOCAL`、`PEER`、`TRANSPORT`、`TIMEOUT` 或 `INTERNAL` |
+| `system_error` | 系统调用错误码；无系统错误时为 0 |
+| `transport_error` | QUIC/传输层错误码；无此类错误时为 0 |
+| `message` | 可读错误说明 |
+
+通过 `netins_udp_get_close_reason(handle, &reason)` 获取；也包含在
+`snapshot.close_reason` 中。必须在 `netins_udp_close()` 释放 handle 前查询。
+
+#### `netins_udp_snapshot_t`：连接完整快照（输出）
+
+| 字段 | API 返回的含义 |
+|---|---|
+| `snapshot_time_us` | 生成快照的时间戳，单位微秒 |
+| `role` / `state` | handle 角色和当前生命周期状态 |
+| `handshake_finished` | QUIC/TLS 握手是否完成 |
+| `multipath_mode` / `multipath_state` | 是否启用多路径及当前多路径状态 |
+| `path_count` / `active_path_count` | 已知路径数和当前活动路径数 |
+| `packets_sent` / `packets_received` | 连接级累计收发包数 |
+| `packets_lost` / `spurious_packets_lost` | 连接级丢包及伪丢包统计 |
+| `srtt_us` / `min_rtt_us` | 连接级平滑 RTT 和最小 RTT，单位微秒 |
+| `bytes_inflight` | 连接级当前在途字节数 |
+| `total_app_bytes` | 连接级累计应用数据字节数 |
+| `standby_path_app_bytes` | 备用路径承载的应用数据字节数 |
+| `paths[]` | 每条路径的 `netins_udp_path_statis_t` |
+| `close_reason` | 当前记录的关闭原因 |
+
+调用方初始化后，通过 `netins_udp_get_snapshot(handle, &snapshot)` 获取。快照中的所有业务
+字段均由 API 填写；它是某个时刻的副本，后续状态变化不会自动更新旧快照。
+
+`NETINS_UDP_OPT_SCHEDULER`、`NETINS_UDP_OPT_CONGESTION_CONTROL`、各类 timeout 和 socket
+buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
+
+### 5.2 `netins_udp_set_opt()` 选项
 
 | option | `value` 类型 | 角色 | 默认/约束 |
 |---|---|---|---|
 | `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～2 个非空网卡名 |
-| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | `DEFAULT` 表示不覆盖 mini 默认值 |
+| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | 本说明使用 ADAPTIVE、MINRTT 或 RAP；服务端 Demo 默认 ADAPTIVE |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int`，值为 `netins_udp_congestion_control_t` | CLIENT/SERVER | default/CUBIC/BBR |
 | `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 必须设置证书和私钥 |
 | `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | CLIENT | 默认 10000 ms；不能为 0 |
@@ -216,6 +370,7 @@ netins_udp_close_reason_t reason = NETINS_UDP_CLOSE_REASON_INITIALIZER;
 | `NETINS_UDP_OPT_KERNEL_SNDBUF` | 正 `int` | CLIENT/SERVER | UDP socket 发送缓冲区 |
 | `NETINS_UDP_OPT_KERNEL_RCVBUF` | 正 `int` | CLIENT/SERVER | UDP socket 接收缓冲区 |
 | `NETINS_UDP_OPT_LOGGER` | `netins_udp_logger_config_t` | 所有 handle | 唯一可在活动 handle 上替换的选项 |
+| `NETINS_UDP_OPT_ZLOG` | `netins_udp_zlog_config_t` | CLIENT/SERVER | 默认关闭；必须在 connect/listen 前设置 |
 
 `value_len` 必须传实际对象大小，例如：
 
@@ -227,7 +382,7 @@ if (netins_udp_set_opt(client, NETINS_UDP_OPT_CONGESTION_CONTROL,
 }
 ```
 
-### 5.2 单路径和双路径
+### 5.3 单路径和双路径
 
 建议集成方总是显式设置接口，避免结果依赖设备默认路由：
 
@@ -254,19 +409,18 @@ netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
   不等于一定存在两条可用物理链路；
 - 应以 `snapshot.active_path_count` 或 `netins_udp_is_multipath()` 判断运行时实际结果。
 
-当前 RX 预算依据传输层活动路径数选择：少于 2 条活动路径使用单路径预算 40；达到 2 条
-活动路径使用双路径每路径预算 256。DEBUG 日志中的 `[diag_rx_budget]`、
-`[diag_path_map]` 和 `[diag_rx_path_state]` 可用于核对。
+### 5.4 调度器与拥塞控制
 
-### 5.3 调度器与拥塞控制
-
-调度器可选值：
+本说明使用以下调度器：
 
 ```text
-DEFAULT, MINRTT, BACKUP, BALANCED, RAP, ACT, BANDWIDTH,
-FASTPROBE, ADAPTIVE, FASTPROBE5, FASTPROBE10,
-FASTPROBE20, FASTONLY
+ADAPTIVE（默认）
+MINRTT
+RAP
 ```
+
+服务端 Demo 未传入 `--scheduler` 时使用 `adaptive`；如需指定，可传入
+`--scheduler minrtt` 或 `--scheduler rap`。
 
 拥塞控制可选值：
 
@@ -279,7 +433,7 @@ NETINS_UDP_CC_BBR
 GET 的大流量发送端是服务端，POST 的大流量发送端是客户端。因此测试调度器和拥塞控制时，
 要同时考虑数据发送端的配置，而不能只观察请求发起端。
 
-### 5.4 TLS
+### 5.5 TLS
 
 服务端在 `listen()` 前必须设置证书和私钥：
 
@@ -302,7 +456,7 @@ snprintf(tls.server_name, sizeof(tls.server_name), "%s", "124.70.219.194");
 netins_udp_set_opt(client, NETINS_UDP_OPT_TLS, &tls, sizeof(tls));
 ```
 
-### 5.5 日志
+### 5.6 日志
 
 ```c
 static void
@@ -325,6 +479,26 @@ netins_udp_set_opt(handle, NETINS_UDP_OPT_LOGGER, &logger, sizeof(logger));
 - 不能从回调中重入同一个 handle；
 - callback 为 `NULL` 时，API 驱动期间的 mini stdout 被抑制；
 - `DEBUG=0`、`INFO=1`、`WARN=2`、`ERROR=3`。
+
+内置 zlog 默认关闭，不调用 `NETINS_UDP_OPT_ZLOG` 时不会执行 `zlog_init()`，也不会创建
+zlog 日志文件。需要记录 XQUIC 引擎日志时，在 `connect()` 或 `listen()` 前显式配置：
+
+```c
+netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
+zlog.enabled = 1;
+zlog.minimum_level = NETINS_UDP_LOG_WARN; /* 只写 WARN/ERROR */
+snprintf(zlog.config_file, sizeof(zlog.config_file), "%s", "./zlog.conf");
+snprintf(zlog.category, sizeof(zlog.category), "%s",
+    "xquic_mini_api_client");
+
+netins_udp_set_opt(handle, NETINS_UDP_OPT_ZLOG, &zlog, sizeof(zlog));
+```
+
+zlog 的具体文件路径、滚动策略和格式由 `zlog.conf` 决定。API 使用进程级引用计数管理
+`zlog_init()/zlog_fini()`；同一进程中的多个活动 handle 可以使用同一个配置文件和不同
+category，但不能同时使用不同的 zlog 配置文件。日志回调与 zlog 可以同时使用：前者接收
+Mini API/mini 运行日志，后者接收 XQUIC 引擎日志和 qlog。demo 的 `--log-level` 会同时
+设置两者的数字阈值。
 
 ## 6. 客户端：创建连接和收发
 
@@ -408,8 +582,11 @@ run_get(client, "/upload/2", "./second.bin");
 
 不能在多个线程上同时对同一连接调用 transfer，也不能在一次 transfer 尚未返回时启动下一次。
 
-`result.elapsed_us` 从文件任务开始计到任务完成，不包含此前的 `connect()` 握手，也不包含之后
-的 `shutdown()` 和 `close()`；用于计算纯文件任务吞吐比 `/usr/bin/time` 更合适。
+`netins_udp_transfer()` 仍会阻塞到整个文件任务完成、失败或超时，但成功结果中的
+`result.elapsed_us` 使用与原 Mini 相同的测速边界：GET 从第一个响应体字节计到最后一个响应体
+字节，不包含异步落盘和 `fsync()`；POST 从第一次提交请求体计到所有请求体被 XQUIC 接受，
+属于应用提交速率，不表示服务端已经完整接收。该字段不包含此前的 `connect()` 握手，也不包含
+之后的 `shutdown()` 和 `close()`。
 `result.throughput_mbps` 的计算为：
 
 ```text
@@ -557,7 +734,7 @@ main(void)
         goto done;
     }
 
-    int scheduler = NETINS_UDP_SCHEDULER_BALANCED;
+    int scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     int cc = NETINS_UDP_CC_BBR;
     uint32_t connect_timeout_ms = 30000;
     if (netins_udp_set_opt(client, NETINS_UDP_OPT_SCHEDULER,
@@ -854,9 +1031,6 @@ API 内部事件循环使用阻塞 `EVLOOP_ONCE` 驱动，不再用固定 1 ms �
 - 0 字节文件合法；
 - 任务超时会关闭/终止连接，避免迟到 request 继续写文件。
 
-这里的“8/4”是应用层 HTTP/3 request 并发数，“40/256”是 UDP RX 每轮处理预算，两者不是
-同一个限制。
-
 ## 14. 编译和链接
 
 API 实现编入 `libxquic.so` 和 `libxquic-static.a`，不是单独的
@@ -913,8 +1087,11 @@ build/mini/netins_udp_mini_api_server
 | `--local` | `task.local_path` |
 | `--remote` | `task.remote_path` |
 | `--timeout-ms` | `task.timeout_ms`，demo 同时用于 connect |
+| `--log-level` | callback 与 zlog 的 `minimum_level`，0～3 |
+| `--zlog-config`/`--zlog-category` | `NETINS_UDP_OPT_ZLOG`；不传时 zlog 关闭 |
 | server `--cert`/`--key` | server `NETINS_UDP_OPT_TLS` |
 | server `--root` | `serve.root_path` |
+| server `--scheduler` | server `NETINS_UDP_OPT_SCHEDULER`；默认 adaptive |
 | server `--accept-timeout-ms` | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` |
 | server `--serve-timeout-ms` | `serve.timeout_ms` |
 
@@ -938,8 +1115,10 @@ build/mini/netins_udp_mini_api_server
 
 ### GET/POST 路径无效
 
-`remote_path` 必须类似 `/upload/1`，不能是相对路径、单独 `/`、含 `..` 或反斜杠的路径。
-POST 目标父目录必须在服务端 `root_path` 内预先存在。
+`remote_path` 必须采用类似 `/upload/1` 或 `/kkk.txt` 的 URL path 写法。开头的 `/` 表示
+从服务端 `root_path` 开始解析，不表示操作系统根目录；即使访问 `root_path` 本目录下的文件
+也必须保留这个 `/`。不能使用单独 `/`、含 `..` 或反斜杠的路径。POST 目标父目录必须在
+服务端 `root_path` 内预先存在。
 
 ### 配置了两个接口但 `is_multipath()` 返回 0
 

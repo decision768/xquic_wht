@@ -95,6 +95,8 @@ typedef struct xqc_mini_svr_env_config_s {
     char log_path[PATH_LEN];
     int use_zlog;
     int disable_file_logging;
+    int zlog_minimum_level;
+    int zlog_level_filter_enabled;
     char zlog_conf[PATH_LEN];
     char zlog_category[64];
 

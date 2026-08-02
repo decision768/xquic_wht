@@ -260,6 +260,8 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     /* init env config */
     strncpy(args->env_cfg.log_path, LOG_PATH, TLS_GROUPS_LEN - 1);
     args->env_cfg.use_zlog = 1;
+    args->env_cfg.zlog_minimum_level = 0;
+    args->env_cfg.zlog_level_filter_enabled = 0;
     strncpy(args->env_cfg.zlog_conf, "zlog.conf", sizeof(args->env_cfg.zlog_conf));
     strncpy(args->env_cfg.zlog_category, "xquic_mini_server", sizeof(args->env_cfg.zlog_category));
 
@@ -344,14 +346,14 @@ xqc_mini_svr_init_ctx(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *args)
     ctx->zlog_cat = NULL;
     ctx->log_fd = 0;
     if (ctx->args->env_cfg.use_zlog) {
-        if (zlog_init(ctx->args->env_cfg.zlog_conf) != 0) {
-            printf("[error] zlog_init failed: %s\n", ctx->args->env_cfg.zlog_conf);
-            return XQC_ERROR;
-        }
-        ctx->zlog_cat = zlog_get_category(ctx->args->env_cfg.zlog_category);
-        if (ctx->zlog_cat == NULL) {
-            printf("[error] zlog_get_category failed: %s\n", ctx->args->env_cfg.zlog_category);
-            zlog_fini();
+        int zlog_error = xqc_mini_zlog_acquire(
+            ctx->args->env_cfg.zlog_conf,
+            ctx->args->env_cfg.zlog_category, &ctx->zlog_cat);
+        if (zlog_error != 0) {
+            printf("[error] zlog acquire failed: config=%s category=%s"
+                   " code=%d\n",
+                ctx->args->env_cfg.zlog_conf,
+                ctx->args->env_cfg.zlog_category, zlog_error);
             return XQC_ERROR;
         }
     }
@@ -442,6 +444,12 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
     ret = xqc_engine_get_default_config(&egn_cfg, XQC_ENGINE_SERVER);
     if (ret < 0) {
         return XQC_ERROR;
+    }
+    if (args->env_cfg.use_zlog
+        && args->env_cfg.zlog_level_filter_enabled)
+    {
+        egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
+            args->env_cfg.zlog_minimum_level);
     }
 
     /* init ssl config */
@@ -909,7 +917,7 @@ xqc_mini_svr_free_ctx(xqc_mini_svr_ctx_t *ctx)
     xqc_mini_svr_close_keylog_file(ctx);
     xqc_mini_svr_close_log_file(ctx);
     if (ctx->args && ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_fini();
+        xqc_mini_zlog_release();
         ctx->zlog_cat = NULL;
     }
 

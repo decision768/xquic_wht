@@ -453,6 +453,47 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
             logger->minimum_level;
         break;
     }
+    case NETINS_UDP_OPT_ZLOG: {
+        if (value == NULL || value_len < sizeof(netins_udp_zlog_config_t)) {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid zlog option size");
+        }
+        const netins_udp_zlog_config_t *zlog = value;
+        if (zlog->struct_size < sizeof(*zlog)
+            || zlog->api_version != NETINS_UDP_API_VERSION
+            || (zlog->enabled != 0 && zlog->enabled != 1)
+            || zlog->minimum_level < NETINS_UDP_LOG_DEBUG
+            || zlog->minimum_level > NETINS_UDP_LOG_ERROR)
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid zlog option version, enabled flag, or level");
+        }
+        if (zlog->enabled
+            && (memchr(zlog->config_file, '\0',
+                    sizeof(zlog->config_file)) == NULL
+                || memchr(zlog->category, '\0',
+                    sizeof(zlog->category)) == NULL
+                || zlog->config_file[0] == '\0'
+                || zlog->category[0] == '\0'))
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "enabled zlog requires terminated config and category strings");
+        }
+        handle->backend_config.has_zlog = 1;
+        handle->backend_config.zlog_enabled = zlog->enabled;
+        handle->backend_config.zlog_minimum_level = zlog->minimum_level;
+        handle->backend_config.zlog_config_file[0] = '\0';
+        handle->backend_config.zlog_category[0] = '\0';
+        if (zlog->enabled) {
+            netins_udp_copy_string(handle->backend_config.zlog_config_file,
+                sizeof(handle->backend_config.zlog_config_file),
+                zlog->config_file);
+            netins_udp_copy_string(handle->backend_config.zlog_category,
+                sizeof(handle->backend_config.zlog_category),
+                zlog->category);
+        }
+        break;
+    }
     default:
         return netins_udp_set_error(handle, ENOPROTOOPT,
             "unsupported option");
@@ -685,10 +726,13 @@ netins_udp_transfer(netins_udp_t *client,
     }
     netins_udp_clear_error(client);
     netins_udp_log(client, NETINS_UDP_LOG_INFO,
-        "transfer complete: bytes=%llu fragments=%u elapsed_us=%llu",
+        "transfer complete: bytes=%llu fragments=%u elapsed_us=%llu metric=%s",
         (unsigned long long)result->total_bytes,
         result->completed_fragments,
-        (unsigned long long)result->elapsed_us);
+        (unsigned long long)result->elapsed_us,
+        task->direction == NETINS_UDP_TRANSFER_GET
+            ? "first_body_to_last_body"
+            : "app_submit_not_remote_receive");
     return 0;
 }
 

@@ -61,7 +61,7 @@ mini_backend_server_connection_release()
 
 本次没有复制或替换下列调用链：
 
-- 客户端 Libevent UDP RX 和 40/256 公平收包；
+- 客户端 Libevent UDP RX 和单双路径独立预算的公平收包（当前均为 256）；
 - 单个 XQUIC engine；
 - H3 request 回调；
 - 4 MiB 分片；

@@ -11,10 +11,14 @@ typedef struct server_options_s {
     const char *certificate_file;
     const char *private_key_file;
     const char *root_path;
+    const char *zlog_config_file;
+    const char *zlog_category;
     uint32_t accept_timeout_ms;
     uint32_t serve_timeout_ms;
     uint32_t max_connections;
     uint16_t port;
+    int scheduler;
+    int log_level;
 } server_options_t;
 
 static void
@@ -27,7 +31,13 @@ usage(const char *program)
         "  --port PORT             Listen port (default 8443)\n"
         "  --accept-timeout-ms MS  Per-accept timeout; 0 is infinite\n"
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
-        "  --max-connections N     Connections to serve (default 1)\n",
+        "  --max-connections N     Connections to serve (default 1)\n"
+        "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
+        "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
+        "                          fastprobe20|fastonly|adaptive (default adaptive)\n"
+        "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
+        "  --zlog-config FILE      Enable zlog with this config file\n"
+        "  --zlog-category NAME    zlog category (default xquic_mini_api_server)\n",
         program);
 }
 
@@ -44,6 +54,37 @@ parse_u32(const char *text, uint32_t maximum, uint32_t *out)
     }
     *out = (uint32_t)value;
     return 0;
+}
+
+static int
+parse_scheduler(const char *name, int *out)
+{
+    static const struct {
+        const char *name;
+        int value;
+    } schedulers[] = {
+        {"default", NETINS_UDP_SCHEDULER_DEFAULT},
+        {"minrtt", NETINS_UDP_SCHEDULER_MINRTT},
+        {"backup", NETINS_UDP_SCHEDULER_BACKUP},
+        {"balanced", NETINS_UDP_SCHEDULER_BALANCED},
+        {"rap", NETINS_UDP_SCHEDULER_RAP},
+        {"act", NETINS_UDP_SCHEDULER_ACT},
+        {"bandwidth", NETINS_UDP_SCHEDULER_BANDWIDTH},
+        {"fastprobe", NETINS_UDP_SCHEDULER_FASTPROBE},
+        {"fastprobe5", NETINS_UDP_SCHEDULER_FASTPROBE5},
+        {"fastprobe10", NETINS_UDP_SCHEDULER_FASTPROBE10},
+        {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
+        {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
+        {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
+    };
+
+    for (size_t i = 0; i < sizeof(schedulers) / sizeof(schedulers[0]); ++i) {
+        if (strcmp(name, schedulers[i].name) == 0) {
+            *out = schedulers[i].value;
+            return 0;
+        }
+    }
+    return -1;
 }
 
 static int
@@ -66,6 +107,8 @@ parse_args(int argc, char **argv, server_options_t *options)
     options->bind_address = "0.0.0.0";
     options->port = 8443;
     options->max_connections = 1;
+    options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
+    options->log_level = NETINS_UDP_LOG_DEBUG;
 
     for (i = 1; i < argc; ++i) {
         const char *value = NULL;
@@ -116,6 +159,29 @@ parse_args(int argc, char **argv, server_options_t *options)
             {
                 return -1;
             }
+        } else if (strcmp(argv[i], "--scheduler") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_scheduler(value, &options->scheduler) != 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--log-level") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, NETINS_UDP_LOG_ERROR, &number) != 0)
+            {
+                return -1;
+            }
+            options->log_level = (int)number;
+        } else if (strcmp(argv[i], "--zlog-config") == 0) {
+            if (need_value(argc, argv, &i,
+                    &options->zlog_config_file) != 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--zlog-category") == 0) {
+            if (need_value(argc, argv, &i, &options->zlog_category) != 0) {
+                return -1;
+            }
         } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             return -1;
@@ -124,7 +190,9 @@ parse_args(int argc, char **argv, server_options_t *options)
 
     return options->certificate_file != NULL
         && options->private_key_file != NULL
-        && options->root_path != NULL ? 0 : -1;
+        && options->root_path != NULL
+        && (options->zlog_category == NULL
+            || options->zlog_config_file != NULL) ? 0 : -1;
 }
 
 static void
@@ -161,11 +229,12 @@ static int
 configure_server(netins_udp_t *server, const server_options_t *options)
 {
     netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
+    netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
 
     logger.callback = api_logger;
     logger.user_data = stderr;
-    logger.minimum_level = NETINS_UDP_LOG_DEBUG;
+    logger.minimum_level = options->log_level;
     if (copy_option_string(tls.certificate_file,
             sizeof(tls.certificate_file), options->certificate_file) != 0
         || copy_option_string(tls.private_key_file,
@@ -177,6 +246,8 @@ configure_server(netins_udp_t *server, const server_options_t *options)
 
     if (netins_udp_set_opt(server, NETINS_UDP_OPT_LOGGER,
             &logger, sizeof(logger)) != 0
+        || netins_udp_set_opt(server, NETINS_UDP_OPT_SCHEDULER,
+            &options->scheduler, sizeof(options->scheduler)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_TLS,
             &tls, sizeof(tls)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS,
@@ -184,6 +255,25 @@ configure_server(netins_udp_t *server, const server_options_t *options)
             sizeof(options->accept_timeout_ms)) != 0)
     {
         return -1;
+    }
+    if (options->zlog_config_file != NULL) {
+        zlog.enabled = 1;
+        zlog.minimum_level = options->log_level;
+        if (copy_option_string(zlog.config_file, sizeof(zlog.config_file),
+                options->zlog_config_file) != 0
+            || copy_option_string(zlog.category, sizeof(zlog.category),
+                options->zlog_category != NULL
+                    ? options->zlog_category
+                    : "xquic_mini_api_server") != 0)
+        {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (netins_udp_set_opt(server, NETINS_UDP_OPT_ZLOG,
+                &zlog, sizeof(zlog)) != 0)
+        {
+            return -1;
+        }
     }
     return 0;
 }

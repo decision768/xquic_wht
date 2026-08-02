@@ -45,14 +45,21 @@ xqc_mini_cli_write_zlog(xqc_mini_cli_ctx_t *ctx, xqc_log_level_t lvl, const void
         return;
     }
 
-    switch (lvl) {
-    case XQC_LOG_DEBUG:
+    int api_level = xqc_mini_log_level_from_xqc(lvl);
+    if (ctx->args->env_cfg.zlog_level_filter_enabled
+        && api_level < ctx->args->env_cfg.zlog_minimum_level)
+    {
+        return;
+    }
+
+    switch (api_level) {
+    case 0:
         zlog_debug(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
-    case XQC_LOG_WARN:
+    case 2:
         zlog_warn(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
-    case XQC_LOG_ERROR:
+    case 3:
         zlog_error(ctx->zlog_cat, "%.*s", (int)size, (const char *)buf);
         break;
     default:
@@ -109,7 +116,12 @@ xqc_mini_cli_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_
 {
     xqc_mini_cli_ctx_t *ctx = (xqc_mini_cli_ctx_t*)engine_user_data;
     if (ctx->args->env_cfg.use_zlog && ctx->zlog_cat != NULL) {
-        zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size, (const char *)buf);
+        if (!ctx->args->env_cfg.zlog_level_filter_enabled
+            || ctx->args->env_cfg.zlog_minimum_level <= 1)
+        {
+            zlog_info(ctx->zlog_cat, "[qlog] %.*s", (int)size,
+                (const char *)buf);
+        }
         return;
     }
 

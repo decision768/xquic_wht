@@ -23,6 +23,7 @@ extern "C" {
 #define NETINS_UDP_ADDRESS_LEN 128U
 #define NETINS_UDP_FILE_PATH_LEN 1024U
 #define NETINS_UDP_SERVER_NAME_LEN 256U
+#define NETINS_UDP_ZLOG_CATEGORY_LEN 64U
 #define NETINS_UDP_ERROR_MSG_LEN 256U
 #define NETINS_UDP_REMOTE_PATH_LEN 1024U
 
@@ -116,7 +117,8 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_CLOSE_TIMEOUT_MS = 7,
     NETINS_UDP_OPT_KERNEL_SNDBUF = 8,
     NETINS_UDP_OPT_KERNEL_RCVBUF = 9,
-    NETINS_UDP_OPT_LOGGER = 10
+    NETINS_UDP_OPT_LOGGER = 10,
+    NETINS_UDP_OPT_ZLOG = 11
 } netins_udp_opt_t;
 
 typedef enum netins_udp_transfer_direction_e {
@@ -169,6 +171,7 @@ typedef struct netins_udp_transfer_result_s {
     uint64_t total_bytes;
     uint32_t total_fragments;
     uint32_t completed_fragments;
+    /* Mini-compatible transfer interval; see netins_udp_transfer(). */
     uint64_t elapsed_us;
     double throughput_mbps;
     uint64_t reserved[4];
@@ -209,6 +212,25 @@ typedef struct netins_udp_logger_config_s {
 #define NETINS_UDP_LOGGER_CONFIG_INITIALIZER \
     { sizeof(netins_udp_logger_config_t), NETINS_UDP_API_VERSION, \
       NULL, NULL, NETINS_UDP_LOG_DEBUG, 0, {0} }
+
+typedef struct netins_udp_zlog_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    /*
+     * Zlog is disabled unless enabled is nonzero. When enabled, configure
+     * this option before connect() or listen(). The numeric levels match
+     * netins_udp_log_level_t.
+     */
+    int enabled;
+    int minimum_level;
+    char config_file[NETINS_UDP_FILE_PATH_LEN];
+    char category[NETINS_UDP_ZLOG_CATEGORY_LEN];
+    uint64_t reserved[4];
+} netins_udp_zlog_config_t;
+
+#define NETINS_UDP_ZLOG_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_zlog_config_t), NETINS_UDP_API_VERSION, \
+      0, NETINS_UDP_LOG_DEBUG, {0}, {0}, {0} }
 
 typedef struct netins_udp_path_statis_s {
     uint32_t struct_size;

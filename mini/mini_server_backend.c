@@ -83,6 +83,21 @@ mini_backend_server_apply_config(xqc_mini_svr_args_t *args,
         args->env_cfg.use_zlog = 0;
         args->env_cfg.disable_file_logging = 1;
     }
+    if (config->has_zlog) {
+        args->env_cfg.use_zlog = config->zlog_enabled;
+        args->env_cfg.zlog_minimum_level = config->zlog_minimum_level;
+        args->env_cfg.zlog_level_filter_enabled = 1;
+        if (config->zlog_enabled) {
+            strncpy(args->env_cfg.zlog_conf, config->zlog_config_file,
+                sizeof(args->env_cfg.zlog_conf) - 1);
+            args->env_cfg.zlog_conf[sizeof(args->env_cfg.zlog_conf) - 1] =
+                '\0';
+            strncpy(args->env_cfg.zlog_category, config->zlog_category,
+                sizeof(args->env_cfg.zlog_category) - 1);
+            args->env_cfg.zlog_category[
+                sizeof(args->env_cfg.zlog_category) - 1] = '\0';
+        }
+    }
     if (config->has_scheduler) {
         strncpy(args->quic_cfg.mp_sched, config->scheduler,
             sizeof(args->quic_cfg.mp_sched) - 1);
