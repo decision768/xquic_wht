@@ -437,7 +437,33 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 
 进行不同版本或不同网络环境的对比测试时，必须保持调度算法和拥塞控制配置一致，并在测试记录中写明实际参数。
 
-服务端方面，当前自动化脚本不传递服务端 `--scheduler`，所以始终使用当前服务端 Demo 的默认 `adaptive`。不要把 Python 的 `--scheduler minrtt` 理解为客户端和服务端同时改成 `minrtt`。如果后续需要在同一套自动化测试中独立切换服务端调度算法，应为 Python 增加独立的 `--server-scheduler` 参数，不建议把客户端和服务端共用一个参数。
+服务端方面，当前自动化脚本不传递服务端 `--scheduler`，所以始终使用当前服务端 Demo 的默认 `adaptive`。不要把 Python 的 `--scheduler minrtt` 理解为客户端和服务端同时改成 `minrtt`。
+
+如果需要测试不同的服务端调度算法，必须修改测试代码中启动服务端 Demo 的命令。打开
+`tests/mini_api_benchmark/mini_api_benchmark.py`，在 `start_server_quiet()` 生成的服务端命令中加入服务端 Demo 参数。例如测试服务端 `minrtt` 时，在 `--max-connections` 后加入：
+
+```python
+f"--max-connections {int(max_connections)} "
+"--scheduler minrtt "
+"> /dev/null 2>&1 < /dev/null & "
+```
+
+对应的实际服务端 Demo 启动命令应包含：
+
+```sh
+./netins_udp_mini_api_server \
+  --bind 0.0.0.0 \
+  --port 18446 \
+  --cert "$PWD/server.crt" \
+  --key "$PWD/server.key" \
+  --root "$PWD" \
+  --accept-timeout-ms 0 \
+  --serve-timeout-ms 600000 \
+  --max-connections 3 \
+  --scheduler minrtt
+```
+
+测试其他服务端调度算法时，替换上述 `minrtt`。如果不加入服务端 `--scheduler`，服务端继续使用默认 `adaptive`。这里的服务端参数名是 `--scheduler`，不是 Python 当前用于客户端的同名参数；当前脚本也没有 `--server-scheduler` 命令行参数。
 
 ### 6.7 API服务端不在默认位置
 
