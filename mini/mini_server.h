@@ -16,7 +16,7 @@
 #include <zlog.h>
 
 #include "common.h"
-#include "../tests/platform.h"
+#include "platform.h"
 #include "mini_server_cb.h"
 #define SERVER_DEFAULT_FILE "server_data.bin"
 #define DEFAULT_IP   "10.12.54.143"

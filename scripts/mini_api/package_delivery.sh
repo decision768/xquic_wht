@@ -31,7 +31,7 @@ bin/netins_udp_mini_api_server
 README.md
 NETINS_UDP_API_使用说明.md
 NETINS_UDP_编译指南.md
-RELEASE_NOTES.md
+MINI_API_测试使用说明.md
 VERSION
 "
 

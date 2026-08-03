@@ -34,7 +34,7 @@
 #endif
 
 
-#include "../tests/platform.h"
+#include "platform.h"
 #include "common.h"
 #include "mini_client_cb.h"
 

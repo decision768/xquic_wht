@@ -1,177 +1,73 @@
-# XQUIC
-<img src="docs/images/xquic_logo.png" alt="xquic logo" width=585.9 height=309.1/>
+# NetIns UDP Mini API
 
-![GitHub](https://img.shields.io/github/license/alibaba/xquic)
-[![Build](https://github.com/alibaba/xquic/actions/workflows/build.yml/badge.svg)](https://github.com/alibaba/xquic/actions/workflows/build.yml)
-[![CodeQL](https://github.com/alibaba/xquic/actions/workflows/codeql-analysis.yml/badge.svg)](https://github.com/alibaba/xquic/actions/workflows/codeql-analysis.yml)
-[![Codacy Badge](https://app.codacy.com/project/badge/Grade/485e758edd98409bb7a51cbb803838c4)](https://www.codacy.com/gh/alibaba/xquic/dashboard?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=alibaba/xquic&amp;utm_campaign=Badge_Grade)
-[![Codacy Badge](https://app.codacy.com/project/badge/Coverage/485e758edd98409bb7a51cbb803838c4)](https://www.codacy.com/gh/alibaba/xquic/dashboard?utm_source=github.com&utm_medium=referral&utm_content=alibaba/xquic&utm_campaign=Badge_Coverage)
-![Platforms](https://img.shields.io/badge/platform-Android%20%7C%20iOS%20%7C%20Linux%20%7C%20macOS-blue)
+本仓库是 NetIns UDP Mini API 的源码交付版本，基于已验证的 XQUIC Mini 数据面，提供客户端和服务端文件传输 API、AARCH64 客户端 Demo、Linux x86_64 服务端 Demo，以及自动化验收脚本。
 
-> [简体中文文档 README-zh-CN](https://github.com/alibaba/xquic/blob/main/docs/docs-zh/README-zh.md)
+## 交付内容
 
-## Introduction
-
-XQUIC Library released by Alibaba is …
-
-… **a client and server implementation of QUIC and HTTP/3 as specified by the IETF.** Currently supported QUIC versions are v1 and draft-29.
-
-… **OS and platform agnostic.** It currently supports Android, iOS, HarmonyOS, Linux, macOS and Windows(v1.2.0). Most of the code is used in our own products, and has been tested at scale on android, iOS apps, as well as servers.
-
-… **still in active development.** [Interoperability](https://interop.seemann.io/) is regularly tested with other QUIC implementations.
-
-### Features
-
-[![](https://img.shields.io/static/v1?label=RFC&message=9000&color=brightgreen)](https://tools.ietf.org/html/rfc9000)
-[![](https://img.shields.io/static/v1?label=RFC&message=9001&color=brightgreen)](https://tools.ietf.org/html/rfc9001)
-[![](https://img.shields.io/static/v1?label=RFC&message=9002&color=brightgreen)](https://tools.ietf.org/html/rfc9002)
-[![](https://img.shields.io/static/v1?label=RFC&message=9114&color=brightgreen)](https://tools.ietf.org/html/rfc9114)
-[![](https://img.shields.io/static/v1?label=RFC&message=9204&color=brightgreen)](https://tools.ietf.org/html/rfc9204)
-[![](https://img.shields.io/static/v1?label=RFC&message=9221&color=brightgreen)](https://datatracker.ietf.org/doc/html/rfc9221)
-
-
-[![](https://img.shields.io/static/v1?label=draft-13&message=QUIC-LB&color=9cf)](https://tools.ietf.org/html/draft-ietf-quic-load-balancers-13)
-[![](https://img.shields.io/static/v1?label=draft-05&message=Multipath-QUIC&color=9cf)](https://tools.ietf.org/html/draft-ietf-quic-multipath-05)
-[![](https://img.shields.io/static/v1?label=draft-06&message=Multipath-QUIC&color=9cf)](https://tools.ietf.org/html/draft-ietf-quic-multipath-06)
-[![](https://img.shields.io/static/v1?label=draft-07&message=QUIC-Qlog&color=9cf)](https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-07)
-
-#### Standardized Features
-
-* All big features conforming with [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000), [RFC9001](https://www.rfc-editor.org/rfc/rfc9001), [RFC9002](https://www.rfc-editor.org/rfc/rfc9002), [RFC9114](https://www.rfc-editor.org/rfc/rfc9114) and [RFC9204](https://www.rfc-editor.org/rfc/rfc9204), including the interface between QUIC and TLS, 0-RTT connection establishment, HTTP/3 and QPACK.
-* ALPN Extension conforming with [RFC7301](https://www.rfc-editor.org/rfc/rfc7301)
-
-#### Not Yet Standardized Features
-
-* [Multipath QUIC](https://tools.ietf.org/html/draft-ietf-quic-multipath-04)
-* [QUIC-LB](https://tools.ietf.org/html/draft-ietf-quic-load-balancers-13)
-
-#### Library Features
-
-* Pluggable congestion control: NewReno, Cubic, BBR and BBRv2, ...
-* Pluggable cryptography, integration with BoringSSL and BabaSSL
-* Cross-platform implementation, support Android, iOS, HarmonyOS, Linux, macOS and Windows(v1.2.0)
-
-## Requirements
-
-To build XQUIC, you need 
-* CMake
-* BoringSSL or BabaSSL
-
-To run test cases, you need
-* libevent
-* CUnit
-
-## QuickStart Guide
-
-XQUIC can be built with BabaSSL(Tongsuo) or BoringSSL.
-
-### Build with BoringSSL
-
-```bash
-sudo apt-get install -y build-essential libevent-dev
-
-# get XQUIC source code
-git clone https://github.com/alibaba/xquic.git; cd xquic
-
-# get and build BoringSSL
-git clone https://github.com/google/boringssl.git ./third_party/boringssl; cd ./third_party/boringssl
-mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
-make -j ssl crypto
-cd ..
-SSL_TYPE_STR="boringssl"
-SSL_PATH_STR="${PWD}"
-cd ../..
-
-# build XQUIC with BoringSSL
-# When build XQUIC with boringssl, by default XQUIC will use boringssl
-# in third_party. If boringssl is deployed in other directories, SSL_PATH could be 
-# used to specify the search path of boringssl
-git submodule update --init --recursive
-mkdir -p build; cd build
-cmake -DGCOV=on -DCMAKE_BUILD_TYPE=Debug -DXQC_ENABLE_TESTING=1 -DXQC_SUPPORT_SENDMMSG_BUILD=1 -DXQC_ENABLE_EVENT_LOG=1 -DXQC_ENABLE_BBR2=1 -DXQC_ENABLE_RENO=1 -DSSL_TYPE=${SSL_TYPE_STR} -DSSL_PATH=${SSL_PATH_STR} ..
-
-# exit if cmake error
-if [ $? -ne 0 ]; then
-    echo "cmake failed"
-    exit 1
-fi
-
-make -j
+```text
+cmake/                         CMake 安装规则和 AARCH64 工具链
+demo/                          Mini API 客户端、服务端 Demo
+include/xquic/netins_udp.h     第三方公开 C API
+mini/                          Mini 客户端、服务端 backend
+src/                           XQUIC 和 Mini API 实现
+scripts/                       ABI 检查、安装包生成和导出符号表
+tests/mini_api_benchmark/      GET/POST 自动化压测及资源监控
 ```
 
-### Build with BabaSSL(Tongsuo)
+第三方应用只需包含：
 
-```bash
-sudo apt-get install -y build-essential libevent-dev
-
-# get XQUIC source code
-git clone https://github.com/alibaba/xquic.git; cd xquic
-
-# get and build BabaSSL(Tongsuo)
-git clone -b 8.3-stable https://github.com/Tongsuo-Project/Tongsuo.git ./third_party/babassl; cd ./third_party/babassl/
-./config --prefix=/usr/local/babassl
-make -j
-SSL_TYPE_STR="babassl"
-SSL_PATH_STR="${PWD}"
-cd -
-
-# build XQUIC with BabaSSL
-# When build XQUIC with babassl, /usr/local/babassl directory will be searched
-# as default. If babassl is deployed in other directories, SSL_PATH could be 
-# used to specify the search path of babassl
-git submodule update --init --recursive
-mkdir -p build; cd build
-cmake -DGCOV=on -DCMAKE_BUILD_TYPE=Debug -DXQC_ENABLE_TESTING=1 -DXQC_SUPPORT_SENDMMSG_BUILD=1 -DXQC_ENABLE_EVENT_LOG=1 -DXQC_ENABLE_BBR2=1 -DXQC_ENABLE_RENO=1 -DSSL_TYPE=${SSL_TYPE_STR} -DSSL_PATH=${SSL_PATH_STR} ..
-
-# exit if cmake error
-if [ $? -ne 0 ]; then
-    echo "cmake failed"
-    exit 1
-fi
-
-make -j
+```c
+#include <xquic/netins_udp.h>
 ```
 
-### Run testcases
+第三方不应直接包含 `mini/` 或 `src/` 中的内部头文件。
 
-```bash
-sh ../scripts/xquic_test.sh
+## 文档入口
+
+- `NETINS_UDP_API_使用说明.md`：公开结构体、配置项、生命周期、GET/POST 和完整示例；
+- `NETINS_UDP_编译指南.md`：AARCH64 客户端和 Linux x86_64 服务端编译、安装及打包；
+- `MINI_API_测试使用说明.md`：自动化压测环境、参数、文件完整性和资源监控。
+
+## 构建依赖
+
+源码构建需要目标架构对应的：
+
+- Tongsuo/BabaSSL；
+- Libevent 及 `libevent_pthreads`；
+- zlog；
+- AARCH64 构建还需要 SIM8810 SDK 和交叉编译工具链。
+
+依赖库、证书、私钥、测试大文件及本地构建目录不包含在源码仓库中。具体 CMake 参数以 `NETINS_UDP_编译指南.md` 为准。
+
+## 主要产物
+
+启用 `XQC_ENABLE_MINI_API=ON` 后生成：
+
+```text
+libxquic-static.a
+libxquic.so
+mini/netins_udp_mini_api_client
+mini/netins_udp_mini_api_server
 ```
 
-## Documentation
+可使用以下命令安装公开头文件、库、Demo 和交付文档：
 
-* For using the API, see the [API docs](./docs/API.md).
-* For platform support details, see the [Platforms docs](./docs/Platforms.md).
-* For Chinese Simplified (zh-CN) translation of the IETF QUIC Protocol, see the Translation docs.
-    - [RFC8999-invariants-zh](./docs/translation/rfc8999-invariants-zh.md)
-    - [RFC9000-transport-zh](./docs/translation/rfc9000-transport-zh.md)
-    - [RFC9001-tls-zh](./docs/translation/rfc9001-tls-zh.md)
-    - [RFC9002-recovery-zh](./docs/translation/rfc9002-recovery-zh.md)
-    - [draft-ietf-quic-http-34-zh](./docs/translation/draft-ietf-quic-http-34-zh.md)
-    - [draft-ietf-quic-qpack-21-zh](./docs/translation/draft-ietf-quic-qpack-21-zh.md)
-    - [RFC9221-datagram-zh](./docs/translation/rfc9221-datagram-zh.md)
+```bash
+cmake --install BUILD_DIR --prefix INSTALL_DIR --component mini_api
+```
 
-* For using quic-qlog, see the [Features: qlog](./docs/Features.md)
-* For testing the library, see the [Testing docs](./docs/docs-zh/Testing-zh.md).
-* For other frequently asked questions, see the [FAQs](./docs/docs-zh/FAQ-zh.md) and [Trouble Shooting Guide](./docs/docs-zh/Troubleshooting-zh.md).
+正式打包：
 
-## Contributing
+```bash
+sh scripts/mini_api/package_delivery.sh BUILD_DIR OUTPUT_DIR
+```
 
-We would love for you to contribute to XQUIC and help make it even better than it is today! All types of contributions are encouraged and valued. Thanks to [all contributors](https://github.com/alibaba/xquic/blob/main/CONTRIBUTING.md#all-contributors). See our [Contributing Guidelines](./CONTRIBUTING.md) for more information.
+## 默认兼容行为
 
-If you have any questions, please feel free to open a new Discussion topic in our [discussion forums](https://github.com/alibaba/xquic/discussions).
+- Demo 未传 zlog 配置时不启用 zlog；
+- 服务端 Demo 默认使用 `adaptive` 调度器；
+- GET 默认并发为 8，POST 默认并发为 4；
+- 单路径和双路径 RX 预算使用独立配置分支；
+- 未传新增日志和调度参数时，既有压测命令及速率汇总格式保持不变。
 
-## License
-
-XQUIC is released under the Apache 2.0 License.
-
-## Contact Us
-
-Feel free to contact us in the following ways:
-
-* e-mail: xquic@alibaba-inc.com
-* Dingtalk group: 34059705
-* slack channel: #xquic in quicdev group
-
-  <img src="docs/images/dingtalk_group.JPG" width=200 alt="dingtalk group"/>
+项目版本见 `VERSION`。

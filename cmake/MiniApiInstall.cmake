@@ -33,15 +33,10 @@ if(XQC_ENABLE_MINI_API)
     endforeach()
 
     install(FILES
-        "${CMAKE_CURRENT_SOURCE_DIR}/docs/mini_api/README.md"
-        DESTINATION "."
-        RENAME "README.md"
-        COMPONENT mini_api)
-    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/NETINS_UDP_API_使用说明.md"
-        "${CMAKE_CURRENT_SOURCE_DIR}/NETINS_UDP_API_详细使用说明.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/NETINS_UDP_编译指南.md"
-        "${CMAKE_CURRENT_SOURCE_DIR}/RELEASE_NOTES.md"
+        "${CMAKE_CURRENT_SOURCE_DIR}/MINI_API_测试使用说明.md"
         "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
         DESTINATION "."
         COMPONENT mini_api)
