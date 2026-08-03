@@ -15,6 +15,7 @@
 #define CLIENT_RX_BATCH_CAPACITY       256
 #define CLIENT_RX_SINGLE_PATH_PACKETS  256
 #define CLIENT_RX_DUAL_PATH_PACKETS    256
+#define CLIENT_RX_MULTI_PATH_PACKETS   256
 #define CLIENT_PATH_FAILOVER_PTO        3
 
 struct xqc_mini_cli_rx_batch_s {
@@ -460,6 +461,15 @@ xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         xqc_mini_cli_rx_path_diag_t *path_diag = &path->rx_diag;
+        if (!path->prepared && !path->is_active
+            && path->interface_name[0] == '\0'
+            && path_diag->event_count == 0
+            && path_diag->batch_call_count == 0
+            && path_diag->packet_count == 0
+            && path_diag->process_error_count == 0)
+        {
+            continue;
+        }
         printf("[diag_rx_path][%s] idx=%d id=%" PRIu64 " interface=%s"
                " events=%" PRIu64 " batch_calls=%" PRIu64
                " eagain=%" PRIu64 " packets=%" PRIu64 " bytes=%" PRIu64
@@ -573,7 +583,8 @@ xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     xqc_usec_t now = xqc_now();
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
+    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
+    for (int i = 0; i < target_paths; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         if (!path->disabled_for_session || path->interface_name[0] == '\0') {
             continue;
@@ -1609,7 +1620,7 @@ xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
     int configured = user_conn->ctx->args->net_cfg.multi_interface_cnt;
     if (configured <= 0) {
-        return MAX_PATH_CNT;
+        return XQC_MINI_DEFAULT_PATH_CNT;
     }
 
     if (configured > MAX_PATH_CNT) {
@@ -1674,7 +1685,8 @@ xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn)
 static xqc_mini_cli_user_path_t *
 xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn)
 {
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
+    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
+    for (int i = 0; i < target_paths; i++) {
         if (!user_conn->paths[i].is_active
             && !user_conn->paths[i].disabled_for_session
             && !user_conn->paths[i].rx_release_pending) {
@@ -2204,15 +2216,23 @@ xqc_mini_cli_recv_path_batch(xqc_mini_cli_user_path_t *path, int packet_limit)
 }
 
 static int
+xqc_mini_cli_path_rx_ready(const xqc_mini_cli_user_path_t *path)
+{
+    return path != NULL && path->user_conn != NULL
+        && path->is_active && path->fd >= 0
+        && path->rx_batch != NULL && path->local_addr != NULL
+        && path->peer_addr != NULL;
+}
+
+static int
 xqc_mini_cli_count_rx_ready_paths(xqc_mini_cli_user_conn_t *user_conn)
 {
     int ready_paths = 0;
+    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
 
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
+    for (int i = 0; i < target_paths; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
-        if (path->is_active && path->fd >= 0 && path->rx_batch != NULL
-            && path->local_addr != NULL && path->peer_addr != NULL)
-        {
+        if (xqc_mini_cli_path_rx_ready(path)) {
             ready_paths++;
         }
     }
@@ -2256,10 +2276,19 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     int transport_paths =
         xqc_mini_cli_count_transport_available_paths(user_conn);
     int io_ready_paths = xqc_mini_cli_count_rx_ready_paths(user_conn);
-    int budget_paths = transport_paths >= 2 ? 2 : 1;
-    int packets_per_path = budget_paths >= 2
-        ? CLIENT_RX_DUAL_PATH_PACKETS
-        : CLIENT_RX_SINGLE_PATH_PACKETS;
+    int budget_paths = transport_paths;
+    if (budget_paths < 1) {
+        budget_paths = 1;
+    } else if (budget_paths > MAX_PATH_CNT) {
+        budget_paths = MAX_PATH_CNT;
+    }
+    int packets_per_path = budget_paths == 1
+        ? CLIENT_RX_SINGLE_PATH_PACKETS
+        : (budget_paths == 2
+            ? CLIENT_RX_DUAL_PATH_PACKETS
+            : CLIENT_RX_MULTI_PATH_PACKETS);
+    const char *budget_mode = budget_paths == 1
+        ? "single" : (budget_paths == 2 ? "dual" : "multi");
 
     if (user_conn->rx_last_budget_active_paths != transport_paths
         || user_conn->rx_last_budget_io_ready_paths != io_ready_paths
@@ -2270,7 +2299,7 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
                " io_ready_paths=%d source=transport_active\n",
                transport_paths, packets_per_path,
                io_ready_paths * packets_per_path,
-               budget_paths >= 2 ? "dual" : "single",
+               budget_mode,
                budget_paths, io_ready_paths);
         user_conn->rx_last_budget_active_paths = transport_paths;
         user_conn->rx_last_budget_io_ready_paths = io_ready_paths;
@@ -2278,17 +2307,28 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     int round_packets = 0;
-    int start_index = user_conn->rx_next_path_index % MAX_PATH_CNT;
-    for (int offset = 0; offset < MAX_PATH_CNT; offset++) {
-        int path_index = (start_index + offset) % MAX_PATH_CNT;
+    int path_slot_count = xqc_mini_cli_get_target_path_count(user_conn);
+    int start_index = user_conn->rx_next_path_index % path_slot_count;
+    int first_ready_index = -1;
+    for (int offset = 0; offset < path_slot_count; offset++) {
+        int path_index = (start_index + offset) % path_slot_count;
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[path_index];
+        if (!xqc_mini_cli_path_rx_ready(path)) {
+            continue;
+        }
+        if (first_ready_index < 0) {
+            first_ready_index = path_index;
+        }
         round_packets += xqc_mini_cli_recv_path_batch(
-            &user_conn->paths[path_index], packets_per_path);
+            path, packets_per_path);
         if (user_conn->rx_shutdown) {
             break;
         }
     }
 
-    user_conn->rx_next_path_index = (start_index + 1) % MAX_PATH_CNT;
+    user_conn->rx_next_path_index = first_ready_index >= 0
+        ? (first_ready_index + 1) % path_slot_count
+        : (start_index + 1) % path_slot_count;
     if (round_packets > 0) {
         stats->rx_fair_round_count++;
         stats->rx_round_packet_count += (uint64_t)round_packets;
@@ -2313,7 +2353,8 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     user_conn->rx_arbiter_running = 0;
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
+    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
+    for (int i = 0; i < target_paths; i++) {
         if (user_conn->paths[i].rx_release_pending) {
             xqc_mini_cli_release_path_io_now(&user_conn->paths[i],
                 "deferred_release");
@@ -2376,7 +2417,7 @@ xqc_mini_cli_apply_interface_list(xqc_mini_cli_args_t *args, const char *value)
         memset(args->net_cfg.multi_interface[i], 0, sizeof(args->net_cfg.multi_interface[i]));
     }
 
-    char list_buf[256] = {0};
+    char list_buf[MAX_PATH_CNT * XQC_MINI_INTERFACE_NAME_MAX_LEN] = {0};
     strncpy(list_buf, value, sizeof(list_buf) - 1);
 
     char *token = strtok(list_buf, ", ");
@@ -3311,7 +3352,12 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
            " dual_round_max=%d rounds=1\n",
         xqc_mini_cli_rx_mode(), CLIENT_RX_SINGLE_PATH_PACKETS,
         CLIENT_RX_DUAL_PATH_PACKETS,
-        MAX_PATH_CNT * CLIENT_RX_DUAL_PATH_PACKETS);
+        XQC_MINI_DEFAULT_PATH_CNT * CLIENT_RX_DUAL_PATH_PACKETS);
+    printf("[resolved-rx-capacity] default_paths=%d max_paths=%d"
+           " multi_per_path=%d max_round_max=%d\n",
+        XQC_MINI_DEFAULT_PATH_CNT, MAX_PATH_CNT,
+        CLIENT_RX_MULTI_PATH_PACKETS,
+        MAX_PATH_CNT * CLIENT_RX_MULTI_PATH_PACKETS);
 
     ret = xqc_mini_cli_promote_available_initial_interface(user_conn);
     if (ret != XQC_OK) {

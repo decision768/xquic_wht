@@ -5,6 +5,10 @@
 
 #include "../../mini/mini_backend.h"
 
+#if NETINS_UDP_MAX_INTERFACES > MINI_BACKEND_MAX_INTERFACES
+#error "Public interface capacity exceeds Mini backend capacity"
+#endif
+
 #define NETINS_UDP_HANDLE_MAGIC 0x4e554450U
 
 struct netins_udp_s {

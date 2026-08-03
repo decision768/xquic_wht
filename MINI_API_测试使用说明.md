@@ -187,7 +187,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 | 客户端调度算法 | `balanced` |
 | 客户端拥塞控制 | `bbr` |
 | 测试轮数 | 20 |
-| 模式顺序 | `rmnet,usb,agg` |
+| 模式顺序 | `rmnet,agg,usb`（5G1、聚合、5G2） |
 | 单项最大尝试次数 | 2次（首次加1次重试） |
 | 客户端超时 | 600000 ms |
 | 资源采样间隔 | 0.5 s |
@@ -195,7 +195,13 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 
 服务端由 Python 脚本在 `/root/test_xquic_server` 中自动启动。Python 没有显式传递服务端调度参数，因此使用当前服务端 Demo 的默认 `adaptive` 调度算法。
 
-每轮按照配置顺序测试三种网络模式，每种模式依次执行 POST 和 GET。
+每轮先完成全部 GET，再完成全部 POST；GET 和 POST 内部都按照 `--order` 指定的网络模式顺序执行。默认一轮的实际顺序为：
+
+```text
+GET 5G1 -> GET 聚合 -> GET 5G2 -> POST 5G1 -> POST 聚合 -> POST 5G2
+```
+
+其中 `rmnet` 表示 5G1（`rmnet_data0`），`agg` 表示双路径聚合（`rmnet_data0 + usb0`），`usb` 表示 5G2（`usb0`）。`--order` 只调整每个 GET/POST 分组内部的网络模式顺序，不改变“先 GET、后 POST”的方向顺序。
 
 ### 6.1 使用 SSH 密钥
 
@@ -238,6 +244,15 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
   --quic-host 124.70.219.194 `
   --quic-port 18446
 ```
+
+修改 GET 组和 POST 组内部的网络模式顺序，例如改为“5G2、聚合、5G1”：
+
+```powershell
+python tests/mini_api_benchmark/mini_api_benchmark.py `
+  --order usb,agg,rmnet
+```
+
+此时每轮顺序为 `GET 5G2 -> GET 聚合 -> GET 5G1 -> POST 5G2 -> POST 聚合 -> POST 5G1`。`--order` 不会把 POST 调到 GET 前面。
 
 查看全部参数：
 

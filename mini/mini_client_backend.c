@@ -7,6 +7,10 @@
 
 #include "mini_client.h"
 
+#if MINI_BACKEND_MAX_INTERFACES > MAX_PATH_CNT
+#error "Mini backend interface capacity exceeds Mini client path slots"
+#endif
+
 #if !defined(XQC_SYS_WINDOWS)
 #include <unistd.h>
 #endif
@@ -189,7 +193,7 @@ mini_backend_client_create(const mini_backend_config_t *config,
                " fixed_sleep_us=0\n");
         int configured_interfaces = args->net_cfg.multi_interface_cnt;
         int target_paths = configured_interfaces > 0
-            ? configured_interfaces : MAX_PATH_CNT;
+            ? configured_interfaces : XQC_MINI_DEFAULT_PATH_CNT;
         if (target_paths > MAX_PATH_CNT) {
             target_paths = MAX_PATH_CNT;
         }

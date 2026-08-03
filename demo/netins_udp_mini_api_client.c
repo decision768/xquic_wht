@@ -32,7 +32,7 @@ usage(const char *program)
         "Options:\n"
         "  --host IPv4             Server address (default 127.0.0.1)\n"
         "  --port PORT             Server port (default 8443)\n"
-        "  --interface NAME        Client interface; repeat at most twice\n"
+        "  --interface NAME        Client interface; repeat up to 8 times\n"
         "  --server-name NAME      TLS SNI name\n"
         "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"

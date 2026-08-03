@@ -212,7 +212,7 @@ netins_udp_close_reason_t reason = NETINS_UDP_CLOSE_REASON_INITIALIZER;
 
 | 字段 | 调用方如何填写 | 含义 |
 |---|---|---|
-| `interface_count` | 设置为 1 或 2 | 本次连接期望使用的网卡数量 |
+| `interface_count` | 设置为 1～8 | 本次连接期望使用的网卡数量 |
 | `names[i]` | 写入系统网卡名，例如 `rmnet_data0`、`usb0` | 第 `i` 张网卡；下标必须小于 `interface_count` |
 
 填写后，在客户端 `connect()` 前传给：
@@ -360,7 +360,7 @@ buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
 
 | option | `value` 类型 | 角色 | 默认/约束 |
 |---|---|---|---|
-| `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～2 个非空网卡名 |
+| `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～8 个非空网卡名 |
 | `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | 本说明使用 ADAPTIVE、MINRTT 或 RAP；服务端 Demo 默认 ADAPTIVE |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int`，值为 `netins_udp_congestion_control_t` | CLIENT/SERVER | default/CUBIC/BBR |
 | `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 必须设置证书和私钥 |
@@ -382,7 +382,7 @@ if (netins_udp_set_opt(client, NETINS_UDP_OPT_CONGESTION_CONTROL,
 }
 ```
 
-### 5.3 单路径和双路径
+### 5.3 单路径和多路径
 
 建议集成方总是显式设置接口，避免结果依赖设备默认路由：
 
@@ -405,8 +405,9 @@ netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
 
 - 一个接口：目标为单路径；
 - 两个接口：目标为双路径；
+- 三至八个接口：目标路径数与接口数相同；
 - 未设置接口：API 保留 mini 的自动多路径目标，实际活动路径由本机地址、路由和握手结果决定，
-  不等于一定存在两条可用物理链路；
+  默认目标仍为双路径，不等于一定存在两条可用物理链路；
 - 应以 `snapshot.active_path_count` 或 `netins_udp_is_multipath()` 判断运行时实际结果。
 
 ### 5.4 调度器与拥塞控制
@@ -1120,9 +1121,9 @@ build/mini/netins_udp_mini_api_server
 也必须保留这个 `/`。不能使用单独 `/`、含 `..` 或反斜杠的路径。POST 目标父目录必须在
 服务端 `root_path` 内预先存在。
 
-### 配置了两个接口但 `is_multipath()` 返回 0
+### 配置了多个接口但 `is_multipath()` 返回 0
 
-两个接口只是配置目标。还需检查接口是否存在、地址和路由是否有效、两条路径是否通过验证。
+多个接口只是配置目标。还需检查接口是否存在、地址和路由是否有效、至少两条路径是否通过验证。
 以 `snapshot.active_path_count` 和 DEBUG 路径日志为准。
 
 ### `cleanup()` 返回 `EBUSY`

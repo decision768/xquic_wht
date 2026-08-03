@@ -83,12 +83,12 @@ backend 入口。
 `xqc_mini_cli_user_conn_t`：
 
 - CID 与 H3 connection
-- 最多2条 path 的 socket、event、地址、RX batch 和诊断
+- 最多8条 path 的 socket、event、地址、RX batch 和诊断
 - request 池：目标数、最大并发、next/active/completed
 - POST 文件大小、路径和汇总状态
 - GET 输出 fd、异步写线程、队列、mutex/condition、进度和耗时
 - connection timeout 与 path retry event
-- RX 仲裁、延迟释放和单双路径独立预算模式状态（当前均为 256）
+- RX 仲裁、延迟释放和单路径/双路径/多路径独立预算模式状态（当前每路径均为 256）
 
 `xqc_mini_cli_user_stream_t`：
 

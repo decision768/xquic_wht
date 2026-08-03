@@ -58,7 +58,7 @@ NEW -> LISTENING  -> CLOSING   -> CLOSED
 
 | 配置项 | 值类型 | 说明 |
 |---|---|---|
-| `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | 仅 client，1～2 个接口名 |
+| `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | 仅 client，1～8 个接口名 |
 | `NETINS_UDP_OPT_SCHEDULER` | `int` | mini 已有调度器枚举 |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int` | default/BBR/CUBIC |
 | `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | server 必须提供证书和私钥；client 可提供 SNI |

@@ -71,7 +71,7 @@ DEFAULT_COMMAND_TIMEOUT_S = 690.0
 
 # 压测参数
 DEFAULT_ITERATIONS = 20
-DEFAULT_MODE_ORDER = "rmnet,usb,agg,"
+DEFAULT_MODE_ORDER = "rmnet,agg,usb,"
 DEFAULT_RETRIES = 1
 DEFAULT_COOLDOWN_S = 2.0
 DEFAULT_VERIFY_SHA256 = False
@@ -1556,6 +1556,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--order",
         type=validate_order,
         default=validate_order(DEFAULT_MODE_ORDER),
+        help=(
+            "每个GET/POST分组内的网络模式顺序："
+            "rmnet=5G1, agg=双路径聚合, usb=5G2 "
+            "(default: rmnet,agg,usb)"
+        ),
     )
     parser.add_argument(
         "--retries",
@@ -2783,7 +2788,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
         if args.verify_sha256:
             get_expected_sha = get_server_sha256(server, source_path)
 
-        directions = ("post", "get")
+        directions = ("get", "post")
         planned_connections = (
             len(args.order) * len(directions) * args.iterations * (args.retries + 1)
         )
@@ -2799,9 +2804,9 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
 
         for round_index in range(1, args.iterations + 1):
             LOG.info("========== API压测轮次 %s/%s ==========", round_index, args.iterations)
-            for mode in args.order:
-                display_mode = DISPLAY_MODE_NAMES[mode]
-                for direction in directions:
+            for direction in directions:
+                for mode in args.order:
+                    display_mode = DISPLAY_MODE_NAMES[mode]
                     successful_row: Optional[Dict[str, object]] = None
                     successful_record: Optional[Dict[str, object]] = None
                     first_start = ""

@@ -841,8 +841,9 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     
     xqc_mini_cli_user_path_t *user_path = NULL;
     xqc_mini_cli_user_path_t *fallback_path = NULL;
+    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
     
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
+    for (int i = 0; i < target_paths; i++) {
         if (!user_conn->paths[i].is_active
             || user_conn->paths[i].consecutive_write_failures >= max_write_failures) {
             continue;
@@ -855,18 +856,18 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
 
     if (user_path == NULL) {
         int start = user_conn->next_fallback_path_index;
-        if (start < 0 || start >= MAX_PATH_CNT) {
+        if (start < 0 || start >= target_paths) {
             start = 0;
         }
 
-        for (int n = 0; n < MAX_PATH_CNT; n++) {
-            int idx = (start + n) % MAX_PATH_CNT;
+        for (int n = 0; n < target_paths; n++) {
+            int idx = (start + n) % target_paths;
             if (!user_conn->paths[idx].is_active
                 || user_conn->paths[idx].consecutive_write_failures >= max_write_failures) {
                 continue;
             }
             fallback_path = &user_conn->paths[idx];
-            user_conn->next_fallback_path_index = (idx + 1) % MAX_PATH_CNT;
+            user_conn->next_fallback_path_index = (idx + 1) % target_paths;
             break;
         }
         user_path = fallback_path;
