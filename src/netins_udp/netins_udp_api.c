@@ -1,19 +1,188 @@
 #include "netins_udp_internal.h"
+#include "netins_udp_builtin_tls.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+
+#if !defined(SYS_memfd_create) && defined(__NR_memfd_create)
+#define SYS_memfd_create __NR_memfd_create
+#endif
 
 static pthread_mutex_t netins_udp_global_lock = PTHREAD_MUTEX_INITIALIZER;
 static unsigned int netins_udp_init_references;
 static unsigned int netins_udp_handle_count;
 
 static int netins_udp_valid(const netins_udp_t *handle);
+static void netins_udp_copy_string(char *destination,
+    size_t destination_size, const char *source);
+
+static int
+netins_udp_create_memfd(const char *name)
+{
+#if defined(SYS_memfd_create)
+    int fd;
+    do {
+        fd = (int)syscall(SYS_memfd_create, name,
+            MFD_CLOEXEC | MFD_ALLOW_SEALING);
+    } while (fd < 0 && errno == EINTR);
+    if (fd < 0 && errno == EINVAL) {
+        do {
+            fd = (int)syscall(SYS_memfd_create, name, MFD_CLOEXEC);
+        } while (fd < 0 && errno == EINTR);
+    }
+    return fd;
+#else
+    (void)name;
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+static int
+netins_udp_write_all(int fd, const unsigned char *data, size_t length)
+{
+    size_t written = 0;
+    while (written < length) {
+        ssize_t result = write(fd, data + written, length - written);
+        if (result > 0) {
+            written += (size_t)result;
+            continue;
+        }
+        if (result < 0 && errno == EINTR) {
+            continue;
+        }
+        if (result == 0) {
+            errno = EIO;
+        }
+        return -1;
+    }
+    return 0;
+}
+
+static int
+netins_udp_create_pem_fd(const char *name, const void *pem, size_t pem_len,
+    char *path, size_t path_len, int *out_fd)
+{
+    if (name == NULL || pem == NULL || pem_len == 0
+        || pem_len > NETINS_UDP_TLS_PEM_MAX_LEN || path == NULL
+        || path_len == 0 || out_fd == NULL)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = netins_udp_create_memfd(name);
+    if (fd < 0) {
+        return -1;
+    }
+
+    int error_code = 0;
+    if (fchmod(fd, S_IRUSR | S_IWUSR) != 0
+        || netins_udp_write_all(fd, pem, pem_len) != 0
+        || lseek(fd, 0, SEEK_SET) < 0)
+    {
+        error_code = errno;
+        goto fail;
+    }
+
+#if defined(F_ADD_SEALS) && defined(F_SEAL_SEAL) \
+    && defined(F_SEAL_SHRINK) && defined(F_SEAL_GROW) && defined(F_SEAL_WRITE)
+    (void)fcntl(fd, F_ADD_SEALS,
+        F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE);
+#endif
+
+    int result = snprintf(path, path_len, "/proc/self/fd/%d", fd);
+    if (result < 0 || (size_t)result >= path_len) {
+        error_code = ENAMETOOLONG;
+        goto fail;
+    }
+    if (access(path, R_OK) != 0) {
+        error_code = errno;
+        goto fail;
+    }
+
+    *out_fd = fd;
+    return 0;
+
+fail:
+    (void)close(fd);
+    errno = error_code != 0 ? error_code : EIO;
+    return -1;
+}
+
+static void
+netins_udp_close_tls_fds(netins_udp_t *handle)
+{
+    if (handle == NULL || !handle->owns_tls_fds) {
+        return;
+    }
+    if (handle->tls_certificate_fd >= 0) {
+        (void)close(handle->tls_certificate_fd);
+    }
+    if (handle->tls_private_key_fd >= 0) {
+        (void)close(handle->tls_private_key_fd);
+    }
+    handle->tls_certificate_fd = -1;
+    handle->tls_private_key_fd = -1;
+    handle->owns_tls_fds = 0;
+}
+
+static int
+netins_udp_install_memory_tls(netins_udp_t *handle,
+    const void *certificate_pem, size_t certificate_pem_len,
+    const void *private_key_pem, size_t private_key_pem_len, int source)
+{
+    char certificate_path[MINI_BACKEND_FILE_PATH_LEN];
+    char private_key_path[MINI_BACKEND_FILE_PATH_LEN];
+    int certificate_fd = -1;
+    int private_key_fd = -1;
+
+    if (netins_udp_create_pem_fd("netins-udp-certificate",
+            certificate_pem, certificate_pem_len, certificate_path,
+            sizeof(certificate_path), &certificate_fd) != 0)
+    {
+        return -1;
+    }
+    if (netins_udp_create_pem_fd("netins-udp-private-key",
+            private_key_pem, private_key_pem_len, private_key_path,
+            sizeof(private_key_path), &private_key_fd) != 0)
+    {
+        int error_code = errno;
+        (void)close(certificate_fd);
+        errno = error_code;
+        return -1;
+    }
+
+    netins_udp_close_tls_fds(handle);
+    handle->tls_certificate_fd = certificate_fd;
+    handle->tls_private_key_fd = private_key_fd;
+    handle->owns_tls_fds = 1;
+    handle->tls_source = source;
+    handle->backend_config.has_tls = 1;
+    netins_udp_copy_string(handle->backend_config.certificate_file,
+        sizeof(handle->backend_config.certificate_file), certificate_path);
+    netins_udp_copy_string(handle->backend_config.private_key_file,
+        sizeof(handle->backend_config.private_key_file), private_key_path);
+    return 0;
+}
 
 static void
 netins_udp_copy_string(char *destination, size_t destination_size,
@@ -217,6 +386,8 @@ netins_udp_new(int role)
     handle->accept_timeout_ms = 0;
     handle->close_timeout_ms = 3000;
     handle->logger_minimum_level = NETINS_UDP_LOG_DEBUG;
+    handle->tls_certificate_fd = -1;
+    handle->tls_private_key_fd = -1;
     mini_backend_config_init(&handle->backend_config);
     handle->backend_config.load_config_file = 0;
     handle->backend_config.api_mode = 1;
@@ -359,6 +530,13 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
             return netins_udp_set_error(handle, EINVAL,
                 "server TLS certificate and private key are required");
         }
+        if (handle->role == NETINS_UDP_ROLE_SERVER
+            && handle->tls_source != NETINS_UDP_TLS_SOURCE_NONE
+            && handle->tls_source != NETINS_UDP_TLS_SOURCE_FILE)
+        {
+            return netins_udp_set_error(handle, EALREADY,
+                "server TLS memory credentials are already configured");
+        }
         if (handle->role == NETINS_UDP_ROLE_CLIENT
             && (tls->certificate_file[0] != '\0'
                 || tls->private_key_file[0] != '\0'))
@@ -375,6 +553,57 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         netins_udp_copy_string(handle->backend_config.private_key_file,
             sizeof(handle->backend_config.private_key_file),
             tls->private_key_file);
+        if (handle->role == NETINS_UDP_ROLE_SERVER) {
+            handle->tls_source = NETINS_UDP_TLS_SOURCE_FILE;
+        }
+        break;
+    }
+    case NETINS_UDP_OPT_TLS_MEMORY: {
+        if (handle->role != NETINS_UDP_ROLE_SERVER) {
+            return netins_udp_set_error(handle, EOPNOTSUPP,
+                "TLS memory credentials are only configurable on servers");
+        }
+        if (value == NULL
+            || value_len < sizeof(netins_udp_tls_memory_config_t))
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid TLS memory option size");
+        }
+        const netins_udp_tls_memory_config_t *tls_memory = value;
+        if (tls_memory->struct_size < sizeof(*tls_memory)
+            || tls_memory->api_version != NETINS_UDP_API_VERSION)
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid TLS memory option version");
+        }
+        if (tls_memory->certificate_pem == NULL
+            || tls_memory->certificate_pem_len == 0
+            || tls_memory->certificate_pem_len > NETINS_UDP_TLS_PEM_MAX_LEN
+            || tls_memory->private_key_pem == NULL
+            || tls_memory->private_key_pem_len == 0
+            || tls_memory->private_key_pem_len > NETINS_UDP_TLS_PEM_MAX_LEN)
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid TLS memory certificate or private key buffer");
+        }
+        if (handle->tls_source != NETINS_UDP_TLS_SOURCE_NONE
+            && handle->tls_source != NETINS_UDP_TLS_SOURCE_MEMORY)
+        {
+            return netins_udp_set_error(handle, EALREADY,
+                "server TLS file credentials are already configured");
+        }
+        if (netins_udp_install_memory_tls(handle,
+                tls_memory->certificate_pem,
+                tls_memory->certificate_pem_len,
+                tls_memory->private_key_pem,
+                tls_memory->private_key_pem_len,
+                NETINS_UDP_TLS_SOURCE_MEMORY) != 0)
+        {
+            int error_code = errno;
+            return netins_udp_set_error(handle,
+                error_code != 0 ? error_code : EIO,
+                "install TLS memory credentials failed");
+        }
         break;
     }
     case NETINS_UDP_OPT_CONNECT_TIMEOUT_MS: {
@@ -556,9 +785,27 @@ netins_udp_listen(netins_udp_t *server, const char *host, uint16_t port)
         return netins_udp_set_error(server, EINVAL,
             "invalid server, host, port, or state");
     }
+    netins_udp_log(server, NETINS_UDP_LOG_INFO,
+        "Mini API server version=%s\n", NETINS_UDP_API_RELEASE_VERSION);
+    if (server->tls_source == NETINS_UDP_TLS_SOURCE_NONE) {
+        if (netins_udp_install_memory_tls(server,
+                netins_udp_builtin_certificate_pem,
+                netins_udp_builtin_certificate_pem_len,
+                netins_udp_builtin_private_key_pem,
+                netins_udp_builtin_private_key_pem_len,
+                NETINS_UDP_TLS_SOURCE_BUILTIN) != 0)
+        {
+            int error_code = errno;
+            return netins_udp_set_error(server,
+                error_code != 0 ? error_code : EIO,
+                "install built-in TLS credentials failed");
+        }
+        netins_udp_log(server, NETINS_UDP_LOG_INFO,
+            "using built-in TLS certificate and private key\n");
+    }
     if (!server->backend_config.has_tls) {
         return netins_udp_set_error(server, EINVAL,
-            "server TLS certificate and private key must be configured");
+            "server TLS credentials are unavailable");
     }
 
     mini_backend_log_scope_enter(&server->backend_config);
@@ -645,6 +892,8 @@ netins_udp_accept(netins_udp_t *server)
     accepted->connect_timeout_ms = server->connect_timeout_ms;
     accepted->accept_timeout_ms = server->accept_timeout_ms;
     accepted->close_timeout_ms = server->close_timeout_ms;
+    accepted->tls_certificate_fd = -1;
+    accepted->tls_private_key_fd = -1;
     accepted->backend_config = server->backend_config;
     accepted->logger = server->logger;
     accepted->logger_user_data = server->logger_user_data;
@@ -1157,6 +1406,7 @@ netins_udp_close(netins_udp_t *handle)
         handle->server_backend = NULL;
     }
     mini_backend_log_scope_leave();
+    netins_udp_close_tls_fds(handle);
 
     handle->magic = 0;
     pthread_mutex_lock(&netins_udp_global_lock);

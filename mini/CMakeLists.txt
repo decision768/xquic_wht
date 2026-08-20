@@ -61,6 +61,9 @@ endforeach()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_compile_definitions(mini_client_backend_obj PRIVATE _GNU_SOURCE)
     target_compile_definitions(mini_server_backend_obj PRIVATE _GNU_SOURCE)
+    if(XQC_ENABLE_MINI_API)
+        target_compile_definitions(netins_udp_mini_api_obj PRIVATE _GNU_SOURCE)
+    endif()
 endif()
 
 set(MINI_API_OBJECTS

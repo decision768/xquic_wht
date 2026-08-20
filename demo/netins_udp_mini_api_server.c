@@ -25,10 +25,12 @@ static void
 usage(const char *program)
 {
     fprintf(stderr,
-        "Usage: %s --cert FILE --key FILE --root DIR [options]\n"
+        "Usage: %s --root DIR [options]\n"
         "Options:\n"
         "  --bind IPv4             Listen address (default 0.0.0.0)\n"
         "  --port PORT             Listen port (default 8443)\n"
+        "  --cert FILE             Override built-in TLS; requires --key\n"
+        "  --key FILE              Override built-in TLS; requires --cert\n"
         "  --accept-timeout-ms MS  Per-accept timeout; 0 is infinite\n"
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
         "  --max-connections N     Connections to serve (default 1)\n"
@@ -188,8 +190,9 @@ parse_args(int argc, char **argv, server_options_t *options)
         }
     }
 
-    return options->certificate_file != NULL
-        && options->private_key_file != NULL
+    int has_certificate = options->certificate_file != NULL;
+    int has_private_key = options->private_key_file != NULL;
+    return has_certificate == has_private_key
         && options->root_path != NULL
         && (options->zlog_category == NULL
             || options->zlog_config_file != NULL) ? 0 : -1;
@@ -235,26 +238,31 @@ configure_server(netins_udp_t *server, const server_options_t *options)
     logger.callback = api_logger;
     logger.user_data = stderr;
     logger.minimum_level = options->log_level;
-    if (copy_option_string(tls.certificate_file,
-            sizeof(tls.certificate_file), options->certificate_file) != 0
-        || copy_option_string(tls.private_key_file,
-            sizeof(tls.private_key_file), options->private_key_file) != 0)
-    {
-        errno = ENAMETOOLONG;
-        return -1;
-    }
 
     if (netins_udp_set_opt(server, NETINS_UDP_OPT_LOGGER,
             &logger, sizeof(logger)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_SCHEDULER,
             &options->scheduler, sizeof(options->scheduler)) != 0
-        || netins_udp_set_opt(server, NETINS_UDP_OPT_TLS,
-            &tls, sizeof(tls)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS,
             &options->accept_timeout_ms,
             sizeof(options->accept_timeout_ms)) != 0)
     {
         return -1;
+    }
+    if (options->certificate_file != NULL) {
+        if (copy_option_string(tls.certificate_file,
+                sizeof(tls.certificate_file), options->certificate_file) != 0
+            || copy_option_string(tls.private_key_file,
+                sizeof(tls.private_key_file), options->private_key_file) != 0)
+        {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (netins_udp_set_opt(server, NETINS_UDP_OPT_TLS,
+                &tls, sizeof(tls)) != 0)
+        {
+            return -1;
+        }
     }
     if (options->zlog_config_file != NULL) {
         zlog.enabled = 1;

@@ -11,6 +11,13 @@
 
 #define NETINS_UDP_HANDLE_MAGIC 0x4e554450U
 
+typedef enum netins_udp_tls_source_e {
+    NETINS_UDP_TLS_SOURCE_NONE = 0,
+    NETINS_UDP_TLS_SOURCE_BUILTIN = 1,
+    NETINS_UDP_TLS_SOURCE_FILE = 2,
+    NETINS_UDP_TLS_SOURCE_MEMORY = 3
+} netins_udp_tls_source_t;
+
 struct netins_udp_s {
     uint32_t magic;
     int role;
@@ -29,6 +36,10 @@ struct netins_udp_s {
     uint32_t accept_timeout_ms;
     uint32_t close_timeout_ms;
     mini_backend_config_t backend_config;
+    int tls_source;
+    int tls_certificate_fd;
+    int tls_private_key_fd;
+    int owns_tls_fds;
 
     mini_backend_client_t *client_backend;
     mini_backend_server_t *server_backend;

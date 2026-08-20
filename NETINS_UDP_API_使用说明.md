@@ -69,7 +69,7 @@ netins_udp_init()
     ↓
 netins_udp_new(NETINS_UDP_ROLE_SERVER)
     ↓
-netins_udp_set_opt(TLS/超时/日志...)  listen 前设置
+netins_udp_set_opt(超时/日志/可选TLS覆盖...)  listen 前设置
     ↓
 netins_udp_listen()
     ↓
@@ -89,13 +89,18 @@ netins_udp_cleanup()
 
 ## 3. 全部公开 API
 
-当前 `NETINS_UDP_API_VERSION` 为 `1`，公开函数共 20 个。
+当前 Mini API 交付版本为 `6.1`，可通过头文件中的
+`NETINS_UDP_API_RELEASE_VERSION` 获取该版本字符串。服务端调用 `listen()` 时还会通过 INFO
+日志输出 `Mini API server version=6.1`。
+
+`NETINS_UDP_API_VERSION` 当前仍为 `1`，它是结构体初始化和 ABI 兼容检查使用的整数版本号，
+不是交付版本字符串。公开函数共 20 个。
 
 ### 3.1 全局初始化
 
 | 接口 | 返回值 | 说明 |
 |---|---|---|
-| `uint32_t netins_udp_get_api_version(void)` | API 版本号 | 可在加载库后检查头文件与动态库版本 |
+| `uint32_t netins_udp_get_api_version(void)` | ABI 整数版本号 | 可在加载库后检查头文件与动态库 ABI 是否一致；当前返回 `1` |
 | `int netins_udp_init(void)` | `0` 成功，`-1` 失败 | 进程级初始化，内部引用计数 |
 | `int netins_udp_cleanup(void)` | `0` 成功，`-1` 失败 | 与 `init()` 配对；最终清理时仍有 handle 会以 `EBUSY` 失败 |
 
@@ -189,6 +194,8 @@ netins_udp_cleanup()
 ```c
 netins_udp_interfaces_t interfaces = NETINS_UDP_INTERFACES_INITIALIZER;
 netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
+netins_udp_tls_memory_config_t tls_memory =
+    NETINS_UDP_TLS_MEMORY_CONFIG_INITIALIZER;
 netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
 netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
 netins_udp_transfer_t task = NETINS_UDP_TRANSFER_INITIALIZER;
@@ -230,8 +237,21 @@ netins_udp_set_opt(client, NETINS_UDP_OPT_INTERFACES,
 | `certificate_file` | SERVER | 服务端证书文件路径，例如 `./server.crt` |
 | `private_key_file` | SERVER | 与证书匹配的私钥路径，例如 `./server.key` |
 
-客户端不使用 `certificate_file` 和 `private_key_file`；服务端必须在 `listen()` 前填写证书和
-私钥。填写后传给 `NETINS_UDP_OPT_TLS`。
+客户端不使用 `certificate_file` 和 `private_key_file`。服务端不设置 TLS 证书选项时自动使用
+API 内置证书；需要用文件覆盖时，在 `listen()` 前填写证书和私钥并传给
+`NETINS_UDP_OPT_TLS`。
+
+#### `netins_udp_tls_memory_config_t`：服务端内存 TLS 配置（输入）
+
+| 字段 | 调用方如何填写 | 含义 |
+|---|---|---|
+| `certificate_pem` | 指向完整 PEM 证书 Buffer | 服务端证书内容 |
+| `certificate_pem_len` | PEM Buffer 的实际字节数 | 不能为 0，最大 `NETINS_UDP_TLS_PEM_MAX_LEN` |
+| `private_key_pem` | 指向完整 PEM 私钥 Buffer | 与证书匹配的私钥内容 |
+| `private_key_pem_len` | PEM Buffer 的实际字节数 | 不能为 0，最大 `NETINS_UDP_TLS_PEM_MAX_LEN` |
+
+填写后在服务端 `listen()` 前传给 `NETINS_UDP_OPT_TLS_MEMORY`。API 在 `set_opt()` 返回成功前
+已经复制两个 Buffer，调用方随后可以释放或复用原内存。客户端不支持该选项。
 
 #### `netins_udp_logger_config_t`：API 日志回调（输入）
 
@@ -363,7 +383,8 @@ buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
 | `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～8 个非空网卡名 |
 | `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | 本说明使用 ADAPTIVE、MINRTT 或 RAP；服务端 Demo 默认 ADAPTIVE |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int`，值为 `netins_udp_congestion_control_t` | CLIENT/SERVER | default/CUBIC/BBR |
-| `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 必须设置证书和私钥 |
+| `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 用文件证书覆盖内置证书 |
+| `NETINS_UDP_OPT_TLS_MEMORY` | `netins_udp_tls_memory_config_t` | SERVER | 用 PEM Buffer 覆盖内置证书；每个 Buffer 最大 1 MiB |
 | `NETINS_UDP_OPT_CONNECT_TIMEOUT_MS` | `uint32_t` | CLIENT | 默认 10000 ms；不能为 0 |
 | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` | `uint32_t` | SERVER | 默认 0，表示无限等待 |
 | `NETINS_UDP_OPT_CLOSE_TIMEOUT_MS` | `uint32_t` | CLIENT/SERVER | 默认 3000 ms |
@@ -436,7 +457,13 @@ GET 的大流量发送端是服务端，POST 的大流量发送端是客户端�
 
 ### 5.5 TLS
 
-服务端在 `listen()` 前必须设置证书和私钥：
+服务端有三种证书来源，同一个 handle 只能选择一种自定义来源：
+
+1. 不配置证书：`listen()` 自动使用 API 内置的固定证书和私钥，不需要部署外部文件；
+2. 文件覆盖：通过现有 `NETINS_UDP_OPT_TLS` 设置证书和私钥路径；
+3. 内存覆盖：通过 `NETINS_UDP_OPT_TLS_MEMORY` 传入 PEM Buffer。
+
+文件覆盖示例：
 
 ```c
 netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
@@ -448,6 +475,29 @@ snprintf(tls.private_key_file, sizeof(tls.private_key_file),
 
 netins_udp_set_opt(server, NETINS_UDP_OPT_TLS, &tls, sizeof(tls));
 ```
+
+内存覆盖示例：
+
+```c
+netins_udp_tls_memory_config_t tls_memory =
+    NETINS_UDP_TLS_MEMORY_CONFIG_INITIALIZER;
+
+tls_memory.certificate_pem = certificate_pem;
+tls_memory.certificate_pem_len = certificate_pem_len;
+tls_memory.private_key_pem = private_key_pem;
+tls_memory.private_key_pem_len = private_key_pem_len;
+
+netins_udp_set_opt(server, NETINS_UDP_OPT_TLS_MEMORY,
+    &tls_memory, sizeof(tls_memory));
+```
+
+文件和内存模式都是对默认内置证书的覆盖。不要在同一个服务端 handle 上先后设置文件和内存
+证书；API 会返回 `EALREADY`。同一来源可在 `listen()` 前重新设置。内置证书适用于当前封闭
+部署环境，不应将其当作每台服务器独立的身份凭据。
+
+当前 Mini 客户端没有启用证书链、有效期和主机名验证，内置证书保持与既有部署相同的兼容
+行为。如果后续启用 `XQC_TLS_CERT_FLAG_NEED_VERIFY`，必须先更换为有效证书并配置对应的
+信任链和服务端名称；不能继续依赖当前兼容证书。
 
 客户端不支持客户端证书，`certificate_file` 和 `private_key_file` 必须留空；如需 SNI，只设置：
 
@@ -604,19 +654,13 @@ total_bytes × 8 / elapsed_us
 netins_udp_init();
 netins_udp_t *server = netins_udp_new(NETINS_UDP_ROLE_SERVER);
 
-netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
-snprintf(tls.certificate_file, sizeof(tls.certificate_file),
-    "%s", "/root/test_xquic_server/server.crt");
-snprintf(tls.private_key_file, sizeof(tls.private_key_file),
-    "%s", "/root/test_xquic_server/server.key");
-netins_udp_set_opt(server, NETINS_UDP_OPT_TLS, &tls, sizeof(tls));
-
 if (netins_udp_listen(server, "0.0.0.0", 18446) != 0) {
     /* 处理错误 */
 }
 ```
 
-服务端证书和私钥是当前 QUIC/TLS 握手的必需项，不能省略。
+这里没有设置 TLS 证书选项，因此使用内置证书。需要自有证书时，可在 `listen()` 前增加
+5.5 节的文件或内存配置。
 
 ### 7.2 accept 和 serve
 
@@ -839,6 +883,7 @@ main(void)
         goto done;
     }
 
+    /* 可选：以下配置使用外部文件覆盖默认内置证书。 */
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     snprintf(tls.certificate_file, sizeof(tls.certificate_file),
         "%s", "/root/test_xquic_server/server.crt");
@@ -1090,7 +1135,7 @@ build/mini/netins_udp_mini_api_server
 | `--timeout-ms` | `task.timeout_ms`，demo 同时用于 connect |
 | `--log-level` | callback 与 zlog 的 `minimum_level`，0～3 |
 | `--zlog-config`/`--zlog-category` | `NETINS_UDP_OPT_ZLOG`；不传时 zlog 关闭 |
-| server `--cert`/`--key` | server `NETINS_UDP_OPT_TLS` |
+| server `--cert`/`--key` | 可选；server `NETINS_UDP_OPT_TLS` 文件覆盖；不传时使用内置证书 |
 | server `--root` | `serve.root_path` |
 | server `--scheduler` | server `NETINS_UDP_OPT_SCHEDULER`；默认 adaptive |
 | server `--accept-timeout-ms` | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` |
@@ -1110,9 +1155,10 @@ build/mini/netins_udp_mini_api_server
 
 检查 client 角色、当前状态、端口和 host。host 当前必须是数值 IPv4，不能直接传域名。
 
-### `listen()` 提示必须配置 TLS
+### `listen()` 提示 TLS 证书不可用
 
-服务端必须在 listen 前通过 `NETINS_UDP_OPT_TLS` 设置可读的证书和私钥路径。
+默认内置证书会在 `listen()` 时自动加载。若提示不可用，检查运行环境是否支持 `memfd`、
+是否挂载 `/proc`，以及 `/proc/self/fd` 是否可读。使用文件覆盖时，还要检查证书和私钥路径。
 
 ### GET/POST 路径无效
 

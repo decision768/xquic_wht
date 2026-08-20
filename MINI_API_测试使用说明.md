@@ -86,7 +86,7 @@ chmod +x /oemdata/monitor_board_resource.sh
 
 ### 3.3 Linux 云服务器
 
-服务器默认需要以下文件：
+当前自动压测脚本仍显式使用外部证书覆盖，因此默认测试环境需要以下文件：
 
 ```text
 /root/test_xquic_server/netins_udp_mini_api_server
@@ -109,6 +109,11 @@ test -r server.key
 ```
 
 `upload/1` 是默认 GET 源文件，必须非空。POST 结果默认写入 `upload` 目录，因此该父目录必须提前存在。
+
+服务端 Demo 本身已经内置证书。手工启动或正式部署时可以同时省略 `server.crt`、`server.key`
+以及命令中的 `--cert`、`--key`；保留这两个参数则继续使用指定文件覆盖内置证书。使用内置
+证书或 `NETINS_UDP_OPT_TLS_MEMORY` 时，服务器还必须挂载并允许访问 `/proc/self/fd`；当前
+自动压测使用外部文件覆盖，不依赖该路径。
 
 服务器需要提供 `bash`、`awk`、`sleep`、`date`、`find`、`getconf`、`ss`、`nohup`、`grep`、`tr` 和 `wc` 命令，并允许读取 `/proc`。
 
@@ -315,6 +320,7 @@ test -s /data/mini_test/files/get-500m.bin
 - 不能使用 `..` 访问 `--server-dir` 之外的文件；
 - 服务端会拒绝通过符号链接穿越根目录；
 - 当前压测脚本固定从 `--server-dir/server.crt` 和 `--server-dir/server.key` 加载证书，因此修改 `--server-dir` 后也要把证书放到新目录；
+- 如需让压测脚本也使用内置证书，应在脚本的服务端启动命令中同时删除 `--cert` 和 `--key` 两项，不能只删除其中一个；
 - 新的 GET 源文件必须非空，脚本会在测试前读取并记录文件大小。
 
 如果只想替换文件内容而不修改命令，也可以保持 `/upload/1` 不变，直接替换：
@@ -461,6 +467,15 @@ f"--max-connections {int(max_connections)} "
   --serve-timeout-ms 600000 \
   --max-connections 3 \
   --scheduler minrtt
+```
+
+上例继续使用外部证书覆盖。使用内置证书时，同时删除 `--cert` 和 `--key` 两行即可，调度器
+参数不受影响。
+
+服务端开始执行 `listen()` 时会输出当前交付版本，例如：
+
+```text
+[mini-api:1] Mini API server version=6.1
 ```
 
 测试其他服务端调度算法时，替换上述 `minrtt`。如果不加入服务端 `--scheduler`，服务端继续使用默认 `adaptive`。这里的服务端参数名是 `--scheduler`，不是 Python 当前用于客户端的同名参数；当前脚本也没有 `--server-scheduler` 命令行参数。
@@ -786,14 +801,14 @@ log/
 2. 不要同时从两台控制电脑运行同一套压测。脚本会检测带有测试标记的旧进程，但仍不应依赖自动检测代替环境管理。
 3. 不要在脚本运行期间手工启动或停止 Mini API 服务端、客户端及资源监控脚本。
 4. UDP 18446 必须允许主板访问，云服务器安全组和防火墙也必须放行该端口。
-5. 服务端证书和私钥必须可读，但私钥不能提交到源码仓库。
+5. 当前自动压测脚本使用外部证书覆盖时，证书和私钥必须可读；使用内置证书时不需要部署这两个文件。
 6. GET 源文件和 POST 源文件必须非空，主板必须有足够空间保存 GET 下载文件。
 7. POST 的父目录必须提前存在。脚本会清理本次测试对应的目标文件，不应把生产文件放在相同路径。
 8. 远端路径以服务端 `--root` 为根目录。默认 `/upload/1` 对应 `/root/test_xquic_server/upload/1`。
 9. 默认关闭 SHA-256 是为了减少压测准备时间，不代表正式文件完整性验收可以省略哈希校验。
 10. 若某次测试失败，脚本最多自动再尝试一次；失败尝试的原始 stdout/stderr 会保留供分析。
 11. 测试被强制中断后，下一次启动前应检查 UDP 端口、服务端进程和 `/tmp` 中的测试控制文件。
-12. 不要把 `log/`、证书私钥、SSH密码、大型测试文件以及GET/POST结果文件提交到 Git。
+12. 不要把 `log/`、额外的外部证书私钥、SSH密码、大型测试文件以及GET/POST结果文件提交到 Git。
 
 ## 11. 常见问题
 
@@ -820,7 +835,8 @@ python -m pip install paramiko
 
 重点检查：
 
-- 服务端、监控脚本、证书、私钥和 GET 源文件是否存在；
+- 服务端、监控脚本和 GET 源文件是否存在；若命令使用 `--cert`/`--key`，再检查对应证书和
+  私钥；若使用内置或内存证书，再检查 `/proc/self/fd`；
 - `upload` 目录是否存在；
 - UDP端口是否被旧服务占用；
 - `/tmp/gx_server_memory` 是否可写；

@@ -37,7 +37,9 @@ tests/mini_api_benchmark/      GET/POST 自动化压测及资源监控
 - zlog；
 - AARCH64 构建还需要 SIM8810 SDK 和交叉编译工具链。
 
-依赖库、证书、私钥、测试大文件及本地构建目录不包含在源码仓库中。具体 CMake 参数以 `NETINS_UDP_编译指南.md` 为准。
+依赖库、外部覆盖证书、测试大文件及本地构建目录不包含在源码仓库中。Mini API 服务端包含
+一套封闭环境兼容用的内置证书，部署时可不携带外部证书文件。具体 CMake 参数以
+`NETINS_UDP_编译指南.md` 为准。
 
 ## 主要产物
 
@@ -70,4 +72,4 @@ sh scripts/mini_api/package_delivery.sh BUILD_DIR OUTPUT_DIR
 - 单路径和双路径 RX 预算使用独立配置分支；
 - 未传新增日志和调度参数时，既有压测命令及速率汇总格式保持不变。
 
-项目版本见 `VERSION`。
+当前 Mini API 交付版本为 `6.1`，项目版本也可见 `VERSION`。

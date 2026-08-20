@@ -17,6 +17,7 @@ extern "C" {
 #endif
 
 #define NETINS_UDP_API_VERSION 1U
+#define NETINS_UDP_API_RELEASE_VERSION "6.1"
 #define NETINS_UDP_MAX_PATHS 8U
 #define NETINS_UDP_MAX_INTERFACES 8U
 #define NETINS_UDP_INTERFACE_NAME_LEN 64U
@@ -26,6 +27,7 @@ extern "C" {
 #define NETINS_UDP_ZLOG_CATEGORY_LEN 64U
 #define NETINS_UDP_ERROR_MSG_LEN 256U
 #define NETINS_UDP_REMOTE_PATH_LEN 1024U
+#define NETINS_UDP_TLS_PEM_MAX_LEN (1024U * 1024U)
 
 typedef struct netins_udp_s netins_udp_t;
 
@@ -118,7 +120,8 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_KERNEL_SNDBUF = 8,
     NETINS_UDP_OPT_KERNEL_RCVBUF = 9,
     NETINS_UDP_OPT_LOGGER = 10,
-    NETINS_UDP_OPT_ZLOG = 11
+    NETINS_UDP_OPT_ZLOG = 11,
+    NETINS_UDP_OPT_TLS_MEMORY = 12
 } netins_udp_opt_t;
 
 typedef enum netins_udp_transfer_direction_e {
@@ -150,6 +153,24 @@ typedef struct netins_udp_tls_config_s {
 /* Client handles use server_name only; client certificates are unsupported. */
 #define NETINS_UDP_TLS_CONFIG_INITIALIZER \
     { sizeof(netins_udp_tls_config_t), NETINS_UDP_API_VERSION, {0}, {0}, {0}, {0} }
+
+typedef struct netins_udp_tls_memory_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    const void *certificate_pem;
+    size_t certificate_pem_len;
+    const void *private_key_pem;
+    size_t private_key_pem_len;
+    uint64_t reserved[4];
+} netins_udp_tls_memory_config_t;
+
+/*
+ * Server-only PEM input. set_opt() copies both buffers before returning, so
+ * the caller may release or reuse them after a successful call.
+ */
+#define NETINS_UDP_TLS_MEMORY_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_tls_memory_config_t), NETINS_UDP_API_VERSION, \
+      NULL, 0, NULL, 0, {0} }
 
 typedef struct netins_udp_transfer_s {
     uint32_t struct_size;
@@ -332,11 +353,11 @@ NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *handle,
 /*
  * connect(), listen(), accept(), and shutdown() are blocking. Their timeout
  * limits come from the corresponding uint32_t options. A zero accept timeout
- * waits indefinitely. A server must configure TLS certificate/key before
- * listen(). host is currently a numeric IPv4 address; TLS server_name is
- * configured separately. An accepted handle keeps the shared listener
- * backend alive, so closing the server handle does not invalidate accepted
- * connections.
+ * waits indefinitely. A server uses the built-in certificate/key unless file
+ * or memory credentials are configured before listen(). host is currently a
+ * numeric IPv4 address; TLS server_name is configured separately. An accepted
+ * handle keeps the shared listener backend alive, so closing the server
+ * handle does not invalidate accepted connections.
  */
 NETINS_UDP_PUBLIC int netins_udp_connect(netins_udp_t *client,
     const char *host, uint16_t port);
