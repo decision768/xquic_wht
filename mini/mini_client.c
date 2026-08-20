@@ -583,8 +583,9 @@ xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     xqc_usec_t now = xqc_now();
-    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
-    for (int i = 0; i < target_paths; i++) {
+    int path_slot_count =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    for (int i = 0; i < path_slot_count; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         if (!path->disabled_for_session || path->interface_name[0] == '\0') {
             continue;
@@ -1614,18 +1615,35 @@ xqc_mini_cli_get_interface_for_path(xqc_mini_cli_user_conn_t *user_conn, int pat
 
     return net_cfg->multi_interface[path_index];
 }
-// 计算期望创建的路径数量
+// 返回稳定的已配置路径槽位范围，用于 paths[] 遍历和索引运算
+int
+xqc_mini_cli_get_configured_path_slot_count(
+    xqc_mini_cli_user_conn_t *user_conn)
+{
+    int configured = XQC_MINI_DEFAULT_PATH_CNT;
+    if (user_conn != NULL && user_conn->ctx != NULL
+        && user_conn->ctx->args != NULL)
+    {
+        configured = user_conn->ctx->args->net_cfg.multi_interface_cnt;
+        if (configured <= 0) {
+            configured = XQC_MINI_DEFAULT_PATH_CNT;
+        }
+    }
+
+    if (configured < 1) {
+        configured = 1;
+    } else if (configured > MAX_PATH_CNT) {
+        configured = MAX_PATH_CNT;
+    }
+    return configured;
+}
+
+// 计算当前未禁用的期望路径数量，仅用于数量比较，不能作为 paths[] 上界
 int
 xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
-    int configured = user_conn->ctx->args->net_cfg.multi_interface_cnt;
-    if (configured <= 0) {
-        return XQC_MINI_DEFAULT_PATH_CNT;
-    }
-
-    if (configured > MAX_PATH_CNT) {
-        configured = MAX_PATH_CNT;
-    }
+    int configured =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
 
     int target = 0;
     for (int i = 0; i < configured; i++) {
@@ -1685,8 +1703,9 @@ xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn)
 static xqc_mini_cli_user_path_t *
 xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn)
 {
-    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
-    for (int i = 0; i < target_paths; i++) {
+    int path_slot_count =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    for (int i = 0; i < path_slot_count; i++) {
         if (!user_conn->paths[i].is_active
             && !user_conn->paths[i].disabled_for_session
             && !user_conn->paths[i].rx_release_pending) {
@@ -2228,9 +2247,10 @@ static int
 xqc_mini_cli_count_rx_ready_paths(xqc_mini_cli_user_conn_t *user_conn)
 {
     int ready_paths = 0;
-    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
+    int path_slot_count =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
 
-    for (int i = 0; i < target_paths; i++) {
+    for (int i = 0; i < path_slot_count; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         if (xqc_mini_cli_path_rx_ready(path)) {
             ready_paths++;
@@ -2307,7 +2327,8 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     int round_packets = 0;
-    int path_slot_count = xqc_mini_cli_get_target_path_count(user_conn);
+    int path_slot_count =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
     int start_index = user_conn->rx_next_path_index % path_slot_count;
     int first_ready_index = -1;
     for (int offset = 0; offset < path_slot_count; offset++) {
@@ -2353,8 +2374,7 @@ xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn)
     }
 
     user_conn->rx_arbiter_running = 0;
-    int target_paths = xqc_mini_cli_get_target_path_count(user_conn);
-    for (int i = 0; i < target_paths; i++) {
+    for (int i = 0; i < path_slot_count; i++) {
         if (user_conn->paths[i].rx_release_pending) {
             xqc_mini_cli_release_path_io_now(&user_conn->paths[i],
                 "deferred_release");
@@ -3457,8 +3477,9 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->total_requests_known = 0;
 
     }
-    int target_prepare = xqc_mini_cli_get_target_path_count(user_conn);
-    for (int i = 1; i < target_prepare; i++) {
+    int path_slot_count =
+        xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    for (int i = 1; i < path_slot_count; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
         ret = xqc_mini_cli_prepare_user_path(user_conn, path);
         //ret = xqc_mini_cli_init_user_path(user_conn, path, i);

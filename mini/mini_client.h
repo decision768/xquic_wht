@@ -510,6 +510,10 @@ void xqc_mini_cli_on_connection_finish(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[]);
 int xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path);
 
+/* Stable array slot span; use this for paths[] iteration and index arithmetic. */
+int xqc_mini_cli_get_configured_path_slot_count(
+    xqc_mini_cli_user_conn_t *user_conn);
+/* Dynamic non-disabled path cardinality; do not use this as a paths[] bound. */
 int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_get_ready_path_count(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn);

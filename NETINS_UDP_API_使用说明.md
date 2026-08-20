@@ -89,9 +89,9 @@ netins_udp_cleanup()
 
 ## 3. 全部公开 API
 
-当前 Mini API 交付版本为 `6.1`，可通过头文件中的
+当前 Mini API 交付版本为 `6.2`，可通过头文件中的
 `NETINS_UDP_API_RELEASE_VERSION` 获取该版本字符串。服务端调用 `listen()` 时还会通过 INFO
-日志输出 `Mini API server version=6.1`。
+日志输出 `Mini API server version=6.2`。
 
 `NETINS_UDP_API_VERSION` 当前仍为 `1`，它是结构体初始化和 ABI 兼容检查使用的整数版本号，
 不是交付版本字符串。公开函数共 20 个。

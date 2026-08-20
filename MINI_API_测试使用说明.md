@@ -475,7 +475,7 @@ f"--max-connections {int(max_connections)} "
 服务端开始执行 `listen()` 时会输出当前交付版本，例如：
 
 ```text
-[mini-api:1] Mini API server version=6.1
+[mini-api:1] Mini API server version=6.2
 ```
 
 测试其他服务端调度算法时，替换上述 `minrtt`。如果不加入服务端 `--scheduler`，服务端继续使用默认 `adaptive`。这里的服务端参数名是 `--scheduler`，不是 Python 当前用于客户端的同名参数；当前脚本也没有 `--server-scheduler` 命令行参数。
