@@ -831,6 +831,16 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
             // UDP 通常不会有 0 字节，这里仅作保护
             break;
         }
+
+        packet_cnt++;
+        if (xqc_mini_recovery_probe_is_valid(packet_buf, (size_t)recv_size)) {
+            ssize_t sent = sendto(fd, packet_buf, (size_t)recv_size, 0,
+                (struct sockaddr *)&peer_addr, peer_addrlen);
+            if (sent < 0 && get_sys_errno() != EAGAIN && get_sys_errno() != EWOULDBLOCK) {
+                perror("[server recovery probe] sendto error");
+            }
+            continue;
+        }
         
         struct sockaddr_in *pa = (struct sockaddr_in*)&peer_addr;
          
@@ -848,7 +858,6 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
                         &user_conn->local_addrlen) != 0) {
             perror("[server recv] getsockname error");
         }
-        packet_cnt++;
         // 🚀 核心：将 UDP 包交给 XQUIC 引擎
         xqc_int_t ret = xqc_engine_packet_process(
             ctx->engine,

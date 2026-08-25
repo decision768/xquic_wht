@@ -7,7 +7,9 @@
 
 
 #include <memory.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include <xquic/xquic_typedef.h>
 #include <zlog.h>
 
@@ -22,6 +24,39 @@
 #define RESOURCE_LEN        1024
 #define AUTHORITY_LEN       128
 #define URL_LEN             1024
+
+/*
+ * End-to-end UDP echo used before rebuilding a disabled interface. Keeping
+ * an IP address does not guarantee that the interface data path is usable.
+ */
+#define XQC_MINI_RECOVERY_PROBE_MAGIC_LEN 8
+
+typedef struct xqc_mini_recovery_probe_s {
+    unsigned char magic[XQC_MINI_RECOVERY_PROBE_MAGIC_LEN];
+    uint64_t nonce;
+} xqc_mini_recovery_probe_t;
+
+static inline void
+xqc_mini_recovery_probe_init(xqc_mini_recovery_probe_t *probe, uint64_t nonce)
+{
+    static const unsigned char magic[XQC_MINI_RECOVERY_PROBE_MAGIC_LEN] = {
+        'X', 'Q', 'C', 'R', 'P', '0', '0', '1'
+    };
+
+    memcpy(probe->magic, magic, sizeof(magic));
+    probe->nonce = nonce;
+}
+
+static inline int
+xqc_mini_recovery_probe_is_valid(const void *data, size_t data_len)
+{
+    static const unsigned char magic[XQC_MINI_RECOVERY_PROBE_MAGIC_LEN] = {
+        'X', 'Q', 'C', 'R', 'P', '0', '0', '1'
+    };
+    return data != NULL
+        && data_len == sizeof(xqc_mini_recovery_probe_t)
+        && memcmp(data, magic, sizeof(magic)) == 0;
+}
 
 /* the congestion control types */
 typedef enum cc_type_s {

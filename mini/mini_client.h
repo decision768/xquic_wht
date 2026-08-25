@@ -270,6 +270,9 @@ typedef struct xqc_mini_cli_user_path_s {
     int                     consecutive_write_failures;
     int                     disabled_for_session;
     xqc_usec_t              last_recover_probe_time;
+    int                     recovery_probe_pending;
+    uint64_t                recovery_probe_nonce;
+    xqc_usec_t              recovery_probe_start_time;
     xqc_mini_cli_rx_batch_t *rx_batch;
     int                     rx_release_pending;
     xqc_mini_cli_rx_path_diag_t rx_diag;
