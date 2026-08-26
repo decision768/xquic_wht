@@ -1269,6 +1269,57 @@ netins_udp_stream_reset(netins_udp_stream_t *stream, uint64_t error_code)
     return 0;
 }
 
+int
+netins_udp_stream_get_snapshot(netins_udp_stream_t *stream,
+    netins_udp_stream_snapshot_t *snapshot)
+{
+    if (!netins_udp_stream_valid(stream) || snapshot == NULL
+        || snapshot->struct_size < sizeof(*snapshot)
+        || snapshot->api_version != NETINS_UDP_API_VERSION)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    uint32_t snapshot_size = snapshot->struct_size;
+    mini_backend_stream_snapshot_t backend_snapshot;
+    mini_backend_log_scope_enter(&stream->connection->backend_config);
+    int ret = mini_backend_stream_get_snapshot(stream->backend_stream,
+        &backend_snapshot);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        return netins_udp_set_error(stream->connection,
+            ret > 0 ? ret : EIO, "stream snapshot failed");
+    }
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->struct_size = snapshot_size;
+    snapshot->api_version = NETINS_UDP_API_VERSION;
+    snapshot->snapshot_time_us = backend_snapshot.snapshot_time_us;
+    snapshot->endpoint = backend_snapshot.endpoint;
+    snapshot->state = backend_snapshot.state;
+    snapshot->lane_count = backend_snapshot.lane_count;
+    snapshot->flags = backend_snapshot.flags;
+    snapshot->accepted_bytes = backend_snapshot.accepted_bytes;
+    snapshot->peer_received_bytes = backend_snapshot.peer_received_bytes;
+    snapshot->send_queue_bytes = backend_snapshot.send_queue_bytes;
+    snapshot->send_queue_capacity = backend_snapshot.send_queue_capacity;
+    snapshot->send_queue_high_water = backend_snapshot.send_queue_high_water;
+    snapshot->reorder_bytes = backend_snapshot.reorder_bytes;
+    snapshot->reorder_capacity = backend_snapshot.reorder_capacity;
+    snapshot->reorder_high_water = backend_snapshot.reorder_high_water;
+    snapshot->records_enqueued = backend_snapshot.records_enqueued;
+    snapshot->records_submitted = backend_snapshot.records_submitted;
+    snapshot->records_received = backend_snapshot.records_received;
+    snapshot->records_delivered = backend_snapshot.records_delivered;
+    memcpy(snapshot->lane_payload_sent, backend_snapshot.lane_payload_sent,
+        sizeof(snapshot->lane_payload_sent));
+    memcpy(snapshot->lane_payload_received,
+        backend_snapshot.lane_payload_received,
+        sizeof(snapshot->lane_payload_received));
+    snapshot->last_error = backend_snapshot.last_error;
+    snapshot->app_error_code = backend_snapshot.app_error_code;
+    return 0;
+}
+
 void
 netins_udp_stream_close(netins_udp_stream_t *stream)
 {

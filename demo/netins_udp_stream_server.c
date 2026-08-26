@@ -13,6 +13,27 @@ typedef struct stream_demo_receiver_s {
 } stream_demo_receiver_t;
 
 static void
+stream_demo_print_snapshot(netins_udp_stream_t *stream)
+{
+    netins_udp_stream_snapshot_t snapshot =
+        NETINS_UDP_STREAM_SNAPSHOT_INITIALIZER;
+    if (netins_udp_stream_get_snapshot(stream, &snapshot) != 0) {
+        perror("get stream snapshot");
+        return;
+    }
+    printf("[stream_api_snapshot] role=server state=%d lanes=%u"
+           " accepted=%" PRIu64 " reorder=%" PRIu64
+           " reorder_high_water=%" PRIu64
+           " records_received=%" PRIu64
+           " records_delivered=%" PRIu64
+           " last_error=%d app_error=%" PRIu64 "\n",
+        snapshot.state, snapshot.lane_count, snapshot.accepted_bytes,
+        snapshot.reorder_bytes, snapshot.reorder_high_water,
+        snapshot.records_received, snapshot.records_delivered,
+        snapshot.last_error, snapshot.app_error_code);
+}
+
+static void
 stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
     size_t data_len, uint64_t offset, void *user_data)
 {
@@ -38,9 +59,10 @@ stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
 int
 main(int argc, char **argv)
 {
-    if (argc != 6) {
+    if (argc < 6 || argc > 8) {
         fprintf(stderr,
-            "usage: %s LISTEN_IP PORT EXPECTED_BYTES LANES SEED\n", argv[0]);
+            "usage: %s LISTEN_IP PORT EXPECTED_BYTES LANES SEED"
+            " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS]]\n", argv[0]);
         return 2;
     }
     const char *listen_ip = argv[1];
@@ -51,6 +73,11 @@ main(int argc, char **argv)
         .seed = (uint32_t)strtoul(argv[5], NULL, 10),
         .first_bad_offset = UINT64_MAX,
     };
+    size_t receive_queue_size = argc > 6
+        ? (size_t)strtoull(argv[6], NULL, 10)
+        : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    uint32_t finish_timeout_ms = argc > 7
+        ? (uint32_t)strtoul(argv[7], NULL, 10) : 60000;
     int result = 1;
     netins_udp_t *server = NULL;
     netins_udp_t *connection = NULL;
@@ -70,6 +97,9 @@ main(int argc, char **argv)
         perror("listen stream server");
         goto cleanup;
     }
+    printf("[stream_api_ready] listen=%s port=%u\n",
+        listen_ip, (unsigned)port);
+    fflush(stdout);
     connection = netins_udp_accept(server);
     if (connection == NULL) {
         perror("accept stream connection");
@@ -79,6 +109,7 @@ main(int argc, char **argv)
     netins_udp_stream_config_t config =
         NETINS_UDP_STREAM_CONFIG_INITIALIZER;
     config.lane_count = lane_count;
+    config.receive_queue_size = receive_queue_size;
     config.on_data = stream_demo_on_data;
     config.user_data = &receiver;
     if (netins_udp_stream_accept(connection, &config, &stream) != 0) {
@@ -87,10 +118,14 @@ main(int argc, char **argv)
     }
     netins_udp_stream_result_t stream_result =
         NETINS_UDP_STREAM_RESULT_INITIALIZER;
-    if (netins_udp_stream_finish(stream, 60000, &stream_result) != 0) {
+    if (netins_udp_stream_finish(stream, finish_timeout_ms,
+            &stream_result) != 0)
+    {
         perror("finish received stream");
+        stream_demo_print_snapshot(stream);
         goto cleanup;
     }
+    stream_demo_print_snapshot(stream);
     int success = !receiver.mismatch
         && (expected_bytes == 0 || receiver.received == expected_bytes)
         && stream_result.peer_received_bytes == receiver.received;

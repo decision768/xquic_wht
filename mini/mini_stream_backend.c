@@ -88,6 +88,7 @@ struct mini_backend_stream_s {
     int worker_started;
     int wake_pipe[2];
     struct event *wake_event;
+    int wake_pending;
 
     mini_stream_lane_t lanes[MINI_STREAM_ENABLED_MAX_LANES];
     uint32_t allocated_lanes;
@@ -100,6 +101,14 @@ struct mini_backend_stream_s {
     uint64_t start_time_us;
     uint64_t completed_time_us;
     size_t send_queue_bytes;
+    size_t send_queue_high_water;
+    size_t reorder_high_water;
+    uint64_t records_enqueued;
+    uint64_t records_submitted;
+    uint64_t records_received;
+    uint64_t records_delivered;
+    uint64_t lane_payload_sent[MINI_STREAM_ENABLED_MAX_LANES];
+    uint64_t lane_payload_received[MINI_STREAM_ENABLED_MAX_LANES];
     mini_stream_reorder_t reorder;
 
     int finish_requested;
@@ -139,8 +148,10 @@ mini_stream_fail_locked(mini_backend_stream_t *stream, int error_code)
     if (stream->error_code == 0) {
         stream->error_code = error_code != 0 ? error_code : EIO;
     }
-    stream->completed = 1;
-    stream->completed_time_us = mini_stream_now();
+    if (!stream->completed) {
+        stream->completed = 1;
+        stream->completed_time_us = mini_stream_now();
+    }
     mini_stream_signal_locked(stream);
     return -1;
 }
@@ -181,8 +192,16 @@ mini_stream_wake(mini_backend_stream_t *stream)
     if (stream == NULL || stream->wake_pipe[1] < 0) {
         return;
     }
+    /* All callers hold stream->lock.  One unread byte is enough to wake the
+     * worker, so coalesce bursts instead of writing once per queued record. */
+    if (stream->wake_pending) {
+        return;
+    }
+    stream->wake_pending = 1;
     ssize_t written = write(stream->wake_pipe[1], &byte, 1);
-    (void)written;
+    if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        stream->wake_pending = 0;
+    }
 }
 
 static void
@@ -197,6 +216,7 @@ mini_stream_wake_callback(evutil_socket_t fd, short events, void *arg)
         return;
     }
     pthread_mutex_lock(&stream->lock);
+    stream->wake_pending = 0;
     (void)mini_stream_process_locked(stream);
     if (stream->stop_requested && stream->event_base != NULL) {
         event_base_loopbreak(stream->event_base);
@@ -268,6 +288,9 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
         if (lane->send_head == NULL) {
             lane->send_tail = NULL;
         }
+        stream->records_submitted++;
+        stream->lane_payload_sent[lane->lane_index] +=
+            chunk->payload_length;
         stream->send_queue_bytes -= chunk->payload_length;
         free(chunk);
         pthread_cond_broadcast(&stream->send_space_cond);
@@ -696,7 +719,11 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
                 ? stream->error_code : ECONNRESET;
             break;
         }
-        if (stream->finish_requested || stream->reset_requested) {
+        if (stream->reset_requested) {
+            result = ECANCELED;
+            break;
+        }
+        if (stream->finish_requested) {
             result = EPIPE;
             break;
         }
@@ -738,6 +765,10 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
         }
         lane->send_tail = chunk;
         stream->send_queue_bytes += count;
+        if (stream->send_queue_bytes > stream->send_queue_high_water) {
+            stream->send_queue_high_water = stream->send_queue_bytes;
+        }
+        stream->records_enqueued++;
         stream->digest = mini_stream_digest_update(stream->digest,
             bytes + *accepted, count);
         stream->next_send_offset += count;
@@ -765,7 +796,9 @@ mini_backend_stream_flush(mini_backend_stream_t *stream,
     int result = 0;
     pthread_mutex_lock(&stream->lock);
     mini_stream_wake(stream);
-    while (stream->send_queue_bytes != 0 && stream->error_code == 0) {
+    while (stream->send_queue_bytes != 0 && stream->error_code == 0
+        && !stream->reset_requested && !stream->connection_closed)
+    {
         result = mini_stream_wait_locked(stream, &stream->state_cond,
             timeout_ms, start);
         if (result != 0) {
@@ -774,6 +807,10 @@ mini_backend_stream_flush(mini_backend_stream_t *stream,
     }
     if (result == 0 && stream->error_code != 0) {
         result = stream->error_code;
+    } else if (result == 0 && stream->reset_requested) {
+        result = ECANCELED;
+    } else if (result == 0 && stream->connection_closed) {
+        result = ECONNRESET;
     }
     pthread_mutex_unlock(&stream->lock);
     return result;
@@ -793,7 +830,9 @@ mini_backend_stream_finish(mini_backend_stream_t *stream,
     if (stream->start_time_us == 0) {
         stream->start_time_us = start;
     }
-    if (stream->role == MINI_STREAM_ENDPOINT_OPEN
+    if (stream->reset_requested) {
+        wait_result = ECANCELED;
+    } else if (stream->role == MINI_STREAM_ENDPOINT_OPEN
         && !stream->finish_requested)
     {
         uint32_t i;
@@ -810,7 +849,9 @@ mini_backend_stream_finish(mini_backend_stream_t *stream,
         }
         mini_stream_wake(stream);
     }
-    while (!stream->completed && stream->error_code == 0) {
+    while (wait_result == 0 && !stream->completed
+        && stream->error_code == 0)
+    {
         wait_result = mini_stream_wait_locked(stream, &stream->state_cond,
             timeout_ms, start);
         if (wait_result != 0) {
@@ -843,6 +884,55 @@ mini_backend_stream_reset(mini_backend_stream_t *stream,
         stream->reset_requested = 1;
         mini_stream_wake(stream);
     }
+    pthread_mutex_unlock(&stream->lock);
+    return 0;
+}
+
+int
+mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
+    mini_backend_stream_snapshot_t *snapshot)
+{
+    if (!mini_stream_valid(stream) || snapshot == NULL) {
+        return EINVAL;
+    }
+    pthread_mutex_lock(&stream->lock);
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->snapshot_time_us = mini_stream_now();
+    snapshot->endpoint = stream->role;
+    if (stream->reset_requested) {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_RESET;
+    } else if (stream->error_code != 0 || stream->connection_closed) {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_ERROR;
+    } else if (stream->completed) {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_COMPLETED;
+    } else if (stream->finish_requested) {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_FINISHING;
+    } else {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_ACTIVE;
+    }
+    snapshot->lane_count = stream->lane_count;
+    snapshot->flags = stream->flags;
+    snapshot->accepted_bytes = stream->accepted_bytes;
+    snapshot->peer_received_bytes = stream->peer_received_bytes;
+    snapshot->send_queue_bytes = stream->send_queue_bytes;
+    snapshot->send_queue_capacity = stream->send_queue_limit;
+    snapshot->send_queue_high_water = stream->send_queue_high_water;
+    snapshot->reorder_bytes = stream->reorder.buffered_bytes;
+    snapshot->reorder_capacity = stream->receive_queue_limit;
+    snapshot->reorder_high_water = stream->reorder_high_water;
+    snapshot->records_enqueued = stream->records_enqueued;
+    snapshot->records_submitted = stream->records_submitted;
+    snapshot->records_received = stream->records_received;
+    snapshot->records_delivered = stream->records_delivered;
+    memcpy(snapshot->lane_payload_sent, stream->lane_payload_sent,
+        sizeof(snapshot->lane_payload_sent));
+    memcpy(snapshot->lane_payload_received, stream->lane_payload_received,
+        sizeof(snapshot->lane_payload_received));
+    snapshot->last_error = stream->error_code != 0
+        ? stream->error_code
+        : (stream->connection_closed && !stream->completed
+            ? ECONNRESET : 0);
+    snapshot->app_error_code = stream->app_error_code;
     pthread_mutex_unlock(&stream->lock);
     return 0;
 }
@@ -932,6 +1022,9 @@ mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
         mini_stream_reorder_discard(&stream->reorder, chunk);
         return mini_stream_fail_locked(stream, ret);
     }
+    if (stream->reorder.buffered_bytes > stream->reorder_high_water) {
+        stream->reorder_high_water = stream->reorder.buffered_bytes;
+    }
     mini_stream_reorder_chunk_t *ready;
     while ((ready = mini_stream_reorder_pop_ready(&stream->reorder)) != NULL) {
         if (stream->start_time_us == 0) {
@@ -944,6 +1037,7 @@ mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
                 ready->offset);
         }
         stream->accepted_bytes = stream->reorder.next_offset;
+        stream->records_delivered++;
         free(ready);
     }
     return 0;
@@ -1015,6 +1109,9 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
         return mini_stream_fail_locked(stream,
             error_code != 0 ? error_code : ENOMEM);
     }
+    if (stream->reorder.buffered_bytes > stream->reorder_high_water) {
+        stream->reorder_high_water = stream->reorder.buffered_bytes;
+    }
     lane->incoming_chunk = chunk;
     return 0;
 }
@@ -1071,6 +1168,8 @@ mini_stream_receive_forward_locked(mini_backend_stream_t *stream,
         if (chunk->received == chunk->length) {
             lane->incoming_chunk = NULL;
             lane->frame_header_bytes = 0;
+            stream->records_received++;
+            stream->lane_payload_received[lane->lane_index] += chunk->length;
             if (mini_stream_insert_receive_locked(stream, chunk) != 0) {
                 return -1;
             }

@@ -128,6 +128,38 @@ typedef struct mini_backend_stream_result_s {
     uint64_t elapsed_us;
 } mini_backend_stream_result_t;
 
+typedef enum mini_backend_stream_state_e {
+    MINI_BACKEND_STREAM_STATE_ACTIVE = 1,
+    MINI_BACKEND_STREAM_STATE_FINISHING = 2,
+    MINI_BACKEND_STREAM_STATE_COMPLETED = 3,
+    MINI_BACKEND_STREAM_STATE_RESET = 4,
+    MINI_BACKEND_STREAM_STATE_ERROR = 5
+} mini_backend_stream_state_t;
+
+typedef struct mini_backend_stream_snapshot_s {
+    uint64_t snapshot_time_us;
+    int endpoint;
+    int state;
+    uint32_t lane_count;
+    uint32_t flags;
+    uint64_t accepted_bytes;
+    uint64_t peer_received_bytes;
+    uint64_t send_queue_bytes;
+    uint64_t send_queue_capacity;
+    uint64_t send_queue_high_water;
+    uint64_t reorder_bytes;
+    uint64_t reorder_capacity;
+    uint64_t reorder_high_water;
+    uint64_t records_enqueued;
+    uint64_t records_submitted;
+    uint64_t records_received;
+    uint64_t records_delivered;
+    uint64_t lane_payload_sent[8];
+    uint64_t lane_payload_received[8];
+    int last_error;
+    uint64_t app_error_code;
+} mini_backend_stream_snapshot_t;
+
 void mini_backend_config_init(mini_backend_config_t *config);
 void mini_backend_log_scope_enter(const mini_backend_config_t *config);
 void mini_backend_log_scope_leave(void);
@@ -198,6 +230,8 @@ int mini_backend_stream_finish(mini_backend_stream_t *stream,
     uint32_t timeout_ms, mini_backend_stream_result_t *result);
 int mini_backend_stream_reset(mini_backend_stream_t *stream,
     uint64_t error_code);
+int mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
+    mini_backend_stream_snapshot_t *snapshot);
 void mini_backend_stream_destroy(mini_backend_stream_t *stream);
 
 #endif

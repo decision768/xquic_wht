@@ -346,6 +346,19 @@ typedef enum netins_udp_stream_flag_e {
     NETINS_UDP_STREAM_FLAG_NONBLOCK = 1U << 0
 } netins_udp_stream_flag_t;
 
+typedef enum netins_udp_stream_endpoint_e {
+    NETINS_UDP_STREAM_ENDPOINT_OPEN = 1,
+    NETINS_UDP_STREAM_ENDPOINT_ACCEPT = 2
+} netins_udp_stream_endpoint_t;
+
+typedef enum netins_udp_stream_state_e {
+    NETINS_UDP_STREAM_STATE_ACTIVE = 1,
+    NETINS_UDP_STREAM_STATE_FINISHING = 2,
+    NETINS_UDP_STREAM_STATE_COMPLETED = 3,
+    NETINS_UDP_STREAM_STATE_RESET = 4,
+    NETINS_UDP_STREAM_STATE_ERROR = 5
+} netins_udp_stream_state_t;
+
 typedef void (*netins_udp_stream_data_cb)(
     netins_udp_stream_t *stream,
     const void *data,
@@ -382,6 +395,39 @@ typedef struct netins_udp_stream_result_s {
 #define NETINS_UDP_STREAM_RESULT_INITIALIZER \
     { sizeof(netins_udp_stream_result_t), NETINS_UDP_API_VERSION, \
       0, 0, 0, {0} }
+
+typedef struct netins_udp_stream_snapshot_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint64_t snapshot_time_us;
+    int endpoint;
+    int state;
+    uint32_t lane_count;
+    uint32_t flags;
+    uint64_t accepted_bytes;
+    uint64_t peer_received_bytes;
+    uint64_t send_queue_bytes;
+    uint64_t send_queue_capacity;
+    uint64_t send_queue_high_water;
+    uint64_t reorder_bytes;
+    uint64_t reorder_capacity;
+    uint64_t reorder_high_water;
+    uint64_t records_enqueued;
+    uint64_t records_submitted;
+    uint64_t records_received;
+    uint64_t records_delivered;
+    uint64_t lane_payload_sent[NETINS_UDP_STREAM_MAX_LANES];
+    uint64_t lane_payload_received[NETINS_UDP_STREAM_MAX_LANES];
+    int last_error;
+    uint32_t reserved32;
+    uint64_t app_error_code;
+    uint64_t reserved[6];
+} netins_udp_stream_snapshot_t;
+
+#define NETINS_UDP_STREAM_SNAPSHOT_INITIALIZER \
+    { sizeof(netins_udp_stream_snapshot_t), NETINS_UDP_API_VERSION, \
+      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
+      {0}, {0}, 0, 0, 0, {0} }
 
 NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
 
@@ -466,6 +512,17 @@ NETINS_UDP_PUBLIC int netins_udp_stream_finish(
     netins_udp_stream_result_t *result);
 NETINS_UDP_PUBLIC int netins_udp_stream_reset(
     netins_udp_stream_t *stream, uint64_t error_code);
+/*
+ * get_snapshot() is non-blocking with respect to network progress and may be
+ * called while another application thread is writing or waiting in finish().
+ * Queue byte counts are instantaneous; high-water and record/lane counters
+ * are cumulative for the lifetime of the logical stream.  app_error_code is
+ * the local value supplied to reset(); transport/protocol failures appear in
+ * last_error.  Version 1 does not transmit the application reset code to the
+ * peer and does not provide reconnect/resume across QUIC connections.
+ */
+NETINS_UDP_PUBLIC int netins_udp_stream_get_snapshot(
+    netins_udp_stream_t *stream, netins_udp_stream_snapshot_t *snapshot);
 NETINS_UDP_PUBLIC void netins_udp_stream_close(
     netins_udp_stream_t *stream);
 

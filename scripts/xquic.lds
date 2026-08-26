@@ -146,6 +146,7 @@ XQUIC_VERS_1.0 {
         netins_udp_stream_flush;
         netins_udp_stream_finish;
         netins_udp_stream_reset;
+        netins_udp_stream_get_snapshot;
         netins_udp_stream_close;
         netins_udp_get_state;
         netins_udp_is_multipath;

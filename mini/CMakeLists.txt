@@ -181,6 +181,8 @@ if(XQC_ENABLE_MINI_API)
     add_executable(mini_stream_reorder_test
         ../tests/mini_stream_reorder_test.c
         mini_stream_reorder.c)
+    add_executable(netins_udp_stream_api_contract_test
+        ../tests/netins_udp_stream_api_contract_test.c)
 
     foreach(target_name
         netins_udp_mini_api_client
@@ -200,4 +202,6 @@ if(XQC_ENABLE_MINI_API)
         ${MINI_BACKEND_INCLUDE_DIRS})
     target_include_directories(mini_stream_reorder_test PRIVATE
         ${MINI_BACKEND_INCLUDE_DIRS})
+    target_include_directories(netins_udp_stream_api_contract_test PRIVATE
+        "${CMAKE_SOURCE_DIR}/include")
 endif()
