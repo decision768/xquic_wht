@@ -10,6 +10,7 @@
 #endif
 
 #define NETINS_UDP_HANDLE_MAGIC 0x4e554450U
+#define NETINS_UDP_STREAM_MAGIC 0x4e535452U
 
 typedef enum netins_udp_tls_source_e {
     NETINS_UDP_TLS_SOURCE_NONE = 0,
@@ -44,6 +45,16 @@ struct netins_udp_s {
     mini_backend_client_t *client_backend;
     mini_backend_server_t *server_backend;
     mini_backend_server_connection_t *server_connection;
+    struct netins_udp_stream_s *active_stream;
+};
+
+struct netins_udp_stream_s {
+    uint32_t magic;
+    netins_udp_t *connection;
+    mini_backend_stream_t *backend_stream;
+    uint32_t flags;
+    netins_udp_stream_data_cb on_data;
+    void *user_data;
 };
 
 #endif

@@ -217,6 +217,9 @@ typedef struct xqc_mini_cli_args_s {
 
     /* Dedicated H3 Extended Bytestream POC; disabled for file/API mode. */
     xqc_mini_stream_poc_config_t stream_poc;
+
+    /* Public data-stream API mode; selected before connecting. */
+    int                         stream_api_enabled;
 } xqc_mini_cli_args_t;
 
 
@@ -399,6 +402,9 @@ typedef struct xqc_mini_cli_user_conn_s {
 
     /* Owned by mini_stream_poc_client.c when stream_poc.enabled is set. */
     void                   *stream_poc_state;
+
+    /* Owned by mini_stream_backend.c while a public stream is active. */
+    void                   *stream_api_state;
 
 
 } xqc_mini_cli_user_conn_t;

@@ -28,6 +28,8 @@ extern "C" {
 #define NETINS_UDP_ERROR_MSG_LEN 256U
 #define NETINS_UDP_REMOTE_PATH_LEN 1024U
 #define NETINS_UDP_TLS_PEM_MAX_LEN (1024U * 1024U)
+#define NETINS_UDP_STREAM_MAX_LANES 8U
+#define NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE (8U * 1024U * 1024U)
 
 typedef struct netins_udp_s netins_udp_t;
 
@@ -121,7 +123,13 @@ typedef enum netins_udp_opt_e {
     NETINS_UDP_OPT_KERNEL_RCVBUF = 9,
     NETINS_UDP_OPT_LOGGER = 10,
     NETINS_UDP_OPT_ZLOG = 11,
-    NETINS_UDP_OPT_TLS_MEMORY = 12
+    NETINS_UDP_OPT_TLS_MEMORY = 12,
+    /*
+     * int boolean, configured before connect()/listen().  It enables the
+     * h3-ext ALPN required by the data-stream API.  Ordinary file clients
+     * keep using the original h3 ALPN unless this option is explicitly set.
+     */
+    NETINS_UDP_OPT_STREAM_MODE = 13
 } netins_udp_opt_t;
 
 typedef enum netins_udp_transfer_direction_e {
@@ -331,6 +339,50 @@ typedef struct netins_udp_snapshot_s {
       { NETINS_UDP_PATH_STATIS_INITIALIZER }, \
       NETINS_UDP_CLOSE_REASON_INITIALIZER, {0} }
 
+typedef struct netins_udp_stream_s netins_udp_stream_t;
+
+typedef enum netins_udp_stream_flag_e {
+    NETINS_UDP_STREAM_FLAG_NONE = 0,
+    NETINS_UDP_STREAM_FLAG_NONBLOCK = 1U << 0
+} netins_udp_stream_flag_t;
+
+typedef void (*netins_udp_stream_data_cb)(
+    netins_udp_stream_t *stream,
+    const void *data,
+    size_t data_len,
+    uint64_t offset,
+    void *user_data);
+
+typedef struct netins_udp_stream_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint32_t lane_count;
+    uint32_t flags;
+    size_t send_queue_size;
+    size_t receive_queue_size;
+    netins_udp_stream_data_cb on_data;
+    void *user_data;
+    uint64_t reserved[6];
+} netins_udp_stream_config_t;
+
+#define NETINS_UDP_STREAM_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_stream_config_t), NETINS_UDP_API_VERSION, 1, \
+      NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
+      NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, NULL, NULL, {0} }
+
+typedef struct netins_udp_stream_result_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    uint64_t accepted_bytes;
+    uint64_t peer_received_bytes;
+    uint64_t elapsed_us;
+    uint64_t reserved[5];
+} netins_udp_stream_result_t;
+
+#define NETINS_UDP_STREAM_RESULT_INITIALIZER \
+    { sizeof(netins_udp_stream_result_t), NETINS_UDP_API_VERSION, \
+      0, 0, 0, {0} }
+
 NETINS_UDP_PUBLIC uint32_t netins_udp_get_api_version(void);
 
 /*
@@ -381,6 +433,41 @@ NETINS_UDP_PUBLIC int netins_udp_transfer(netins_udp_t *client,
     netins_udp_transfer_result_t *result);
 NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
     const netins_udp_serve_config_t *config);
+
+/*
+ * Data streams are unidirectional logical transfers in API version 1.  The
+ * opener writes; the accepter receives through on_data.  Both sides call
+ * finish(): the opener waits for a verified peer receipt, while the accepter
+ * waits for peer FIN and receipt submission.  A logical stream may aggregate
+ * 1..NETINS_UDP_STREAM_MAX_LANES H3 Extended Bytestream lanes and delivers
+ * received data to on_data in increasing logical-offset order.
+ * on_data memory is valid only during the callback.  The callback must not
+ * block for a long time or re-enter any operation on the same stream.
+ *
+ * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
+ * connect()/listen().  One logical data stream may be active per connection;
+ * do not mix a file transfer and a data stream on the same connection.
+ */
+NETINS_UDP_PUBLIC int netins_udp_stream_open(
+    netins_udp_t *connected_client,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream);
+NETINS_UDP_PUBLIC int netins_udp_stream_accept(
+    netins_udp_t *accepted_connection,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream);
+NETINS_UDP_PUBLIC int netins_udp_stream_write(
+    netins_udp_stream_t *stream, const void *data, size_t data_len,
+    uint32_t timeout_ms, size_t *accepted);
+NETINS_UDP_PUBLIC int netins_udp_stream_flush(
+    netins_udp_stream_t *stream, uint32_t timeout_ms);
+NETINS_UDP_PUBLIC int netins_udp_stream_finish(
+    netins_udp_stream_t *stream, uint32_t timeout_ms,
+    netins_udp_stream_result_t *result);
+NETINS_UDP_PUBLIC int netins_udp_stream_reset(
+    netins_udp_stream_t *stream, uint64_t error_code);
+NETINS_UDP_PUBLIC void netins_udp_stream_close(
+    netins_udp_stream_t *stream);
 
 NETINS_UDP_PUBLIC int netins_udp_get_state(netins_udp_t *handle);
 NETINS_UDP_PUBLIC int netins_udp_is_multipath(netins_udp_t *handle);

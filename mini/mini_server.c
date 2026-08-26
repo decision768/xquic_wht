@@ -1,4 +1,5 @@
 #include "mini_server.h"
+#include "mini_stream_backend.h"
 #include <stdint.h>
 #include <strings.h>
 
@@ -457,7 +458,8 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
         egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
             args->env_cfg.zlog_minimum_level);
     }
-    egn_cfg.enable_h3_ext = args->stream_poc.enabled ? 1 : 0;
+    egn_cfg.enable_h3_ext =
+        args->stream_poc.enabled || args->stream_api_enabled;
 
     /* init ssl config */
     xqc_mini_svr_init_ssl_config(&ssl_cfg, args);
@@ -769,13 +771,13 @@ xqc_mini_svr_init_alpn_ctx(xqc_engine_t *engine)
         },
         .h3_ext_bs_cbs = {
             .bs_create_notify =
-                xqc_mini_stream_poc_server_bs_create_notify,
+                mini_stream_backend_server_bs_create_notify,
             .bs_close_notify =
-                xqc_mini_stream_poc_server_bs_close_notify,
+                mini_stream_backend_server_bs_close_notify,
             .bs_read_notify =
-                xqc_mini_stream_poc_server_bs_read_notify,
+                mini_stream_backend_server_bs_read_notify,
             .bs_write_notify =
-                xqc_mini_stream_poc_server_bs_write_notify,
+                mini_stream_backend_server_bs_write_notify,
         }
     };
 

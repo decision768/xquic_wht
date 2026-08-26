@@ -5,6 +5,7 @@
  * 3. h3 callbacks
  */
 #include "mini_client_cb.h"
+#include "mini_stream_backend.h"
 #include <errno.h>
 #include <limits.h>
 #include <strings.h>
@@ -187,6 +188,10 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
         && user_conn->ctx->args->stream_poc.enabled)
     {
         xqc_mini_stream_poc_client_on_connection_close(user_conn);
+    }
+    if (user_conn->stream_api_state != NULL) {
+        mini_stream_backend_on_connection_close(
+            user_conn->stream_api_state, xqc_h3_conn_get_errno(conn));
     }
     user_conn->last_error_code = xqc_h3_conn_get_errno(conn);
     user_conn->h3_conn = NULL;

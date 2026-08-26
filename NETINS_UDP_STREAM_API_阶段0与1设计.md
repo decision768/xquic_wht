@@ -34,9 +34,12 @@ producer -> write() -> bounded send queue -> one H3 Bytestream -> on_data()
 第一版不包含多 lane、跨连接续传、自动重连以及流与文件任务的连接内混用。这些能力
 不会改变本节定义的基础 `write/finish` 语义。
 
-## 3. 阶段 2 的公开 API 契约
+## 3. 阶段 2 的公开 API 契约与实现
 
-阶段 1 不向 `netins_udp.h` 暴露尚未实现的链接符号。阶段 2 按以下契约实现正式头文件：
+阶段 1 不向 `netins_udp.h` 暴露尚未实现的链接符号。阶段 2 已按以下契约实现正式头文件。
+由于普通文件连接使用 `h3`，而 Bytestream 连接必须在握手时协商 `h3-ext`，双方还必须在
+`connect()`/`listen()` 之前显式设置 `NETINS_UDP_OPT_STREAM_MODE=1`。未设置时仍使用原来的
+`h3` 文件协议，不改变文件 API 的 ALPN 行为。
 
 ```c
 typedef struct netins_udp_stream_s netins_udp_stream_t;
@@ -116,6 +119,17 @@ void netins_udp_stream_close(netins_udp_stream_t *stream);
 - `on_data()` 的内存仅在回调期间有效，回调不得重入同一 stream，也不得长时间阻塞；
 - 一个 stream 允许一个应用发送线程；XQUIC engine 始终由 SDK 内部 IO 所有者线程驱动；
 - 所有队列必须有上限，不能用无限内存掩盖生产速度高于网络速度的问题。
+
+阶段 2 的实现约束：
+
+- API version 1 是单向逻辑传输：`open()` 端写入，`accept()` 端通过 `on_data()` 接收；
+- 双方都调用 `finish()`：发送方等待经过长度和摘要校验的对端回执，接收方等待 FIN 并
+  提交回执；
+- 内部工作线程独占 XQUIC/libevent，应用线程只操作有界发送队列；通过 pipe 事件唤醒，
+  不使用固定 sleep 轮询；
+- 阶段 2 的编译门只允许 `lane_count=1`，但线上帧已经携带 session、lane、逻辑 offset
+  和总长度，为阶段 3 的多 lane 重排保留兼容格式；
+- 一个连接同时只允许一个逻辑数据流，且不能和文件任务混用。
 
 ## 4. 阶段 1 POC 协议
 

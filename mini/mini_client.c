@@ -1,4 +1,5 @@
 #include "mini_client.h"
+#include "mini_stream_backend.h"
 #include <inttypes.h>
 #include <stdint.h>
 #include <netdb.h>
@@ -969,7 +970,8 @@ xqc_mini_cli_init_xquic_engine(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *arg
         egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
             args->env_cfg.zlog_minimum_level);
     }
-    egn_cfg.enable_h3_ext = args->stream_poc.enabled ? 1 : 0;
+    egn_cfg.enable_h3_ext =
+        args->stream_poc.enabled || args->stream_api_enabled;
 
     /* init ssl config */
     xqc_mini_cli_init_engine_ssl_config(&ssl_cfg, args);
@@ -1280,13 +1282,13 @@ xqc_mini_cli_init_alpn_ctx(xqc_mini_cli_ctx_t *ctx)
         },
         .h3_ext_bs_cbs = {
             .bs_create_notify =
-                xqc_mini_stream_poc_client_bs_create_notify,
+                mini_stream_backend_client_bs_create_notify,
             .bs_close_notify =
-                xqc_mini_stream_poc_client_bs_close_notify,
+                mini_stream_backend_client_bs_close_notify,
             .bs_read_notify =
-                xqc_mini_stream_poc_client_bs_read_notify,
+                mini_stream_backend_client_bs_read_notify,
             .bs_write_notify =
-                xqc_mini_stream_poc_client_bs_write_notify,
+                mini_stream_backend_client_bs_write_notify,
         }
     };
 
@@ -2886,7 +2888,7 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
 
     /* build connection */
     const xqc_cid_t *cid;
-    if (args->stream_poc.enabled) {
+    if (args->stream_poc.enabled || args->stream_api_enabled) {
         cid = xqc_h3_ext_connect(ctx->engine, &conn_settings,
             args->quic_cfg.token, args->quic_cfg.token_len,
             args->req_cfg.host, args->quic_cfg.no_encryption,

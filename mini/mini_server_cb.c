@@ -6,6 +6,7 @@
  */
 
 #include "mini_server_cb.h"
+#include "mini_stream_backend.h"
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
@@ -1961,6 +1962,10 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             xqc_mini_stream_poc_server_on_connection_close(user_conn);
         }
         int h3_error = xqc_h3_conn_get_errno(h3_conn);
+        if (user_conn->stream_api_state != NULL) {
+            mini_stream_backend_on_connection_close(
+                user_conn->stream_api_state, h3_error);
+        }
         user_conn->last_error_code =
             h3_error == H3_NO_ERROR ? 0 : h3_error;
         xqc_h3_conn_set_user_data(h3_conn, listener_conn);

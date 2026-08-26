@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "mini_client.h"
+#include "mini_stream_backend.h"
 
 #if MINI_BACKEND_MAX_INTERFACES > MAX_PATH_CNT
 #error "Mini backend interface capacity exceeds Mini client path slots"
@@ -21,6 +22,7 @@ struct mini_backend_client_s {
     xqc_mini_cli_user_conn_t *connection;
     int api_mode;
     int connect_started;
+    mini_backend_stream_t *active_stream;
 };
 
 static void
@@ -111,6 +113,7 @@ mini_backend_client_apply_config(xqc_mini_cli_args_t *args,
         args->defer_transfer_setup = 1;
         args->disable_0rtt_storage = 1;
     }
+    args->stream_api_enabled = config->stream_mode != 0;
     if (config->has_zlog) {
         args->env_cfg.use_zlog = config->zlog_enabled;
         args->env_cfg.zlog_minimum_level = config->zlog_minimum_level;
@@ -480,6 +483,9 @@ mini_backend_client_destroy(mini_backend_client_t *client)
     if (client == NULL) {
         return;
     }
+    if (client->active_stream != NULL) {
+        mini_backend_stream_destroy(client->active_stream);
+    }
     if (client->connection != NULL) {
         (void)mini_backend_client_shutdown(client, 1000);
         xqc_mini_cli_on_connection_finish(client->connection);
@@ -495,6 +501,42 @@ mini_backend_client_destroy(mini_backend_client_t *client)
     xqc_mini_cli_free_ctx(&client->ctx);
     client->args = NULL;
     free(client);
+}
+
+static void
+mini_backend_client_stream_detach(void *owner,
+    mini_backend_stream_t *stream)
+{
+    mini_backend_client_t *client = owner;
+    if (client != NULL && client->active_stream == stream) {
+        client->active_stream = NULL;
+    }
+}
+
+int
+mini_backend_client_stream_open(mini_backend_client_t *client,
+    const mini_backend_stream_config_t *config,
+    mini_backend_stream_t **out_stream)
+{
+    if (client == NULL || config == NULL || out_stream == NULL
+        || !client->api_mode || !client->args->stream_api_enabled
+        || !client->connect_started || client->connection == NULL
+        || !client->connection->handshake_finished
+        || client->connection->connection_closed
+        || client->active_stream != NULL
+        || client->connection->transfer_active)
+    {
+        return EINVAL;
+    }
+    int ret = mini_stream_backend_create(client->ctx.engine,
+        &client->connection->cid, client->ctx.eb,
+        MINI_STREAM_ENDPOINT_OPEN, config,
+        &client->connection->stream_api_state, client,
+        mini_backend_client_stream_detach, out_stream);
+    if (ret == 0) {
+        client->active_stream = *out_stream;
+    }
+    return ret;
 }
 
 int

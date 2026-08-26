@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 
 #include "mini_server.h"
+#include "mini_stream_backend.h"
 
 #if !defined(XQC_SYS_WINDOWS)
 #include <unistd.h>
@@ -20,6 +21,7 @@ struct mini_backend_server_s {
     int api_mode;
     unsigned int references;
     int listen_started;
+    mini_backend_stream_t *active_stream;
 };
 
 static void
@@ -83,6 +85,7 @@ mini_backend_server_apply_config(xqc_mini_svr_args_t *args,
         args->env_cfg.use_zlog = 0;
         args->env_cfg.disable_file_logging = 1;
     }
+    args->stream_api_enabled = config->stream_mode != 0;
     if (config->has_zlog) {
         args->env_cfg.use_zlog = config->zlog_enabled;
         args->env_cfg.zlog_minimum_level = config->zlog_minimum_level;
@@ -515,6 +518,9 @@ mini_backend_server_destroy(mini_backend_server_t *server)
     if (server == NULL) {
         return;
     }
+    if (server->active_stream != NULL) {
+        mini_backend_stream_destroy(server->active_stream);
+    }
     mini_backend_server_shutdown(server);
     if (server->listener != NULL) {
         xqc_mini_svr_on_connection_finish(server->listener);
@@ -538,6 +544,41 @@ mini_backend_server_destroy(mini_backend_server_t *server)
     xqc_mini_svr_free_ctx(&server->ctx);
     server->args = NULL;
     free(server);
+}
+
+static void
+mini_backend_server_stream_detach(void *owner,
+    mini_backend_stream_t *stream)
+{
+    mini_backend_server_t *server = owner;
+    if (server != NULL && server->active_stream == stream) {
+        server->active_stream = NULL;
+    }
+}
+
+int
+mini_backend_server_stream_accept(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    const mini_backend_stream_config_t *config,
+    mini_backend_stream_t **out_stream)
+{
+    if (server == NULL || connection == NULL || config == NULL
+        || out_stream == NULL || !server->api_mode
+        || !server->args->stream_api_enabled
+        || !connection->handshake_finished || connection->connection_closed
+        || connection->stream_api_state != NULL
+        || server->active_stream != NULL)
+    {
+        return EINVAL;
+    }
+    int ret = mini_stream_backend_create(server->ctx.engine,
+        &connection->cid, server->ctx.eb, MINI_STREAM_ENDPOINT_ACCEPT,
+        config, &connection->stream_api_state, server,
+        mini_backend_server_stream_detach, out_stream);
+    if (ret == 0) {
+        server->active_stream = *out_stream;
+    }
+    return ret;
 }
 
 void

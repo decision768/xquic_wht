@@ -135,6 +135,9 @@ typedef struct xqc_mini_svr_args_s {
     /* Dedicated H3 Extended Bytestream POC; disabled for file/API mode. */
     xqc_mini_stream_poc_config_t stream_poc;
 
+    /* Public data-stream API mode; selected before listening. */
+    int                         stream_api_enabled;
+
 } xqc_mini_svr_args_t;
 
 typedef struct xqc_mini_svr_ctx_s {
@@ -209,6 +212,7 @@ typedef struct xqc_mini_svr_user_conn_s {
 
     /* Stream POC state is per accepted connection; results live on listener. */
     void                   *stream_poc_state;
+    void                   *stream_api_state;
     int                     stream_poc_completed;
     int                     stream_poc_result;
     uint64_t                stream_poc_total_bytes;

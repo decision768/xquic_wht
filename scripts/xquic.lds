@@ -140,6 +140,13 @@ XQUIC_VERS_1.0 {
         netins_udp_accept;
         netins_udp_transfer;
         netins_udp_serve;
+        netins_udp_stream_open;
+        netins_udp_stream_accept;
+        netins_udp_stream_write;
+        netins_udp_stream_flush;
+        netins_udp_stream_finish;
+        netins_udp_stream_reset;
+        netins_udp_stream_close;
         netins_udp_get_state;
         netins_udp_is_multipath;
         netins_udp_get_path_count;

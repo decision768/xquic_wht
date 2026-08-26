@@ -723,6 +723,16 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         }
         break;
     }
+    case NETINS_UDP_OPT_STREAM_MODE: {
+        if (value == NULL || value_len != sizeof(int)
+            || (*(const int *)value != 0 && *(const int *)value != 1))
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "stream mode option requires an int boolean");
+        }
+        handle->backend_config.stream_mode = *(const int *)value;
+        break;
+    }
     default:
         return netins_udp_set_error(handle, ENOPROTOOPT,
             "unsupported option");
@@ -915,7 +925,8 @@ netins_udp_transfer(netins_udp_t *client,
 {
     if (!netins_udp_valid(client) || client->role != NETINS_UDP_ROLE_CLIENT
         || client->state != NETINS_UDP_STATE_CONNECTED
-        || client->client_backend == NULL || task == NULL || result == NULL)
+        || client->client_backend == NULL || client->active_stream != NULL
+        || task == NULL || result == NULL)
     {
         return netins_udp_set_error(client, EINVAL,
             "transfer requires a connected client, task and result");
@@ -993,7 +1004,8 @@ netins_udp_serve(netins_udp_t *connection,
         || connection->role != NETINS_UDP_ROLE_ACCEPTED
         || connection->state != NETINS_UDP_STATE_CONNECTED
         || connection->server_backend == NULL
-        || connection->server_connection == NULL || config == NULL)
+        || connection->server_connection == NULL
+        || connection->active_stream != NULL || config == NULL)
     {
         return netins_udp_set_error(connection, EINVAL,
             "serve requires a connected accepted handle");
@@ -1047,10 +1059,242 @@ netins_udp_serve(netins_udp_t *connection,
 }
 
 static int
+netins_udp_stream_valid(const netins_udp_stream_t *stream)
+{
+    return stream != NULL && stream->magic == NETINS_UDP_STREAM_MAGIC
+        && netins_udp_valid(stream->connection)
+        && stream->connection->active_stream == stream
+        && stream->backend_stream != NULL;
+}
+
+static void
+netins_udp_stream_deliver(void *user_data, const void *data,
+    size_t data_len, uint64_t offset)
+{
+    netins_udp_stream_t *stream = user_data;
+    if (stream != NULL && stream->magic == NETINS_UDP_STREAM_MAGIC
+        && stream->on_data != NULL)
+    {
+        stream->on_data(stream, data, data_len, offset, stream->user_data);
+    }
+}
+
+static int
+netins_udp_stream_configure(netins_udp_t *connection,
+    const netins_udp_stream_config_t *config,
+    mini_backend_stream_config_t *backend_config)
+{
+    if (config == NULL || config->struct_size < sizeof(*config)
+        || config->api_version != NETINS_UDP_API_VERSION
+        || config->lane_count == 0
+        || config->lane_count > NETINS_UDP_STREAM_MAX_LANES
+        || (config->flags & ~NETINS_UDP_STREAM_FLAG_NONBLOCK) != 0)
+    {
+        return netins_udp_set_error(connection, EINVAL,
+            "invalid stream configuration");
+    }
+    memset(backend_config, 0, sizeof(*backend_config));
+    backend_config->lane_count = config->lane_count;
+    backend_config->flags = config->flags;
+    backend_config->send_queue_size = config->send_queue_size != 0
+        ? config->send_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    backend_config->receive_queue_size = config->receive_queue_size != 0
+        ? config->receive_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    return 0;
+}
+
+static int
+netins_udp_stream_create(netins_udp_t *connection,
+    const netins_udp_stream_config_t *config, int accepting,
+    netins_udp_stream_t **out_stream)
+{
+    if (!netins_udp_valid(connection) || out_stream == NULL
+        || connection->state != NETINS_UDP_STATE_CONNECTED
+        || connection->active_stream != NULL
+        || !connection->backend_config.stream_mode
+        || (accepting && connection->role != NETINS_UDP_ROLE_ACCEPTED)
+        || (!accepting && connection->role != NETINS_UDP_ROLE_CLIENT))
+    {
+        return netins_udp_set_error(connection, EINVAL,
+            "stream requires a stream-mode connected endpoint");
+    }
+    *out_stream = NULL;
+    mini_backend_stream_config_t backend_config;
+    if (netins_udp_stream_configure(connection, config,
+            &backend_config) != 0)
+    {
+        return -1;
+    }
+    if (accepting && config->on_data == NULL) {
+        return netins_udp_set_error(connection, EINVAL,
+            "accepted streams require an on_data callback");
+    }
+
+    netins_udp_stream_t *stream = calloc(1, sizeof(*stream));
+    if (stream == NULL) {
+        return netins_udp_set_error(connection, ENOMEM,
+            "allocate stream handle failed");
+    }
+    stream->magic = NETINS_UDP_STREAM_MAGIC;
+    stream->connection = connection;
+    stream->flags = config->flags;
+    stream->on_data = config->on_data;
+    stream->user_data = config->user_data;
+    backend_config.on_data = accepting ? netins_udp_stream_deliver : NULL;
+    backend_config.user_data = stream;
+    connection->active_stream = stream;
+
+    mini_backend_log_scope_enter(&connection->backend_config);
+    int ret = accepting
+        ? mini_backend_server_stream_accept(connection->server_backend,
+            connection->server_connection, &backend_config,
+            &stream->backend_stream)
+        : mini_backend_client_stream_open(connection->client_backend,
+            &backend_config, &stream->backend_stream);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        connection->active_stream = NULL;
+        stream->magic = 0;
+        free(stream);
+        return netins_udp_set_error(connection, ret > 0 ? ret : EIO,
+            "create Mini data stream failed with backend code %d", ret);
+    }
+    *out_stream = stream;
+    netins_udp_clear_error(connection);
+    return 0;
+}
+
+int
+netins_udp_stream_open(netins_udp_t *connected_client,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream)
+{
+    return netins_udp_stream_create(connected_client, config, 0, out_stream);
+}
+
+int
+netins_udp_stream_accept(netins_udp_t *accepted_connection,
+    const netins_udp_stream_config_t *config,
+    netins_udp_stream_t **out_stream)
+{
+    return netins_udp_stream_create(accepted_connection, config, 1,
+        out_stream);
+}
+
+int
+netins_udp_stream_write(netins_udp_stream_t *stream, const void *data,
+    size_t data_len, uint32_t timeout_ms, size_t *accepted)
+{
+    if (!netins_udp_stream_valid(stream) || accepted == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    mini_backend_log_scope_enter(&stream->connection->backend_config);
+    int ret = mini_backend_stream_write(stream->backend_stream, data,
+        data_len, timeout_ms, accepted);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        return netins_udp_set_error(stream->connection,
+            ret > 0 ? ret : EIO,
+            "stream write failed after accepting %zu bytes", *accepted);
+    }
+    netins_udp_clear_error(stream->connection);
+    return 0;
+}
+
+int
+netins_udp_stream_flush(netins_udp_stream_t *stream, uint32_t timeout_ms)
+{
+    if (!netins_udp_stream_valid(stream)) {
+        errno = EINVAL;
+        return -1;
+    }
+    mini_backend_log_scope_enter(&stream->connection->backend_config);
+    int ret = mini_backend_stream_flush(stream->backend_stream, timeout_ms);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        return netins_udp_set_error(stream->connection,
+            ret > 0 ? ret : EIO, "stream flush failed");
+    }
+    netins_udp_clear_error(stream->connection);
+    return 0;
+}
+
+int
+netins_udp_stream_finish(netins_udp_stream_t *stream, uint32_t timeout_ms,
+    netins_udp_stream_result_t *result)
+{
+    if (!netins_udp_stream_valid(stream) || result == NULL
+        || result->struct_size < sizeof(*result)
+        || result->api_version != NETINS_UDP_API_VERSION)
+    {
+        errno = EINVAL;
+        return -1;
+    }
+    uint32_t result_size = result->struct_size;
+    mini_backend_stream_result_t backend_result;
+    mini_backend_log_scope_enter(&stream->connection->backend_config);
+    int ret = mini_backend_stream_finish(stream->backend_stream, timeout_ms,
+        &backend_result);
+    mini_backend_log_scope_leave();
+    memset(result, 0, sizeof(*result));
+    result->struct_size = result_size;
+    result->api_version = NETINS_UDP_API_VERSION;
+    result->accepted_bytes = backend_result.accepted_bytes;
+    result->peer_received_bytes = backend_result.peer_received_bytes;
+    result->elapsed_us = backend_result.elapsed_us;
+    if (ret != 0) {
+        return netins_udp_set_error(stream->connection,
+            ret > 0 ? ret : EIO, "stream finish failed");
+    }
+    netins_udp_clear_error(stream->connection);
+    return 0;
+}
+
+int
+netins_udp_stream_reset(netins_udp_stream_t *stream, uint64_t error_code)
+{
+    if (!netins_udp_stream_valid(stream)) {
+        errno = EINVAL;
+        return -1;
+    }
+    mini_backend_log_scope_enter(&stream->connection->backend_config);
+    int ret = mini_backend_stream_reset(stream->backend_stream, error_code);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        return netins_udp_set_error(stream->connection,
+            ret > 0 ? ret : EIO, "stream reset failed");
+    }
+    netins_udp_clear_error(stream->connection);
+    return 0;
+}
+
+void
+netins_udp_stream_close(netins_udp_stream_t *stream)
+{
+    if (!netins_udp_stream_valid(stream)) {
+        return;
+    }
+    netins_udp_t *connection = stream->connection;
+    mini_backend_log_scope_enter(&connection->backend_config);
+    mini_backend_stream_destroy(stream->backend_stream);
+    mini_backend_log_scope_leave();
+    stream->backend_stream = NULL;
+    if (connection->active_stream == stream) {
+        connection->active_stream = NULL;
+    }
+    stream->magic = 0;
+    free(stream);
+}
+
+static int
 netins_udp_get_backend_snapshot(netins_udp_t *handle,
     mini_backend_snapshot_t *snapshot)
 {
     memset(snapshot, 0, sizeof(*snapshot));
+    if (handle->active_stream != NULL) {
+        return EBUSY;
+    }
     if (handle->role == NETINS_UDP_ROLE_CLIENT
         && handle->client_backend != NULL)
     {
@@ -1252,6 +1496,10 @@ netins_udp_get_state(netins_udp_t *handle)
         errno = EINVAL;
         return NETINS_UDP_STATE_ERROR;
     }
+    /* The stream worker exclusively owns the event base while active. */
+    if (handle->active_stream != NULL) {
+        return handle->state;
+    }
     int poll_error = 0;
     mini_backend_log_scope_enter(&handle->backend_config);
     if (handle->role == NETINS_UDP_ROLE_CLIENT
@@ -1340,6 +1588,10 @@ netins_udp_shutdown(netins_udp_t *handle)
     if (handle->state == NETINS_UDP_STATE_CLOSED) {
         return 0;
     }
+    if (handle->active_stream != NULL) {
+        return netins_udp_set_error(handle, EBUSY,
+            "close the active data stream before shutdown");
+    }
 
     if (handle->close_source == NETINS_UDP_CLOSE_NONE) {
         netins_udp_set_close_reason(handle, NETINS_UDP_CLOSE_LOCAL,
@@ -1386,6 +1638,9 @@ netins_udp_close(netins_udp_t *handle)
 {
     if (!netins_udp_valid(handle)) {
         return;
+    }
+    if (handle->active_stream != NULL) {
+        netins_udp_stream_close(handle->active_stream);
     }
     if (handle->state != NETINS_UDP_STATE_CLOSED) {
         (void)netins_udp_shutdown(handle);
