@@ -901,10 +901,12 @@ mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
     snapshot->endpoint = stream->role;
     if (stream->reset_requested) {
         snapshot->state = MINI_BACKEND_STREAM_STATE_RESET;
-    } else if (stream->error_code != 0 || stream->connection_closed) {
+    } else if (stream->error_code != 0) {
         snapshot->state = MINI_BACKEND_STREAM_STATE_ERROR;
     } else if (stream->completed) {
         snapshot->state = MINI_BACKEND_STREAM_STATE_COMPLETED;
+    } else if (stream->connection_closed) {
+        snapshot->state = MINI_BACKEND_STREAM_STATE_ERROR;
     } else if (stream->finish_requested) {
         snapshot->state = MINI_BACKEND_STREAM_STATE_FINISHING;
     } else {

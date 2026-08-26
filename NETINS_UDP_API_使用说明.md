@@ -1,7 +1,7 @@
 # NetIns UDP Mini API 使用说明
 
 本文面向集成 Mini API 的第三方 C/C++ 开发者，说明当前 API v1 的公开接口、连接建立、
-GET/POST 文件收发、状态查询、错误处理和连接关闭流程。
+GET/POST 文件收发、持续数据流、状态查询、错误处理和连接关闭流程。
 
 公开接口以 [`include/xquic/netins_udp.h`](include/xquic/netins_udp.h) 为准。应用程序只需：
 
@@ -11,12 +11,17 @@ GET/POST 文件收发、状态查询、错误处理和连接关闭流程。
 
 ## 1. API 能做什么
 
-Mini API 是基于 QUIC/HTTP3 的阻塞式完整文件任务 API，不是 TCP socket 风格的字节流 API。
+Mini API 同时提供基于 QUIC/HTTP3 的完整文件任务 API，以及需要显式启用的持续数据流 API。
+数据流不是透明 TCP socket：SDK 会把连续字节切成带逻辑 offset 的记录，并可聚合到 1～8 条
+H3 Extended Bytestream lane，以保留多流聚合、跨 lane 重排和完成回执能力。
 
 - `netins_udp_connect()` 建立客户端 QUIC/HTTP3 连接；
 - `netins_udp_transfer()` 在已连接客户端上执行一次完整 GET 或 POST；
 - `netins_udp_listen()` 和 `netins_udp_accept()` 建立服务端监听并接收连接；
 - `netins_udp_serve()` 在 accepted 连接上处理 GET/POST，直到对端关闭；
+- `netins_udp_stream_open()` / `accept()` 建立单向逻辑数据流；
+- `netins_udp_stream_write()` 可一边接收生产者 Buffer、一边持续发送；
+- `netins_udp_stream_finish()` 等待对端长度与摘要验证回执；
 - `netins_udp_shutdown()` 执行协议关闭；
 - `netins_udp_close()` 释放 handle 和本地资源。
 
@@ -94,7 +99,7 @@ netins_udp_cleanup()
 日志输出 `Mini API server version=6.2`。
 
 `NETINS_UDP_API_VERSION` 当前仍为 `1`，它是结构体初始化和 ABI 兼容检查使用的整数版本号，
-不是交付版本字符串。公开函数共 20 个。
+不是交付版本字符串。公开函数共 28 个。
 
 ### 3.1 全局初始化
 
@@ -130,7 +135,24 @@ netins_udp_cleanup()
 `127.0.0.1` 或 `0.0.0.0`，不直接进行域名解析。TLS SNI 通过 `NETINS_UDP_OPT_TLS`
 中的 `server_name` 单独配置。
 
-### 3.4 状态和统计
+### 3.4 持续数据流
+
+| 接口 | 说明 |
+|---|---|
+| `netins_udp_stream_open()` | 在启用流模式的已连接 CLIENT 上创建发送端 |
+| `netins_udp_stream_accept()` | 在启用流模式的 ACCEPTED handle 上创建接收端 |
+| `netins_udp_stream_write()` | 复制调用方 Buffer；支持阻塞、超时、非阻塞和部分 accepted |
+| `netins_udp_stream_flush()` | 等待本地队列提交给 XQUIC，不等于对端已经收到 |
+| `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN 并提交回执 |
+| `netins_udp_stream_reset()` | 取消本地逻辑流；API v1 不把应用错误码传给对端 |
+| `netins_udp_stream_get_snapshot()` | 查询队列、重排、记录数和逐 lane 字节统计 |
+| `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |
+
+两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`，lane 数必须
+一致。一个连接只能有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收
+方法见 [`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
+
+### 3.5 状态和统计
 
 | 接口 | 返回值/输出 | 说明 |
 |---|---|---|
@@ -144,7 +166,7 @@ netins_udp_cleanup()
 `get_state()` 不是普通的 `0/-1` 状态码函数。正常情况下它直接返回
 `NETINS_UDP_STATE_NEW` 至 `NETINS_UDP_STATE_ERROR` 中的一个值。
 
-### 3.5 错误详情
+### 3.6 错误详情
 
 | 接口 | 说明 |
 |---|---|
@@ -205,6 +227,12 @@ netins_udp_serve_config_t serve = NETINS_UDP_SERVE_CONFIG_INITIALIZER;
 netins_udp_snapshot_t snapshot = NETINS_UDP_SNAPSHOT_INITIALIZER;
 netins_udp_path_statis_t path = NETINS_UDP_PATH_STATIS_INITIALIZER;
 netins_udp_close_reason_t reason = NETINS_UDP_CLOSE_REASON_INITIALIZER;
+netins_udp_stream_config_t stream_config =
+    NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+netins_udp_stream_result_t stream_result =
+    NETINS_UDP_STREAM_RESULT_INITIALIZER;
+netins_udp_stream_snapshot_t stream_snapshot =
+    NETINS_UDP_STREAM_SNAPSHOT_INITIALIZER;
 ```
 
 不要对结构体只做局部赋值，也不要手工猜测 `struct_size`。

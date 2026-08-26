@@ -17,6 +17,7 @@ from typing import Sequence
 
 
 RESULT_RE = re.compile(r"\[stream_api_result\]\s+(?P<fields>.*)")
+LANE_RE = re.compile(r"\[stream_api_lane\]\s+(?P<fields>.*)")
 FIELD_RE = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
 
 
@@ -61,6 +62,23 @@ def integer(values: dict[str, str], key: str) -> int:
     if not value.isdigit():
         raise ValueError(f"missing or invalid {key}={value!r}")
     return int(value)
+
+
+def lane_values(output: str, role: str, value_name: str) -> dict[int, int]:
+    values = {}
+    for line in output.splitlines():
+        match = LANE_RE.search(line)
+        if not match:
+            continue
+        lane_fields = {
+            item.group("key"): item.group("value")
+            for item in FIELD_RE.finditer(match.group("fields"))
+        }
+        if lane_fields.get("role") != role:
+            continue
+        lane = integer(lane_fields, "lane")
+        values[lane] = integer(lane_fields, value_name)
+    return values
 
 
 def read_text(path: Path) -> str:
@@ -188,6 +206,17 @@ def validate_success(
         raise ValueError("client accepted byte count differs from requested size")
     if integer(client_values, "peer_received") != case.size:
         raise ValueError("peer receipt byte count differs from requested size")
+    client_lanes = lane_values(client_output, "client", "sent")
+    server_lanes = lane_values(server_output, "server", "received")
+    if len(client_lanes) != case.lanes or sum(client_lanes.values()) != case.size:
+        raise ValueError("client per-lane counters do not sum to total bytes")
+    if len(server_lanes) != case.lanes or sum(server_lanes.values()) != case.size:
+        raise ValueError("server per-lane counters do not sum to total bytes")
+    if case.size >= case.lanes * 65536:
+        if any(value == 0 for value in client_lanes.values()):
+            raise ValueError("one or more configured lanes carried no payload")
+        if any(value == 0 for value in server_lanes.values()):
+            raise ValueError("receiver observed one or more idle lanes")
     if case.require_backpressure:
         if integer(client_values, "eagain") == 0:
             raise ValueError("nonblocking case did not observe EAGAIN")
@@ -214,7 +243,16 @@ def main() -> int:
     parser.add_argument("--full", action="store_true",
                         help="also run 64 MiB cases on 1, 4 and 8 lanes")
     parser.add_argument("--skip-unit", action="store_true")
+    parser.add_argument("--skip-source-checks", action="store_true")
+    parser.add_argument(
+        "--source-root", type=Path,
+        help="source or delivery root; defaults to the script's parent root",
+    )
     parser.add_argument("--skip-fault", action="store_true")
+    parser.add_argument(
+        "--library", type=Path,
+        help="optional built xquic library for exported-symbol verification",
+    )
     parser.add_argument(
         "--file-regression-command",
         action="append",
@@ -234,6 +272,44 @@ def main() -> int:
         return 1
 
     failures = 0
+    if not args.skip_source_checks:
+        repo_root = (args.source_root.resolve()
+                     if args.source_root is not None
+                     else Path(__file__).resolve().parents[1])
+        abi_command = [
+            sys.executable,
+            str(repo_root / "scripts/mini_api/check_abi.py"),
+            "--header", str(repo_root / "include/xquic/netins_udp.h"),
+            "--version-script", str(repo_root / "scripts/xquic.lds"),
+        ] + (["--library", str(args.library.resolve())]
+             if args.library is not None else [])
+        source_checks = [abi_command]
+        internal_sources = (
+            repo_root / "mini/mini_client.c",
+            repo_root / "mini/mini_server.c",
+            repo_root / "mini/mini_client_backend.c",
+            repo_root / "src/netins_udp/netins_udp_api.c",
+        )
+        if all(path.is_file() for path in internal_sources):
+            source_checks.append(
+                [sys.executable,
+                 str(repo_root / "scripts/mini_api/check_stream_isolation.py"),
+                 "--root", str(repo_root)]
+            )
+        else:
+            print("[SKIP] internal-source isolation check (delivery package)")
+        for command in source_checks:
+            completed = subprocess.run(
+                command, cwd=repo_root, capture_output=True,
+                text=True, check=False,
+            )
+            if completed.returncode != 0:
+                failures += 1
+                print(f"[FAIL] {' '.join(command)}", file=sys.stderr)
+                print(completed.stdout + completed.stderr, file=sys.stderr)
+            else:
+                print(completed.stdout.strip())
+
     if not args.skip_unit:
         for name in (
             "mini_stream_protocol_test",

@@ -28,6 +28,13 @@ stream_demo_print_snapshot(netins_udp_stream_t *stream)
         snapshot.send_queue_high_water, snapshot.records_enqueued,
         snapshot.records_submitted, snapshot.last_error,
         snapshot.app_error_code);
+    uint32_t i;
+    for (i = 0; i < snapshot.lane_count; i++) {
+        printf("[stream_api_lane] role=client lane=%u sent=%" PRIu64
+               " received=%" PRIu64 "\n",
+            i, snapshot.lane_payload_sent[i],
+            snapshot.lane_payload_received[i]);
+    }
 }
 
 static void

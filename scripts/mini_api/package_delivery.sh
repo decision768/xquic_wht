@@ -28,10 +28,22 @@ lib/libxquic-static.a
 lib/libxquic.so
 bin/netins_udp_mini_api_client
 bin/netins_udp_mini_api_server
+bin/netins_udp_stream_client
+bin/netins_udp_stream_server
+bin/mini_stream_protocol_test
+bin/mini_stream_reorder_test
+bin/netins_udp_stream_api_contract_test
 README.md
 NETINS_UDP_API_使用说明.md
 NETINS_UDP_编译指南.md
 MINI_API_测试使用说明.md
+NETINS_UDP_STREAM_API_阶段0与1设计.md
+NETINS_UDP_STREAM_API_阶段2与3实现.md
+NETINS_UDP_STREAM_API_阶段4至7交付与验收.md
+tests/stream_api_acceptance.py
+scripts/mini_api/check_abi.py
+scripts/mini_api/check_stream_isolation.py
+scripts/xquic.lds
 VERSION
 "
 
@@ -42,9 +54,11 @@ for relative_path in $required_files; do
     fi
 done
 
+python3 "$repo_dir/scripts/mini_api/check_stream_isolation.py" \
+    --root "$repo_dir"
 python3 "$repo_dir/scripts/mini_api/check_abi.py" \
     --header "$stage_dir/include/xquic/netins_udp.h" \
-    --version-script "$repo_dir/scripts/xquic.lds" \
+    --version-script "$stage_dir/scripts/xquic.lds" \
     --library "$stage_dir/lib/libxquic.so"
 
 rm -f "$archive"

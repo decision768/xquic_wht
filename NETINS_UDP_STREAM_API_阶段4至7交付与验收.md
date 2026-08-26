@@ -1,0 +1,263 @@
+# NetIns UDP 数据流 API：阶段 4 至 7 交付与验收
+
+本文承接阶段 2 的正式单 lane API 和阶段 3 的 1～8 lane 聚合协议，说明阶段 4～7 的
+可靠性、背压测试、性能观测、回归保护及最终目标机验收方法。公开定义以
+[`include/xquic/netins_udp.h`](include/xquic/netins_udp.h) 为准。
+
+## 1. 本轮交付范围
+
+| 阶段 | 已完成内容 |
+|---|---|
+| 4：可靠性 | 取消后确定的 `ECANCELED` 语义、幂等失败完成时间、连接/协议错误状态、应用 reset 错误码可查询 |
+| 5：测试能力 | 边界长度、1/4/8 lane、非阻塞背压、部分写、lane 数不匹配故障和自动验收脚本 |
+| 6：性能与观测 | 唤醒合并、有界队列/重排高水位、记录计数、逐 lane 收发字节和 demo 吞吐输出 |
+| 7：交付收口 | API 初始化器契约测试、28 个公开符号检查、文件/流连接模式隔离守卫、统一验收入口 |
+
+API v1 仍明确不包含跨 QUIC 连接断点续传、自动重连、双向应用数据流，以及同一连接内同时
+运行文件任务和数据流。这些不是阶段 4～7 的遗漏，而是当前冻结的版本边界。
+
+## 2. 运行结构
+
+```text
+生产者反复写入可复用 Buffer
+        │ netins_udp_stream_write()
+        ▼
+有界发送队列（按 payload 字节背压）
+        │ 每条 DATA record 最大 64 KiB
+        ▼
+轮询分流到 lane 0 ... lane N-1
+        │ QUIC 保证每条 lane 内可靠有序
+        ▼
+接收端有界跨-lane重排（按逻辑 offset）
+        │ 只交付连续区间
+        ▼
+on_data(buffer, length, offset)
+        │ 全 lane FIN + 总长度 + FNV-1a 摘要
+        ▼
+lane 0 返回统一完成回执
+```
+
+应用不需要准备文件，也不需要一次性持有完整数据。`write()` 返回后，已经计入 `accepted`
+的部分已被 SDK 复制，原 Buffer 可以立即改写或复用。未被 accepted 的尾部仍归调用方负责。
+
+## 3. 生产者集成模板
+
+连接前启用流模式：
+
+```c
+int enabled = 1;
+netins_udp_set_opt(client, NETINS_UDP_OPT_STREAM_MODE,
+    &enabled, sizeof(enabled));
+netins_udp_connect(client, server_ip, port);
+```
+
+创建 4 lane 流并持续消费上游 Buffer：
+
+```c
+netins_udp_stream_config_t cfg = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+cfg.lane_count = 4;
+cfg.send_queue_size = 8 * 1024 * 1024;
+cfg.receive_queue_size = 8 * 1024 * 1024;
+
+netins_udp_stream_t *stream = NULL;
+if (netins_udp_stream_open(client, &cfg, &stream) != 0) {
+    /* 处理错误 */
+}
+
+while (producer_next_buffer(&data, &length)) {
+    size_t consumed = 0;
+    while (consumed < length) {
+        size_t accepted = 0;
+        int rc = netins_udp_stream_write(stream,
+            data + consumed, length - consumed, 30000, &accepted);
+
+        /* 无论 rc 是否成功，都必须先处理 accepted。 */
+        consumed += accepted;
+        if (rc != 0) {
+            if (errno == EAGAIN || errno == ETIMEDOUT) {
+                /* 按业务策略重试尚未 accepted 的尾部。 */
+                continue;
+            }
+            /* 连接、协议或取消错误：停止生产并关闭。 */
+            break;
+        }
+    }
+}
+
+netins_udp_stream_result_t result =
+    NETINS_UDP_STREAM_RESULT_INITIALIZER;
+if (netins_udp_stream_finish(stream, 60000, &result) == 0) {
+    /* result.peer_received_bytes 已由对端回执确认。 */
+}
+netins_udp_stream_close(stream);
+```
+
+非阻塞模式设置 `cfg.flags = NETINS_UDP_STREAM_FLAG_NONBLOCK`。队列无空间时返回 `-1`、
+`errno=EAGAIN`；同一次调用仍可能已经 accepted 一部分数据。
+
+## 4. 完成、取消和错误语义
+
+| 操作/状态 | 结果 |
+|---|---|
+| `flush()` 成功 | 本地队列已提交给 XQUIC；不证明对端已收到 |
+| 发送端 `finish()` 成功 | 对端确认总长度和摘要一致，所有 lane 的反向 FIN 已完成 |
+| 接收端 `finish()` 成功 | 所有 lane FIN 一致、重排缓存为空、连续长度正确，回执已提交 |
+| 本地 `reset(code)` | 未完成流进入 RESET；后续 write/flush/finish 返回取消错误 |
+| lane 数/session/offset/FIN 不一致 | 流进入 ERROR，通常为 `EPROTO` |
+| 连接或 lane 提前关闭 | 流进入 ERROR，通常为 `ECONNRESET` |
+| 等待超时 | 本次调用返回 `ETIMEDOUT`；读取 accepted/结果后由应用决定重试或 reset |
+
+`reset(code)` 的 `code` 可通过 `netins_udp_stream_get_snapshot()` 的 `app_error_code` 在本端
+查询。API v1 只通过关闭让对端感知失败，不保证把该 64 位应用错误码传到对端。
+
+## 5. 性能和内存边界
+
+- `send_queue_size` 限制待提交的 payload 字节；默认 8 MiB，最小 64 KiB；
+- `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB；
+- 每个 DATA record 额外有 24 字节线上头和一个本地队列节点；
+- 应用传入 Buffer 不计入 SDK 队列，`write()` 只复制 accepted 的字节；
+- `on_data()` 的内存只在回调期间有效，业务要异步处理时必须自行复制；
+- 多 lane 可能增加乱序占用。生产配置不建议对 4/8 lane 使用只有 64 KiB 的接收队列；
+- pipe 唤醒已合并：一批 record 在 I/O 线程处理前只保留一个待处理唤醒，不再逐 record 写管道。
+
+吞吐不是由 lane 数单独保证。lane 数增加只有在路径、拥塞窗口、调度和接收端处理能力允许时
+才可能提高总吞吐。最终必须比较同样网络条件下 1、4、8 lane 的实测结果。
+
+## 6. 快照字段怎样看
+
+```c
+netins_udp_stream_snapshot_t snapshot =
+    NETINS_UDP_STREAM_SNAPSHOT_INITIALIZER;
+netins_udp_stream_get_snapshot(stream, &snapshot);
+```
+
+| 字段 | 判断用途 |
+|---|---|
+| `state` / `last_error` / `app_error_code` | 当前生命周期和失败原因 |
+| `accepted_bytes` | 发送端已复制，或接收端已连续交付的字节 |
+| `peer_received_bytes` | 完成回执确认的字节；完成前通常为 0 |
+| `send_queue_bytes/capacity/high_water` | 生产速度是否持续高于网络消费速度 |
+| `reorder_bytes/capacity/high_water` | 跨 lane 乱序程度和接收内存压力 |
+| `records_enqueued/submitted` | 发送记录是否全部交给 XQUIC |
+| `records_received/delivered` | 收到的记录是否全部按序交付 |
+| `lane_payload_sent[i]` | 发送端第 i 条 lane 实际承载量 |
+| `lane_payload_received[i]` | 接收端第 i 条 lane 实际承载量 |
+
+完成成功时应满足：发送端 `records_enqueued == records_submitted`，接收端
+`records_received == records_delivered`，逐 lane 字节之和等于总字节数，两个当前队列值均为 0。
+
+## 7. 构建本轮目标
+
+在已有 AARCH64 和 Linux x86_64 CMake 参数上保留 `-DXQC_ENABLE_MINI_API=ON`，然后分别构建：
+
+```bash
+cmake --build BUILD_DIR --target \
+  netins_udp_stream_client \
+  netins_udp_stream_server \
+  mini_stream_protocol_test \
+  mini_stream_reorder_test \
+  netins_udp_stream_api_contract_test \
+  --parallel "$(nproc)"
+```
+
+完整链接必须使用与目标架构一致的真实 Tongsuo/BabaSSL、Libevent 和 zlog。AARCH64 客户端
+二进制不能在 x86_64 编译机直接运行。
+
+## 8. 一条命令做同机回环验收
+
+在原生 Linux 构建机执行快速验收：
+
+```bash
+python3 tests/stream_api_acceptance.py \
+  --bin-dir BUILD_DIR/mini \
+  --library BUILD_DIR/libxquic.so
+```
+
+完整模式额外执行 64 MiB 的 1/4/8 lane 对比：
+
+```bash
+python3 tests/stream_api_acceptance.py \
+  --bin-dir BUILD_DIR/mini \
+  --library BUILD_DIR/libxquic.so \
+  --full
+```
+
+统一入口依次检查：
+
+1. 公共头文件与导出脚本一致，指定库时再检查动态库实际符号；
+2. 普通文件连接仍走 `xqc_h3_connect()`，流连接才走 H3 Extended；
+3. 协议、重排和公开结构体初始化器单测；
+4. 0、1、65535、65536、65537 字节边界；
+5. 1/4/8 lane、逐 lane 统计总和和足量数据下的 lane 利用；
+6. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
+7. 客户端/服务端 lane 数不一致必须失败且能观测错误。
+
+脚本会自己生成确定性字节模式，不创建输入文件，也不把完整测试数据放入内存。
+
+## 9. 主板到云服务器直接测试
+
+同机回环通过后，在云服务器先启动接收端。例如 64 MiB、4 lane、seed 7：
+
+```bash
+./netins_udp_stream_server 0.0.0.0 18460 67108864 4 7
+```
+
+再从主板启动发送端，把地址改为云服务器的数值 IPv4：
+
+```bash
+./netins_udp_stream_client SERVER_IP 18460 67108864 4 7
+```
+
+两端都必须出现：
+
+```text
+[stream_api_result] ... success=1 ...
+```
+
+客户端还会输出 `throughput_mbps`、`eagain`、`partial`，双方都会输出每条 lane 的字节数。
+建议依次测 1、4、8 lane，保持服务器、数据量、seed、网卡、调度器和拥塞控制配置不变。
+
+强制背压测试（4 lane、64 KiB 发送队列、非阻塞 flag=1）：
+
+```bash
+./netins_udp_stream_client SERVER_IP 18460 8388608 4 7 \
+  65536 8388608 1 60000 60000
+```
+
+成功且输出 `eagain>0`、`partial>0` 才证明测试确实触发了背压，而不是只走了普通成功路径。
+
+## 10. 文件 API 回归
+
+流模式是建连前选项，普通文件 API 默认仍使用原 H3 连接。代码守卫会检查两种模式没有被
+合并，但正式发布前仍必须在真实环境运行原 GET/POST 测试：
+
+```bash
+python3 tests/mini_api_benchmark/mini_api_benchmark.py \
+  --iterations 1 --order rmnet,agg,usb,
+```
+
+至少要求单路径 GET、单路径 POST、双路径聚合 GET/POST 均成功，传输字节和原测试基线一致。
+文件回归和数据流必须使用不同连接；不要在设置了 `NETINS_UDP_OPT_STREAM_MODE=1` 的连接上
+调用 `netins_udp_transfer()`。
+
+同机已有文件回归包装命令时，也可以让统一入口在流测试后执行：
+
+```bash
+python3 tests/stream_api_acceptance.py \
+  --bin-dir BUILD_DIR/mini \
+  --file-regression-command "./run_file_api_smoke_test.sh"
+```
+
+## 11. 最终放行标准
+
+- 真实依赖下两种架构完整编译、链接成功，ABI 检查为 28 个公开函数；
+- 快速与 `--full` 回环验收全部 PASS；
+- 主板到云服务器 1/4/8 lane 的字节、摘要、逐 lane 总和正确；
+- 背压用例看到 `EAGAIN` 和部分写，RSS 不随总传输字节无限增长；
+- lane 不匹配、断网或服务端提前结束时不能误报成功；
+- 原文件 API GET/POST 回归通过；
+- 关闭流和连接后无崩溃、死锁和残留测试进程。
+
+当前开发电脑能完成源码严格编译、对象目标、ABI、协议/重排和契约测试；真实网络吞吐、
+多路径聚合收益、依赖完整链接和长时间 RSS 必须在上述目标 Linux/AARCH64 环境完成后才能
+宣布最终上线验收通过。

@@ -263,6 +263,11 @@ libxquic-static.a
 libxquic.so
 mini/netins_udp_mini_api_client
 mini/netins_udp_mini_api_server
+mini/netins_udp_stream_client
+mini/netins_udp_stream_server
+mini/mini_stream_protocol_test
+mini/mini_stream_reorder_test
+mini/netins_udp_stream_api_contract_test
 ```
 
 分别安装，禁止两个架构安装到同一目录：
@@ -282,7 +287,12 @@ ABI 检查：
 ```bash
 python3 scripts/mini_api/check_abi.py \
   --library build-mini-api-linux/libxquic.so
+
+python3 scripts/mini_api/check_stream_isolation.py
 ```
+
+数据流的同机回环、背压、故障注入和主板到云端测试见
+[`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
 
 正式打包：
 
