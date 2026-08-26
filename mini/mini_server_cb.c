@@ -1898,6 +1898,7 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     user_conn->listener_conn = listener_conn;
     user_conn->is_connection_scope = 1;
     user_conn->api_owned = listener_conn->api_listener_mode;
+    user_conn->api_backend = listener_conn->api_backend;
     user_conn->ctx = listener_conn->ctx;
     user_conn->fd = listener_conn->fd;
     user_conn->serve_root_fd = -1;
@@ -1913,8 +1914,8 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     memcpy(&user_conn->cid, cid, sizeof(*cid));
 
     if (user_conn->api_owned) {
-        user_conn->all_next = listener_conn->connection_head;
-        listener_conn->connection_head = user_conn;
+        mini_backend_server_on_connection_created(
+            user_conn->api_backend, user_conn);
     }
 
     printf("[stats] xqc_mini_svr_h3_conn_create_notify \n");
@@ -1922,25 +1923,6 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     xqc_mini_svr_log_mp_active_state_force(user_conn, "h3_conn_create");
     return 0;
 }
-
-static void
-xqc_mini_svr_unlink_connection(xqc_mini_svr_user_conn_t *listener_conn,
-    xqc_mini_svr_user_conn_t *user_conn)
-{
-    if (listener_conn == NULL || user_conn == NULL) {
-        return;
-    }
-    xqc_mini_svr_user_conn_t **cursor = &listener_conn->connection_head;
-    while (*cursor != NULL) {
-        if (*cursor == user_conn) {
-            *cursor = user_conn->all_next;
-            user_conn->all_next = NULL;
-            return;
-        }
-        cursor = &(*cursor)->all_next;
-    }
-}
-
 
 int
 xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
@@ -1970,16 +1952,14 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             h3_error == H3_NO_ERROR ? 0 : h3_error;
         xqc_h3_conn_set_user_data(h3_conn, listener_conn);
         user_conn->h3_conn = NULL;
+        if (user_conn->api_owned) {
+            mini_backend_server_on_connection_closed(
+                user_conn->api_backend, user_conn);
+            return 0;
+        }
         user_conn->connection_closed = 1;
         user_conn->serve_cancelled = 1;
         user_conn->serve_configured = 0;
-        if (user_conn->api_owned) {
-            if (!user_conn->queued && !user_conn->delivered) {
-                xqc_mini_svr_unlink_connection(listener_conn, user_conn);
-                xqc_mini_svr_free_user_conn(user_conn);
-            }
-            return 0;
-        }
         xqc_mini_svr_free_user_conn(user_conn);
     }
     return 0;
@@ -1995,22 +1975,11 @@ xqc_mini_svr_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_
     if (user_conn == NULL) {
         return;
     }
-    user_conn->handshake_finished = 1;
-    if (user_conn->api_owned && !user_conn->queued && !user_conn->delivered
-        && !user_conn->connection_closed)
-    {
-        xqc_mini_svr_user_conn_t *listener_conn = user_conn->listener_conn;
-        if (listener_conn != NULL && listener_conn->accepting) {
-            user_conn->queued = 1;
-            listener_conn->accept_yield_requested = 1;
-            user_conn->accept_next = NULL;
-            if (listener_conn->accept_tail == NULL) {
-                listener_conn->accept_head = user_conn;
-            } else {
-                listener_conn->accept_tail->accept_next = user_conn;
-            }
-            listener_conn->accept_tail = user_conn;
-        }
+    if (user_conn->api_owned) {
+        mini_backend_server_on_handshake_finished(
+            user_conn->api_backend, user_conn);
+    } else {
+        user_conn->handshake_finished = 1;
     }
     printf("[diag_server_conn] handshake_finished\n");
     xqc_mini_svr_log_mp_active_state_force(user_conn, "handshake_finished");

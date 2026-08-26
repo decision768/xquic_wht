@@ -487,8 +487,10 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * waits for peer FIN and receipt submission.  A logical stream may aggregate
  * 1..NETINS_UDP_STREAM_MAX_LANES H3 Extended Bytestream lanes and delivers
  * received data to on_data in increasing logical-offset order.
- * on_data memory is valid only during the callback.  The callback must not
- * block for a long time or re-enter any operation on the same stream.
+ * on_data runs on a bounded delivery worker, outside the XQUIC event thread
+ * and outside the stream mutex.  Its memory is valid only during the
+ * callback.  A slow callback consumes receive_queue_size and may eventually
+ * fail the stream with ENOBUFS; it must not close or wait on the same stream.
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;
@@ -542,9 +544,10 @@ NETINS_UDP_PUBLIC void netins_udp_close(netins_udp_t *handle);
 /*
  * Functions returning int use 0 for success and -1 for failure unless they
  * return an enum state. Failure sets errno and, for a valid handle, stores a
- * connection-level error code/message retrievable below. Handles are not
- * safe for concurrent calls. Callers must serialize all operations on a
- * listener and every accepted handle that shares its server backend.
+ * connection-level error code/message retrievable below. Calls on the same
+ * handle are not generally safe concurrently. In stream mode, a listener and
+ * distinct accepted-connection handles may be used by different threads;
+ * each individual handle and stream lifetime must still be serialized.
  */
 NETINS_UDP_PUBLIC int netins_udp_get_last_error_code(
     netins_udp_t *handle);

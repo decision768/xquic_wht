@@ -66,32 +66,40 @@ stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
 int
 main(int argc, char **argv)
 {
-    if (argc < 6 || argc > 8) {
+    if (argc < 6 || argc > 9) {
         fprintf(stderr,
             "usage: %s LISTEN_IP PORT EXPECTED_BYTES LANES SEED"
-            " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS]]\n", argv[0]);
+            " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]\n",
+            argv[0]);
         return 2;
     }
     const char *listen_ip = argv[1];
     uint16_t port = (uint16_t)strtoul(argv[2], NULL, 10);
     uint64_t expected_bytes = strtoull(argv[3], NULL, 10);
     uint32_t lane_count = (uint32_t)strtoul(argv[4], NULL, 10);
-    stream_demo_receiver_t receiver = {
-        .seed = (uint32_t)strtoul(argv[5], NULL, 10),
-        .first_bad_offset = UINT64_MAX,
-    };
+    uint32_t seed = (uint32_t)strtoul(argv[5], NULL, 10);
     size_t receive_queue_size = argc > 6
         ? (size_t)strtoull(argv[6], NULL, 10)
         : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     uint32_t finish_timeout_ms = argc > 7
         ? (uint32_t)strtoul(argv[7], NULL, 10) : 60000;
+    size_t client_count = argc > 8
+        ? (size_t)strtoull(argv[8], NULL, 10) : 1;
     int result = 1;
     netins_udp_t *server = NULL;
-    netins_udp_t *connection = NULL;
-    netins_udp_stream_t *stream = NULL;
+    netins_udp_t **connections = calloc(client_count, sizeof(*connections));
+    netins_udp_stream_t **streams = calloc(client_count, sizeof(*streams));
+    stream_demo_receiver_t *receivers =
+        calloc(client_count, sizeof(*receivers));
 
-    if (port == 0 || lane_count == 0 || netins_udp_init() != 0) {
+    if (port == 0 || lane_count == 0 || client_count == 0
+        || connections == NULL || streams == NULL || receivers == NULL
+        || netins_udp_init() != 0)
+    {
         perror("initialize stream server");
+        free(receivers);
+        free(streams);
+        free(connections);
         return 1;
     }
     server = netins_udp_new(NETINS_UDP_ROLE_SERVER);
@@ -107,50 +115,69 @@ main(int argc, char **argv)
     printf("[stream_api_ready] listen=%s port=%u\n",
         listen_ip, (unsigned)port);
     fflush(stdout);
-    connection = netins_udp_accept(server);
-    if (connection == NULL) {
-        perror("accept stream connection");
-        goto cleanup;
+    for (size_t i = 0; i < client_count; i++) {
+        connections[i] = netins_udp_accept(server);
+        if (connections[i] == NULL) {
+            perror("accept stream connection");
+            goto cleanup;
+        }
+        receivers[i].seed = seed;
+        receivers[i].first_bad_offset = UINT64_MAX;
+        netins_udp_stream_config_t config =
+            NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+        config.lane_count = lane_count;
+        config.receive_queue_size = receive_queue_size;
+        config.on_data = stream_demo_on_data;
+        config.user_data = &receivers[i];
+        if (netins_udp_stream_accept(connections[i], &config,
+                &streams[i]) != 0)
+        {
+            perror("accept data stream");
+            goto cleanup;
+        }
     }
 
-    netins_udp_stream_config_t config =
-        NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-    config.lane_count = lane_count;
-    config.receive_queue_size = receive_queue_size;
-    config.on_data = stream_demo_on_data;
-    config.user_data = &receiver;
-    if (netins_udp_stream_accept(connection, &config, &stream) != 0) {
-        perror("accept data stream");
-        goto cleanup;
+    int all_success = 1;
+    for (size_t i = 0; i < client_count; i++) {
+        netins_udp_stream_result_t stream_result =
+            NETINS_UDP_STREAM_RESULT_INITIALIZER;
+        if (netins_udp_stream_finish(streams[i], finish_timeout_ms,
+                &stream_result) != 0)
+        {
+            perror("finish received stream");
+            stream_demo_print_snapshot(streams[i]);
+            all_success = 0;
+            continue;
+        }
+        stream_demo_print_snapshot(streams[i]);
+        int success = !receivers[i].mismatch
+            && (expected_bytes == 0
+                || receivers[i].received == expected_bytes)
+            && stream_result.peer_received_bytes == receivers[i].received;
+        printf("[stream_api_result] role=server client=%zu success=%d"
+               " lanes=%u received=%" PRIu64 " peer_received=%" PRIu64
+               " first_bad_offset=%" PRIu64 " elapsed_us=%" PRIu64 "\n",
+            i, success, lane_count, receivers[i].received,
+            stream_result.peer_received_bytes,
+            receivers[i].first_bad_offset, stream_result.elapsed_us);
+        if (!success) {
+            all_success = 0;
+        }
     }
-    netins_udp_stream_result_t stream_result =
-        NETINS_UDP_STREAM_RESULT_INITIALIZER;
-    if (netins_udp_stream_finish(stream, finish_timeout_ms,
-            &stream_result) != 0)
-    {
-        perror("finish received stream");
-        stream_demo_print_snapshot(stream);
-        goto cleanup;
-    }
-    stream_demo_print_snapshot(stream);
-    int success = !receiver.mismatch
-        && (expected_bytes == 0 || receiver.received == expected_bytes)
-        && stream_result.peer_received_bytes == receiver.received;
-    printf("[stream_api_result] role=server success=%d lanes=%u"
-           " received=%" PRIu64 " peer_received=%" PRIu64
-           " first_bad_offset=%" PRIu64 " elapsed_us=%" PRIu64 "\n",
-        success, lane_count, receiver.received,
-        stream_result.peer_received_bytes, receiver.first_bad_offset,
-        stream_result.elapsed_us);
-    result = success ? 0 : 1;
+    result = all_success ? 0 : 1;
 
 cleanup:
-    netins_udp_stream_close(stream);
-    netins_udp_close(connection);
+    for (size_t i = 0; i < client_count; i++) {
+        netins_udp_stream_close(streams[i]);
+        netins_udp_close(connections[i]);
+    }
     netins_udp_close(server);
     if (netins_udp_cleanup() != 0 && result == 0) {
         perror("cleanup stream server");
         result = 1;
     }
+    free(receivers);
+    free(streams);
+    free(connections);
     return result;
 }

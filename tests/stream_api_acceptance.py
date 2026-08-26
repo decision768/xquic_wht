@@ -185,6 +185,115 @@ def run_pair(
             stop_process(server)
 
 
+def run_multi_pair(
+    server_binary: Path,
+    client_binary: Path,
+    listen_ip: str,
+    host: str,
+    port: int,
+    size: int,
+    lanes: int,
+    seed: int,
+    timeout_s: float,
+) -> tuple[int, str, list[tuple[int, str]]]:
+    api_timeout_ms = max(3000, int(timeout_s * 1000))
+    with tempfile.TemporaryDirectory(prefix="netins-stream-multi-") as temp_dir:
+        server_log_path = Path(temp_dir) / "server.log"
+        with server_log_path.open("w", encoding="utf-8") as server_log:
+            server = subprocess.Popen([
+                str(server_binary), listen_ip, str(port), str(size),
+                str(lanes), str(seed), str(8 * 1024 * 1024),
+                str(api_timeout_ms), "2",
+            ], stdout=server_log, stderr=subprocess.STDOUT, text=True)
+        clients: list[subprocess.Popen[str]] = []
+        try:
+            deadline = time.monotonic() + min(10.0, timeout_s)
+            while time.monotonic() < deadline:
+                if "[stream_api_ready]" in read_text(server_log_path):
+                    break
+                if server.poll() is not None:
+                    break
+                time.sleep(0.05)
+            if "[stream_api_ready]" not in read_text(server_log_path):
+                stop_process(server)
+                return server.returncode or 1, read_text(server_log_path), []
+            command = [
+                str(client_binary), host, str(port), str(size), str(lanes),
+                str(seed), str(8 * 1024 * 1024), str(8 * 1024 * 1024),
+                "0", str(api_timeout_ms), str(api_timeout_ms),
+            ]
+            clients = [subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
+            ) for _ in range(2)]
+            client_results = []
+            for client in clients:
+                try:
+                    output, _ = client.communicate(timeout=timeout_s + 5)
+                    client_results.append((client.returncode, output))
+                except subprocess.TimeoutExpired:
+                    stop_process(client)
+                    output, _ = client.communicate()
+                    client_results.append((124, output + "\nclient timeout"))
+            try:
+                server_rc = server.wait(timeout=timeout_s + 5)
+            except subprocess.TimeoutExpired:
+                stop_process(server)
+                server_rc = 124
+            return server_rc, read_text(server_log_path), client_results
+        finally:
+            for client in clients:
+                stop_process(client)
+            stop_process(server)
+
+
+def run_server_abort(
+    server_binary: Path,
+    client_binary: Path,
+    listen_ip: str,
+    host: str,
+    port: int,
+    timeout_s: float,
+) -> tuple[int, str, int, str]:
+    with tempfile.TemporaryDirectory(prefix="netins-stream-abort-") as temp_dir:
+        server_log_path = Path(temp_dir) / "server.log"
+        with server_log_path.open("w", encoding="utf-8") as server_log:
+            server = subprocess.Popen([
+                str(server_binary), listen_ip, str(port), str(4 << 30),
+                "4", "101", str(8 * 1024 * 1024), "10000",
+            ], stdout=server_log, stderr=subprocess.STDOUT, text=True)
+        client = None
+        try:
+            deadline = time.monotonic() + min(10.0, timeout_s)
+            while time.monotonic() < deadline:
+                if "[stream_api_ready]" in read_text(server_log_path):
+                    break
+                if server.poll() is not None:
+                    break
+                time.sleep(0.05)
+            client = subprocess.Popen([
+                str(client_binary), host, str(port), str(4 << 30), "4",
+                "101", "65536", str(8 * 1024 * 1024), "0", "5000",
+                "10000",
+            ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            time.sleep(0.5)
+            stop_process(server)
+            server_rc = server.returncode or 1
+            try:
+                client_output, _ = client.communicate(timeout=15)
+                client_rc = client.returncode
+            except subprocess.TimeoutExpired:
+                stop_process(client)
+                client_output, _ = client.communicate()
+                client_rc = 124
+            return (server_rc, read_text(server_log_path),
+                    client_rc, client_output)
+        finally:
+            if client is not None:
+                stop_process(client)
+            stop_process(server)
+
+
 def validate_success(
     case: TransferCase,
     server_rc: int,
@@ -242,6 +351,10 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--full", action="store_true",
                         help="also run 64 MiB cases on 1, 4 and 8 lanes")
+    parser.add_argument(
+        "--release", action="store_true",
+        help="require full cases, a real library and file-API regression",
+    )
     parser.add_argument("--skip-unit", action="store_true")
     parser.add_argument("--skip-source-checks", action="store_true")
     parser.add_argument(
@@ -263,6 +376,15 @@ def main() -> int:
     args = parser.parse_args()
     if not 1 <= args.base_port <= 65520 or args.timeout <= 0:
         parser.error("invalid base port or timeout")
+    if args.release and (
+        not args.full or args.library is None
+        or not args.file_regression_command
+        or args.skip_unit or args.skip_source_checks or args.skip_fault
+    ):
+        parser.error(
+            "--release requires --full, --library, at least one "
+            "--file-regression-command, and all checks enabled"
+        )
 
     try:
         server_binary = executable(args.bin_dir, "netins_udp_stream_server")
@@ -368,8 +490,32 @@ def main() -> int:
             print(f"[FAIL] {case.name}: {error}", file=sys.stderr)
             print_failure(server_output, client_output)
 
+    multi_port = args.base_port + len(cases)
+    server_rc, server_output, client_results = run_multi_pair(
+        server_binary, client_binary, args.listen_ip, args.host,
+        multi_port, 2 * 1024 * 1024, 4, 88, args.timeout,
+    )
+    server_successes = sum(
+        1 for line in server_output.splitlines()
+        if "[stream_api_result]" in line
+        and "role=server" in line and "success=1" in line
+    )
+    multi_ok = server_rc == 0 and server_successes == 2
+    for client_rc, client_output in client_results:
+        values = fields(client_output, "client")
+        multi_ok = multi_ok and client_rc == 0 and values.get("success") == "1"
+    if multi_ok and len(client_results) == 2:
+        print("[PASS] two concurrent accepted connections")
+    else:
+        failures += 1
+        print("[FAIL] concurrent accepted connections", file=sys.stderr)
+        print_failure(
+            server_output,
+            "\n--- client ---\n".join(output for _, output in client_results),
+        )
+
     if not args.skip_fault:
-        port = args.base_port + len(cases)
+        port = multi_port + 1
         server_rc, server_output, client_rc, client_output = run_pair(
             server_binary, client_binary, args.listen_ip, args.host, port,
             65536, 4, 1, 99, 8 * 1024 * 1024, 0,
@@ -387,6 +533,23 @@ def main() -> int:
             print_failure(server_output, client_output)
         else:
             print("[PASS] lane-mismatch fault rejected with observable error")
+
+        abort_port = multi_port + 2
+        server_rc, server_output, client_rc, client_output = run_server_abort(
+            server_binary, client_binary, args.listen_ip, args.host,
+            abort_port, args.timeout,
+        )
+        abort_ok = (
+            server_rc != 0 and client_rc != 0
+            and "success=1" not in client_output
+            and "last_error=" in client_output
+        )
+        if abort_ok:
+            print("[PASS] server interruption rejected with observable error")
+        else:
+            failures += 1
+            print("[FAIL] server interruption was not observed", file=sys.stderr)
+            print_failure(server_output, client_output)
 
     for command_text in args.file_regression_command:
         command: Sequence[str] = shlex.split(
@@ -418,7 +581,11 @@ def main() -> int:
     if failures:
         print(f"STREAM API ACCEPTANCE: FAIL ({failures} failure(s))")
         return 1
-    print(f"STREAM API ACCEPTANCE: PASS ({len(cases)} transfer case(s))")
+    if not args.release:
+        print("STREAM API DEVELOPMENT ACCEPTANCE: PASS "
+              f"({len(cases)} transfer case(s)); release mode not requested")
+        return 0
+    print(f"STREAM API RELEASE ACCEPTANCE: PASS ({len(cases)} transfer case(s))")
     return 0
 
 

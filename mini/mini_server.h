@@ -178,6 +178,9 @@ typedef struct xqc_mini_svr_user_conn_s {
     int                     serve_cancelled;
     int                     serve_root_fd;
     int                     accept_yield_requested;
+    void                   *api_backend;
+    int                     api_close_requested;
+    int                     api_close_submitted;
     struct xqc_mini_svr_user_stream_s *pending_stream_head;
     struct xqc_mini_svr_user_stream_s *pending_stream_tail;
     char                    serve_root_path[PATH_LEN];

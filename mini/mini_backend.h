@@ -120,6 +120,8 @@ typedef struct mini_backend_stream_config_s {
     size_t receive_queue_size;
     mini_backend_stream_data_fn on_data;
     void *user_data;
+    /* The server owns one shared XQUIC/libevent driver for all connections. */
+    int external_event_driver;
 } mini_backend_stream_config_t;
 
 typedef struct mini_backend_stream_result_s {
@@ -220,6 +222,14 @@ int mini_backend_server_stream_accept(mini_backend_server_t *server,
     mini_backend_server_connection_t *connection,
     const mini_backend_stream_config_t *config,
     mini_backend_stream_t **out_stream);
+
+/* Called only by the Mini server's XQUIC callbacks. */
+void mini_backend_server_on_connection_created(void *backend,
+    mini_backend_server_connection_t *connection);
+void mini_backend_server_on_handshake_finished(void *backend,
+    mini_backend_server_connection_t *connection);
+void mini_backend_server_on_connection_closed(void *backend,
+    mini_backend_server_connection_t *connection);
 
 int mini_backend_stream_write(mini_backend_stream_t *stream,
     const void *data, size_t data_len, uint32_t timeout_ms,

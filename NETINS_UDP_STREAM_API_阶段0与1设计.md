@@ -116,7 +116,8 @@ void netins_udp_stream_close(netins_udp_stream_t *stream);
 - `data_len == 0` 是合法空操作，不代表流结束；
 - `flush()` 只等待本地发送队列排空，不提供对端交付证明；
 - `finish()` 禁止后续写入，排空本地队列，发送 FIN，并等待对端完成回执；
-- `on_data()` 的内存仅在回调期间有效，回调不得重入同一 stream，也不得长时间阻塞；
+- `on_data()` 的内存仅在回调期间有效；正式实现已把它移到有界 delivery worker，回调
+  不得关闭或等待同一 stream，持续过慢会耗尽接收队列而不是阻塞 XQUIC 事件线程；
 - 一个 stream 允许一个应用发送线程；XQUIC engine 始终由 SDK 内部 IO 所有者线程驱动；
 - 所有队列必须有上限，不能用无限内存掩盖生产速度高于网络速度的问题。
 

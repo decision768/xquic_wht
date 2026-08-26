@@ -21,6 +21,8 @@ def main() -> int:
         "client": root / "mini/mini_client.c",
         "server": root / "mini/mini_server.c",
         "client_backend": root / "mini/mini_client_backend.c",
+        "server_backend": root / "mini/mini_server_backend.c",
+        "stream_backend": root / "mini/mini_stream_backend.c",
         "api": root / "src/netins_udp/netins_udp_api.c",
     }
     try:
@@ -76,6 +78,25 @@ def main() -> int:
             "client_backend",
             r"mini_backend_client_stream_open\s*\(.*?"
             r"client->connection->transfer_active",
+        ),
+        (
+            "server stream ownership is per accepted connection",
+            "server_backend",
+            r"mini_backend_server_stream_accept\s*\(.*?"
+            r"connection->stream_api_state\s*!=\s*NULL.*?"
+            r"external_event_driver\s*=\s*1",
+        ),
+        (
+            "successful stream close does not send RESET_STREAM",
+            "stream_backend",
+            r"mini_stream_close_lanes_locked\s*\(.*?int\s+abort.*?"
+            r"if\s*\(\s*abort\s*\).*?xqc_h3_ext_bytestream_close",
+        ),
+        (
+            "application delivery callback runs outside the stream lock",
+            "stream_backend",
+            r"mini_stream_delivery_worker\s*\(.*?"
+            r"pthread_mutex_unlock\(&stream->lock\).*?callback\(",
         ),
     )
 

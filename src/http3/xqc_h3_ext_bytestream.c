@@ -405,7 +405,13 @@ xqc_h3_ext_bytestream_get_stats(xqc_h3_ext_bytestream_t *h3_ext_bs)
     stats.bytes_rcvd = h3_ext_bs->bytes_rcvd;
     stats.bytes_sent = h3_ext_bs->bytes_sent;
     stats.fin_sent_time = h3_ext_bs->fin_sent_time;
-    stats.fin_acked_time = h3_ext_bs->fin_acked_time;
+    /* Keep this value live while the transport stream still exists.  Stream
+     * API receivers use the ACK of the reverse FIN as the safe point after
+     * which an application close cannot discard the completion receipt. */
+    stats.fin_acked_time = h3_ext_bs->h3_stream != NULL
+        && h3_ext_bs->h3_stream->stream != NULL
+        ? h3_ext_bs->h3_stream->stream->stream_stats.first_fin_ack_time
+        : h3_ext_bs->fin_acked_time;
     stats.fin_rcvd_time = h3_ext_bs->fin_rcvd_time;
     stats.fin_read_time = h3_ext_bs->fin_read_time;
     stats.first_byte_rcvd_time = h3_ext_bs->first_byte_rcvd_time;

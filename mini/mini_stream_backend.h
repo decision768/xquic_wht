@@ -24,6 +24,9 @@ int mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
 void mini_stream_backend_on_connection_close(
     mini_backend_stream_t *stream, int error_code);
 
+/* Drive completion checks from a shared server event-loop thread. */
+int mini_stream_backend_drive(mini_backend_stream_t *stream);
+
 int mini_stream_backend_active_bs_create(
     xqc_h3_ext_bytestream_t *bs, void *bs_user_data);
 int mini_stream_backend_passive_bs_create(mini_backend_stream_t *stream,

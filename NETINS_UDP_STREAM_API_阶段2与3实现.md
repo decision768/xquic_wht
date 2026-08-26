@@ -80,14 +80,17 @@ netins_udp_stream_close(stream);
 
 ## 3. 线程与背压
 
-- 每个活动逻辑流有一个内部工作线程，该线程独占对应的 XQUIC/libevent event base；
+- 客户端活动逻辑流由一个内部 I/O 线程独占对应的 XQUIC/libevent event base；
+- 流模式服务端由一个共享 I/O 线程驱动所有 accepted connection，每条连接各自维护
+  `stream_api_state`，因此可以同时推进多条连接；
 - 应用 `write()` 只复制数据到有界队列，不直接从应用线程调用 XQUIC；
 - pipe event 唤醒 IO 线程，没有固定间隔 sleep；
 - 队列满时，阻塞模式等待空间，非阻塞模式返回 `EAGAIN`；超时可能已经接收部分数据，
   调用方必须读取 `accepted`；
 - `flush()` 只证明本地队列已经交给 XQUIC；`finish()` 才等待对端长度和摘要回执；
-- `on_data()` 在 IO 线程执行，内存只在回调期间有效，不能长时间阻塞或重入同一 stream；
-- 当前一个连接只允许一个活动逻辑流，同一个服务端 backend 同时只驱动一个数据流；
+- `on_data()` 在每条接收流的有界 delivery worker 执行，不持有 stream mutex，也不会阻塞
+  XQUIC I/O；内存只在回调期间有效，过慢会耗尽 `receive_queue_size`；
+- 当前一个连接只允许一个活动逻辑流，但同一个服务端 backend 可以同时驱动多条连接；
 - 活动流关闭后才能关闭连接，也不能与文件传输在同一连接中并发执行。
 
 ## 4. 多 lane 线上格式

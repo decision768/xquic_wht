@@ -63,6 +63,8 @@ struct mini_stream_lane_s {
     size_t receipt_sent;
     int receipt_valid;
     int reverse_fin_submitted;
+    int reverse_fin_acked;
+    int graceful_closed;
 };
 
 struct mini_backend_stream_s {
@@ -84,8 +86,14 @@ struct mini_backend_stream_s {
     pthread_mutex_t lock;
     pthread_cond_t state_cond;
     pthread_cond_t send_space_cond;
+    pthread_cond_t delivery_cond;
     pthread_t worker;
     int worker_started;
+    int external_event_driver;
+    int io_stopped;
+    pthread_t delivery_worker;
+    int delivery_worker_started;
+    int delivery_stop_requested;
     int wake_pipe[2];
     struct event *wake_event;
     int wake_pending;
@@ -110,6 +118,9 @@ struct mini_backend_stream_s {
     uint64_t lane_payload_sent[MINI_STREAM_ENABLED_MAX_LANES];
     uint64_t lane_payload_received[MINI_STREAM_ENABLED_MAX_LANES];
     mini_stream_reorder_t reorder;
+    mini_stream_reorder_chunk_t *delivery_head;
+    mini_stream_reorder_chunk_t *delivery_tail;
+    size_t delivery_queue_bytes;
 
     int finish_requested;
     int reset_requested;
@@ -122,6 +133,7 @@ struct mini_backend_stream_s {
 
 static void mini_stream_wake(mini_backend_stream_t *stream);
 static int mini_stream_process_locked(mini_backend_stream_t *stream);
+static void *mini_stream_delivery_worker(void *arg);
 
 static uint64_t
 mini_stream_now(void)
@@ -157,7 +169,7 @@ mini_stream_fail_locked(mini_backend_stream_t *stream, int error_code)
 }
 
 static void
-mini_stream_close_lanes_locked(mini_backend_stream_t *stream)
+mini_stream_close_lanes_locked(mini_backend_stream_t *stream, int abort)
 {
     uint32_t i;
     for (i = 0; i < stream->lane_count; i++) {
@@ -165,7 +177,9 @@ mini_stream_close_lanes_locked(mini_backend_stream_t *stream)
         if (lane->bs != NULL) {
             /* close_notify may run after this stream object is released. */
             xqc_h3_ext_bytestream_set_user_data(lane->bs, NULL);
-            (void)xqc_h3_ext_bytestream_close(lane->bs);
+            if (abort) {
+                (void)xqc_h3_ext_bytestream_close(lane->bs);
+            }
             lane->bs = NULL;
         }
     }
@@ -218,8 +232,12 @@ mini_stream_wake_callback(evutil_socket_t fd, short events, void *arg)
     pthread_mutex_lock(&stream->lock);
     stream->wake_pending = 0;
     (void)mini_stream_process_locked(stream);
-    if (stream->stop_requested && stream->event_base != NULL) {
-        event_base_loopbreak(stream->event_base);
+    if (stream->stop_requested) {
+        stream->io_stopped = 1;
+        mini_stream_signal_locked(stream);
+        if (!stream->external_event_driver && stream->event_base != NULL) {
+            event_base_loopbreak(stream->event_base);
+        }
     }
     pthread_mutex_unlock(&stream->lock);
 }
@@ -384,6 +402,14 @@ mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
     {
         return mini_stream_fail_locked(stream, EPROTO);
     }
+    /* A receipt describes bytes already handed to the application, not just
+     * bytes parsed from QUIC.  The delivery worker wakes the I/O driver after
+     * the final callback returns. */
+    if (stream->delivery_head != NULL || stream->delivery_queue_bytes != 0
+        || stream->accepted_bytes != total_bytes)
+    {
+        return 0;
+    }
 
     mini_stream_build_receipt_locked(stream, MINI_STREAM_RECEIPT_OK,
         total_bytes, UINT64_MAX);
@@ -418,6 +444,21 @@ mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
             return 0;
         }
     }
+
+    /* finish() must not return while close() could still discard the receipt.
+     * Wait until QUIC acknowledges every reverse FIN; the lane-0 FIN covers
+     * the receipt bytes that precede it. */
+    for (i = 0; i < stream->lane_count; i++) {
+        mini_stream_lane_t *lane = &stream->lanes[i];
+        if (!lane->reverse_fin_acked && lane->bs != NULL) {
+            xqc_h3_ext_bytestream_stats_t stats =
+                xqc_h3_ext_bytestream_get_stats(lane->bs);
+            lane->reverse_fin_acked = stats.fin_acked_time != 0;
+        }
+        if (!lane->reverse_fin_acked) {
+            return 0;
+        }
+    }
     stream->peer_received_bytes = total_bytes;
     stream->accepted_bytes = total_bytes;
     stream->completed = 1;
@@ -430,11 +471,12 @@ static int
 mini_stream_process_locked(mini_backend_stream_t *stream)
 {
     if (stream->reset_requested) {
-        mini_stream_close_lanes_locked(stream);
+        mini_stream_close_lanes_locked(stream, 1);
         return mini_stream_fail_locked(stream, ECANCELED);
     }
     if (stream->stop_requested) {
-        mini_stream_close_lanes_locked(stream);
+        mini_stream_close_lanes_locked(stream,
+            !stream->completed || stream->error_code != 0);
         return 0;
     }
     if (stream->error_code != 0 || stream->connection_closed) {
@@ -498,7 +540,28 @@ mini_stream_worker(void *arg)
             break;
         }
     }
+    pthread_mutex_lock(&stream->lock);
+    (void)mini_stream_process_locked(stream);
+    stream->io_stopped = 1;
+    mini_stream_signal_locked(stream);
+    pthread_mutex_unlock(&stream->lock);
     return NULL;
+}
+
+int
+mini_stream_backend_drive(mini_backend_stream_t *stream)
+{
+    if (!mini_stream_valid(stream)) {
+        return EINVAL;
+    }
+    pthread_mutex_lock(&stream->lock);
+    int ret = mini_stream_process_locked(stream);
+    if (stream->stop_requested) {
+        stream->io_stopped = 1;
+        mini_stream_signal_locked(stream);
+    }
+    pthread_mutex_unlock(&stream->lock);
+    return ret < 0 ? EIO : 0;
 }
 
 static int
@@ -595,6 +658,7 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->lane_count = config->lane_count;
     stream->send_queue_limit = config->send_queue_size;
     stream->receive_queue_limit = config->receive_queue_size;
+    stream->external_event_driver = config->external_event_driver != 0;
     stream->on_data = config->on_data;
     stream->user_data = config->user_data;
     stream->connection_state_slot = connection_state_slot;
@@ -621,6 +685,14 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     }
     ret = pthread_cond_init(&stream->send_space_cond, NULL);
     if (ret != 0) {
+        pthread_cond_destroy(&stream->state_cond);
+        pthread_mutex_destroy(&stream->lock);
+        free(stream);
+        return ret;
+    }
+    ret = pthread_cond_init(&stream->delivery_cond, NULL);
+    if (ret != 0) {
+        pthread_cond_destroy(&stream->send_space_cond);
         pthread_cond_destroy(&stream->state_cond);
         pthread_mutex_destroy(&stream->lock);
         free(stream);
@@ -667,17 +739,36 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
         }
     }
 
-    *connection_state_slot = stream;
-    ret = pthread_create(&stream->worker, NULL, mini_stream_worker, stream);
-    if (ret != 0) {
-        *connection_state_slot = NULL;
-        goto fail;
+    if (role == MINI_STREAM_ENDPOINT_ACCEPT) {
+        ret = pthread_create(&stream->delivery_worker, NULL,
+            mini_stream_delivery_worker, stream);
+        if (ret != 0) {
+            goto fail;
+        }
+        stream->delivery_worker_started = 1;
     }
-    stream->worker_started = 1;
+
+    *connection_state_slot = stream;
+    if (!stream->external_event_driver) {
+        ret = pthread_create(&stream->worker, NULL,
+            mini_stream_worker, stream);
+        if (ret != 0) {
+            *connection_state_slot = NULL;
+            goto fail;
+        }
+        stream->worker_started = 1;
+    }
     *out_stream = stream;
     return 0;
 
 fail:
+    if (stream->delivery_worker_started) {
+        pthread_mutex_lock(&stream->lock);
+        stream->delivery_stop_requested = 1;
+        pthread_cond_broadcast(&stream->delivery_cond);
+        pthread_mutex_unlock(&stream->lock);
+        (void)pthread_join(stream->delivery_worker, NULL);
+    }
     if (stream->wake_event != NULL) {
         event_free(stream->wake_event);
     }
@@ -687,6 +778,7 @@ fail:
     if (stream->wake_pipe[1] >= 0) {
         close(stream->wake_pipe[1]);
     }
+    pthread_cond_destroy(&stream->delivery_cond);
     pthread_cond_destroy(&stream->send_space_cond);
     pthread_cond_destroy(&stream->state_cond);
     pthread_mutex_destroy(&stream->lock);
@@ -919,7 +1011,8 @@ mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
     snapshot->send_queue_bytes = stream->send_queue_bytes;
     snapshot->send_queue_capacity = stream->send_queue_limit;
     snapshot->send_queue_high_water = stream->send_queue_high_water;
-    snapshot->reorder_bytes = stream->reorder.buffered_bytes;
+    snapshot->reorder_bytes = stream->reorder.buffered_bytes
+        + stream->delivery_queue_bytes;
     snapshot->reorder_capacity = stream->receive_queue_limit;
     snapshot->reorder_high_water = stream->reorder_high_water;
     snapshot->records_enqueued = stream->records_enqueued;
@@ -956,6 +1049,15 @@ mini_stream_free_queues(mini_backend_stream_t *stream)
         lane->incoming_chunk = NULL;
     }
     mini_stream_reorder_release(&stream->reorder);
+    mini_stream_reorder_chunk_t *delivery = stream->delivery_head;
+    while (delivery != NULL) {
+        mini_stream_reorder_chunk_t *next = delivery->next;
+        free(delivery);
+        delivery = next;
+    }
+    stream->delivery_head = NULL;
+    stream->delivery_tail = NULL;
+    stream->delivery_queue_bytes = 0;
 }
 
 void
@@ -966,12 +1068,22 @@ mini_backend_stream_destroy(mini_backend_stream_t *stream)
     }
     pthread_mutex_lock(&stream->lock);
     stream->stop_requested = 1;
+    stream->delivery_stop_requested = 1;
+    pthread_cond_broadcast(&stream->delivery_cond);
     mini_stream_wake(stream);
+    while (stream->external_event_driver && !stream->io_stopped) {
+        (void)pthread_cond_wait(&stream->state_cond, &stream->lock);
+    }
     pthread_mutex_unlock(&stream->lock);
     if (stream->worker_started
         && !pthread_equal(pthread_self(), stream->worker))
     {
         (void)pthread_join(stream->worker, NULL);
+    }
+    if (stream->delivery_worker_started
+        && !pthread_equal(pthread_self(), stream->delivery_worker))
+    {
+        (void)pthread_join(stream->delivery_worker, NULL);
     }
     if (stream->wake_event != NULL) {
         event_free(stream->wake_event);
@@ -992,6 +1104,7 @@ mini_backend_stream_destroy(mini_backend_stream_t *stream)
     if (stream->wake_pipe[1] >= 0) {
         close(stream->wake_pipe[1]);
     }
+    pthread_cond_destroy(&stream->delivery_cond);
     pthread_cond_destroy(&stream->send_space_cond);
     pthread_cond_destroy(&stream->state_cond);
     pthread_mutex_destroy(&stream->lock);
@@ -1015,6 +1128,51 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
     pthread_mutex_unlock(&stream->lock);
 }
 
+static void *
+mini_stream_delivery_worker(void *arg)
+{
+    mini_backend_stream_t *stream = arg;
+    pthread_mutex_lock(&stream->lock);
+    for (;;) {
+        while (stream->delivery_head == NULL
+            && !stream->delivery_stop_requested)
+        {
+            (void)pthread_cond_wait(&stream->delivery_cond, &stream->lock);
+        }
+        if (stream->delivery_stop_requested) {
+            break;
+        }
+        mini_stream_reorder_chunk_t *chunk = stream->delivery_head;
+        stream->delivery_head = chunk->next;
+        if (stream->delivery_head == NULL) {
+            stream->delivery_tail = NULL;
+        }
+        chunk->next = NULL;
+        uint64_t digest = stream->digest;
+        mini_backend_stream_data_fn callback = stream->on_data;
+        void *callback_data = stream->user_data;
+        pthread_mutex_unlock(&stream->lock);
+
+        digest = mini_stream_digest_update(digest,
+            chunk->data, chunk->length);
+        if (callback != NULL) {
+            callback(callback_data, chunk->data, chunk->length,
+                chunk->offset);
+        }
+
+        pthread_mutex_lock(&stream->lock);
+        stream->digest = digest;
+        stream->accepted_bytes = chunk->offset + chunk->length;
+        stream->records_delivered++;
+        stream->delivery_queue_bytes -= chunk->length;
+        free(chunk);
+        mini_stream_signal_locked(stream);
+        mini_stream_wake(stream);
+    }
+    pthread_mutex_unlock(&stream->lock);
+    return NULL;
+}
+
 static int
 mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
     mini_stream_reorder_chunk_t *chunk)
@@ -1024,24 +1182,26 @@ mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
         mini_stream_reorder_discard(&stream->reorder, chunk);
         return mini_stream_fail_locked(stream, ret);
     }
-    if (stream->reorder.buffered_bytes > stream->reorder_high_water) {
-        stream->reorder_high_water = stream->reorder.buffered_bytes;
-    }
     mini_stream_reorder_chunk_t *ready;
     while ((ready = mini_stream_reorder_pop_ready(&stream->reorder)) != NULL) {
         if (stream->start_time_us == 0) {
             stream->start_time_us = mini_stream_now();
         }
-        stream->digest = mini_stream_digest_update(stream->digest,
-            ready->data, ready->length);
-        if (stream->on_data != NULL) {
-            stream->on_data(stream->user_data, ready->data, ready->length,
-                ready->offset);
+        ready->next = NULL;
+        if (stream->delivery_tail == NULL) {
+            stream->delivery_head = ready;
+        } else {
+            stream->delivery_tail->next = ready;
         }
-        stream->accepted_bytes = stream->reorder.next_offset;
-        stream->records_delivered++;
-        free(ready);
+        stream->delivery_tail = ready;
+        stream->delivery_queue_bytes += ready->length;
     }
+    size_t buffered = stream->reorder.buffered_bytes
+        + stream->delivery_queue_bytes;
+    if (buffered > stream->reorder_high_water) {
+        stream->reorder_high_water = buffered;
+    }
+    pthread_cond_signal(&stream->delivery_cond);
     return 0;
 }
 
@@ -1103,16 +1263,26 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
     {
         return mini_stream_fail_locked(stream, EPROTO);
     }
+    size_t payload_length = lane->incoming_frame.payload_length;
+    size_t buffered = stream->reorder.buffered_bytes
+        + stream->delivery_queue_bytes;
+    if (buffered > stream->receive_queue_limit
+        || payload_length > stream->receive_queue_limit - buffered)
+    {
+        return mini_stream_fail_locked(stream, ENOBUFS);
+    }
     int error_code = 0;
     mini_stream_reorder_chunk_t *chunk = mini_stream_reorder_allocate(
         &stream->reorder, lane->incoming_frame.offset,
-        lane->incoming_frame.payload_length, &error_code);
+        payload_length, &error_code);
     if (chunk == NULL) {
         return mini_stream_fail_locked(stream,
             error_code != 0 ? error_code : ENOMEM);
     }
-    if (stream->reorder.buffered_bytes > stream->reorder_high_water) {
-        stream->reorder_high_water = stream->reorder.buffered_bytes;
+    buffered = stream->reorder.buffered_bytes
+        + stream->delivery_queue_bytes;
+    if (buffered > stream->reorder_high_water) {
+        stream->reorder_high_water = buffered;
     }
     lane->incoming_chunk = chunk;
     return 0;
@@ -1279,15 +1449,30 @@ int
 mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
     void *bs_user_data)
 {
-    (void)bs;
     mini_stream_lane_t *lane = mini_stream_lane_from_user_data(bs_user_data);
     if (lane == NULL || !mini_stream_valid(lane->stream)) {
         return XQC_OK;
     }
+    xqc_h3_ext_bytestream_stats_t stats =
+        xqc_h3_ext_bytestream_get_stats(bs);
     pthread_mutex_lock(&lane->stream->lock);
+    if (stats.fin_acked_time != 0) {
+        lane->reverse_fin_acked = 1;
+    }
+    if (lane->stream->role == MINI_STREAM_ENDPOINT_ACCEPT) {
+        lane->graceful_closed = lane->protocol_fin_received
+            && lane->transport_fin_received
+            && lane->reverse_fin_submitted
+            && lane->reverse_fin_acked;
+    } else {
+        lane->graceful_closed = lane->protocol_fin_sent
+            && lane->send_fin_submitted
+            && lane->transport_fin_received;
+    }
     lane->bs = NULL;
+    (void)mini_stream_process_locked(lane->stream);
     if (!lane->stream->completed && !lane->stream->stop_requested
-        && !lane->stream->reset_requested)
+        && !lane->stream->reset_requested && !lane->graceful_closed)
     {
         (void)mini_stream_fail_locked(lane->stream, ECONNRESET);
     }

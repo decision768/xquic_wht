@@ -101,7 +101,7 @@ netins_udp_stream_close(stream);
 |---|---|
 | `flush()` 成功 | 本地队列已提交给 XQUIC；不证明对端已收到 |
 | 发送端 `finish()` 成功 | 对端确认总长度和摘要一致，所有 lane 的反向 FIN 已完成 |
-| 接收端 `finish()` 成功 | 所有 lane FIN 一致、重排缓存为空、连续长度正确，回执已提交 |
+| 接收端 `finish()` 成功 | 数据已交付应用，回执及反向 FIN 已被 QUIC ACK，可安全立即 close |
 | 本地 `reset(code)` | 未完成流进入 RESET；后续 write/flush/finish 返回取消错误 |
 | lane 数/session/offset/FIN 不一致 | 流进入 ERROR，通常为 `EPROTO` |
 | 连接或 lane 提前关闭 | 流进入 ERROR，通常为 `ECONNRESET` |
@@ -116,7 +116,9 @@ netins_udp_stream_close(stream);
 - `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB；
 - 每个 DATA record 额外有 24 字节线上头和一个本地队列节点；
 - 应用传入 Buffer 不计入 SDK 队列，`write()` 只复制 accepted 的字节；
-- `on_data()` 的内存只在回调期间有效，业务要异步处理时必须自行复制；
+- `on_data()` 在独立 delivery worker 上执行且不持有 XQUIC/stream 锁；内存只在回调期间
+  有效，业务要异步处理时必须自行复制；回调长期慢于网络会耗尽有界接收队列并返回
+  `ENOBUFS`，不会无限增长内存或卡住 QUIC 事件线程；
 - 多 lane 可能增加乱序占用。生产配置不建议对 4/8 lane 使用只有 64 KiB 的接收队列；
 - pipe 唤醒已合并：一批 record 在 I/O 线程处理前只保留一个待处理唤醒，不再逐 record 写管道。
 
@@ -137,7 +139,7 @@ netins_udp_stream_get_snapshot(stream, &snapshot);
 | `accepted_bytes` | 发送端已复制，或接收端已连续交付的字节 |
 | `peer_received_bytes` | 完成回执确认的字节；完成前通常为 0 |
 | `send_queue_bytes/capacity/high_water` | 生产速度是否持续高于网络消费速度 |
-| `reorder_bytes/capacity/high_water` | 跨 lane 乱序程度和接收内存压力 |
+| `reorder_bytes/capacity/high_water` | 跨 lane 乱序数据与待回调数据的合计接收内存压力 |
 | `records_enqueued/submitted` | 发送记录是否全部交给 XQUIC |
 | `records_received/delivered` | 收到的记录是否全部按序交付 |
 | `lane_payload_sent[i]` | 发送端第 i 条 lane 实际承载量 |
@@ -182,6 +184,17 @@ python3 tests/stream_api_acceptance.py \
   --full
 ```
 
+最终发布模式必须同时提供真实动态库和文件 API 回归命令；缺少任一项会拒绝以“发布验收”
+名义运行：
+
+```bash
+python3 tests/stream_api_acceptance.py \
+  --release --full \
+  --bin-dir BUILD_DIR/mini \
+  --library BUILD_DIR/libxquic.so \
+  --file-regression-command "./run_file_api_smoke_test.sh"
+```
+
 统一入口依次检查：
 
 1. 公共头文件与导出脚本一致，指定库时再检查动态库实际符号；
@@ -190,7 +203,10 @@ python3 tests/stream_api_acceptance.py \
 4. 0、1、65535、65536、65537 字节边界；
 5. 1/4/8 lane、逐 lane 统计总和和足量数据下的 lane 利用；
 6. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
-7. 客户端/服务端 lane 数不一致必须失败且能观测错误。
+7. 客户端/服务端 lane 数不一致必须失败且能观测错误；
+8. 两个 accepted connection 并发传输；
+9. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
+10. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
 
 脚本会自己生成确定性字节模式，不创建输入文件，也不把完整测试数据放入内存。
 
