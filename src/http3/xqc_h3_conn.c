@@ -216,6 +216,29 @@ xqc_h3_connect(xqc_engine_t *engine, const xqc_conn_settings_t *conn_settings,
 }
 
 
+const xqc_cid_t *
+xqc_h3_ext_connect(xqc_engine_t *engine,
+    const xqc_conn_settings_t *conn_settings,
+    const unsigned char *token, unsigned token_len, const char *server_host,
+    int no_crypto_flag, const xqc_conn_ssl_config_t *conn_ssl_config,
+    const struct sockaddr *peer_addr, socklen_t peer_addrlen,
+    void *user_data)
+{
+    xqc_connection_t *conn;
+    conn = xqc_client_connect(engine, conn_settings, token, token_len,
+        server_host, no_crypto_flag, conn_ssl_config,
+        xqc_h3_ext_alpn[conn_settings->proto_version], peer_addr,
+        peer_addrlen, user_data);
+    if (!conn) {
+        xqc_log(engine->log, XQC_LOG_ERROR,
+            "|xqc_client_connect h3-ext error|");
+        return NULL;
+    }
+
+    return &conn->scid_set.user_scid;
+}
+
+
 xqc_int_t
 xqc_h3_conn_close(xqc_engine_t *engine, const xqc_cid_t *cid)
 {
@@ -909,4 +932,3 @@ const xqc_conn_callbacks_t h3_conn_callbacks = {
     .conn_handshake_finished    = xqc_h3_conn_handshake_finished,
     .conn_ping_acked            = xqc_h3_conn_ping_acked_notify,
 };
-

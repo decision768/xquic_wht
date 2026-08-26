@@ -7,6 +7,7 @@ XQUIC_VERS_1.0 {
         xqc_engine_set_priv_ctx;
         xqc_engine_get_priv_ctx;
         xqc_h3_connect;
+        xqc_h3_ext_connect;
         xqc_h3_conn_close;
         xqc_scid_str;
         xqc_h3_conn_get_errno;

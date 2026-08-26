@@ -36,6 +36,7 @@
 
 #include "platform.h"
 #include "common.h"
+#include "mini_stream_poc.h"
 #include "mini_client_cb.h"
 
 
@@ -213,6 +214,9 @@ typedef struct xqc_mini_cli_args_s {
     /* API connections establish transport before a transfer task is supplied. */
     int                         defer_transfer_setup;
     int                         disable_0rtt_storage;
+
+    /* Dedicated H3 Extended Bytestream POC; disabled for file/API mode. */
+    xqc_mini_stream_poc_config_t stream_poc;
 } xqc_mini_cli_args_t;
 
 
@@ -392,6 +396,9 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     rx_last_budget_packets_per_path;
 
     xqc_mini_cli_diag_stats_t diag_stats;
+
+    /* Owned by mini_stream_poc_client.c when stream_poc.enabled is set. */
+    void                   *stream_poc_state;
 
 
 } xqc_mini_cli_user_conn_t;

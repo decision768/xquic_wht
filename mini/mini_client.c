@@ -969,6 +969,7 @@ xqc_mini_cli_init_xquic_engine(xqc_mini_cli_ctx_t *ctx, xqc_mini_cli_args_t *arg
         egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
             args->env_cfg.zlog_minimum_level);
     }
+    egn_cfg.enable_h3_ext = args->stream_poc.enabled ? 1 : 0;
 
     /* init ssl config */
     xqc_mini_cli_init_engine_ssl_config(&ssl_cfg, args);
@@ -1067,6 +1068,11 @@ xqc_mini_cli_init_args(xqc_mini_cli_args_t *args)
     strncpy(args->req_cfg.host, DEFAULT_HOST, sizeof(args->req_cfg.host));
     args->req_stream_cnt = XQC_MINI_DEFAULT_POST_CONCURRENCY;
     args->send_data_len = 0;
+    args->stream_poc.enabled = 0;
+    args->stream_poc.once = 1;
+    args->stream_poc.seed = XQC_MINI_STREAM_POC_DEFAULT_SEED;
+    args->stream_poc.total_bytes = XQC_MINI_STREAM_POC_DEFAULT_BYTES;
+    args->stream_poc.chunk_size = XQC_MINI_STREAM_POC_DEFAULT_CHUNK;
 }
 
 //初始化客户端上下文（事件循环、日志输出fd等）
@@ -1271,6 +1277,16 @@ xqc_mini_cli_init_alpn_ctx(xqc_mini_cli_ctx_t *ctx)
             .h3_request_close_notify = xqc_mini_cli_h3_request_close_notify,
             .h3_request_read_notify = xqc_mini_cli_h3_request_read_notify,
             .h3_request_write_notify = xqc_mini_cli_h3_request_write_notify,
+        },
+        .h3_ext_bs_cbs = {
+            .bs_create_notify =
+                xqc_mini_stream_poc_client_bs_create_notify,
+            .bs_close_notify =
+                xqc_mini_stream_poc_client_bs_close_notify,
+            .bs_read_notify =
+                xqc_mini_stream_poc_client_bs_read_notify,
+            .bs_write_notify =
+                xqc_mini_stream_poc_client_bs_write_notify,
         }
     };
 
@@ -2869,9 +2885,20 @@ xqc_mini_cli_init_xquic_connection(xqc_mini_cli_user_conn_t *user_conn)
     
 
     /* build connection */
-    const xqc_cid_t *cid = xqc_h3_connect(ctx->engine, &conn_settings, args->quic_cfg.token,
-        args->quic_cfg.token_len, args->req_cfg.host, args->quic_cfg.no_encryption, &conn_ssl_config,
-        path->peer_addr, path->peer_addrlen, user_conn);
+    const xqc_cid_t *cid;
+    if (args->stream_poc.enabled) {
+        cid = xqc_h3_ext_connect(ctx->engine, &conn_settings,
+            args->quic_cfg.token, args->quic_cfg.token_len,
+            args->req_cfg.host, args->quic_cfg.no_encryption,
+            &conn_ssl_config, path->peer_addr, path->peer_addrlen,
+            user_conn);
+    } else {
+        cid = xqc_h3_connect(ctx->engine, &conn_settings,
+            args->quic_cfg.token, args->quic_cfg.token_len,
+            args->req_cfg.host, args->quic_cfg.no_encryption,
+            &conn_ssl_config, path->peer_addr, path->peer_addrlen,
+            user_conn);
+    }
     if (cid == NULL) {
         return XQC_ERROR;
     }
@@ -3669,6 +3696,7 @@ xqc_mini_cli_free_user_conn(xqc_mini_cli_user_conn_t *user_conn)
         return;
     }
 
+    xqc_mini_stream_poc_client_release(user_conn);
     user_conn->rx_shutdown = 1;
     for (int i = 0; i < MAX_PATH_CNT; i++) {
         xqc_mini_cli_user_path_t *path = &user_conn->paths[i];

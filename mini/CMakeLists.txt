@@ -28,16 +28,19 @@ set(MINI_BACKEND_INCLUDE_DIRS
 
 add_library(mini_common_backend_obj OBJECT
     common.c
+    mini_stream_poc_protocol.c
 )
 add_library(mini_client_backend_obj OBJECT
     mini_client.c
     mini_client_cb.c
     mini_client_backend.c
+    mini_stream_poc_client.c
 )
 add_library(mini_server_backend_obj OBJECT
     mini_server.c
     mini_server_cb.c
     mini_server_backend.c
+    mini_stream_poc_server.c
 )
 set(MINI_BACKEND_OBJECT_TARGETS
     mini_common_backend_obj
@@ -109,6 +112,44 @@ if(XQC_ENABLE_TESTING)
         ${LIBEVENT_PTHREADS_LIBRARY}
         ${ZLOG_STATIC_LIB})
     target_link_libraries(mini_client
+        ${APP_DEPEND_LIBS}
+        ${MINI_XQUIC_TARGET}
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB})
+endif()
+
+if(XQC_ENABLE_STREAM_POC)
+    if(NOT MINI_XQUIC_TARGET)
+        set(MINI_XQUIC_TARGET xquic-static)
+    endif()
+
+    add_executable(mini_stream_poc_client
+        mini_stream_poc_client_main.c
+        $<TARGET_OBJECTS:mini_common_backend_obj>
+        $<TARGET_OBJECTS:mini_client_backend_obj>)
+    add_executable(mini_stream_poc_server
+        mini_stream_poc_server_main.c
+        $<TARGET_OBJECTS:mini_common_backend_obj>
+        $<TARGET_OBJECTS:mini_server_backend_obj>)
+    add_executable(mini_stream_poc_protocol_test
+        ../tests/mini_stream_poc_protocol_test.c
+        mini_stream_poc_protocol.c)
+
+    target_include_directories(mini_stream_poc_client PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+    target_include_directories(mini_stream_poc_server PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+    target_include_directories(mini_stream_poc_protocol_test PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+
+    target_link_libraries(mini_stream_poc_client
+        ${APP_DEPEND_LIBS}
+        ${MINI_XQUIC_TARGET}
+        ${LIBEVENT_LIBRARY}
+        ${LIBEVENT_PTHREADS_LIBRARY}
+        ${ZLOG_STATIC_LIB})
+    target_link_libraries(mini_stream_poc_server
         ${APP_DEPEND_LIBS}
         ${MINI_XQUIC_TARGET}
         ${LIBEVENT_LIBRARY}

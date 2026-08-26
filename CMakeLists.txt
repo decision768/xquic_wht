@@ -37,6 +37,7 @@ option (XQC_ENABLE_XOR "enable fec scheme xor" OFF)
 option (XQC_ENABLE_RSC "enable fec scheme reed-solomon code" OFF)
 option (XQC_ENABLE_PKM "enable fec scheme packet mask" OFF)
 option (XQC_ENABLE_MINI_API "build the NetIns Mini API" ON)
+option (XQC_ENABLE_STREAM_POC "build the single-Bytestream stream POC" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -208,7 +209,7 @@ endif()
 
 
 # shared Mini API backend and optional mini command-line programs
-if(XQC_ENABLE_MINI_API OR XQC_ENABLE_TESTING)
+if(XQC_ENABLE_MINI_API OR XQC_ENABLE_TESTING OR XQC_ENABLE_STREAM_POC)
     set(MINI_XQUIC_TARGET xquic-static)
     add_subdirectory(mini)
 endif()

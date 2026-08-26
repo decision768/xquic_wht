@@ -271,6 +271,12 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     strncpy(args->env_cfg.data_dir, SOURCE_DIR, sizeof(args->env_cfg.data_dir) - 1);
     strncpy(args->env_cfg.default_send_file, SERVER_DEFAULT_FILE,
         sizeof(args->env_cfg.default_send_file) - 1);
+    args->stream_poc.enabled = 0;
+    args->stream_poc.once = 1;
+    args->stream_poc.seed = XQC_MINI_STREAM_POC_DEFAULT_SEED;
+    /* Zero means accept an unknown final length and report what arrived. */
+    args->stream_poc.total_bytes = 0;
+    args->stream_poc.chunk_size = XQC_MINI_STREAM_POC_DEFAULT_CHUNK;
     
 }
 
@@ -451,6 +457,7 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
         egn_cfg.cfg_log_level = xqc_mini_xqc_log_level_for_minimum(
             args->env_cfg.zlog_minimum_level);
     }
+    egn_cfg.enable_h3_ext = args->stream_poc.enabled ? 1 : 0;
 
     /* init ssl config */
     xqc_mini_svr_init_ssl_config(&ssl_cfg, args);
@@ -759,6 +766,16 @@ xqc_mini_svr_init_alpn_ctx(xqc_engine_t *engine)
             .h3_request_close_notify = xqc_mini_svr_h3_request_close_notify,
             .h3_request_read_notify = xqc_mini_svr_h3_request_read_notify,
             .h3_request_write_notify = xqc_mini_svr_h3_request_write_notify,
+        },
+        .h3_ext_bs_cbs = {
+            .bs_create_notify =
+                xqc_mini_stream_poc_server_bs_create_notify,
+            .bs_close_notify =
+                xqc_mini_stream_poc_server_bs_close_notify,
+            .bs_read_notify =
+                xqc_mini_stream_poc_server_bs_read_notify,
+            .bs_write_notify =
+                xqc_mini_stream_poc_server_bs_write_notify,
         }
     };
 
@@ -947,6 +964,7 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
     if (user_conn == NULL) {
         return;
     }
+    xqc_mini_stream_poc_server_release(user_conn);
     xqc_mini_svr_release_connection_state(user_conn);
     if (user_conn->serve_root_fd >= 0) {
         close(user_conn->serve_root_fd);

@@ -569,6 +569,20 @@ const xqc_cid_t *xqc_h3_connect(xqc_engine_t *engine, const xqc_conn_settings_t 
     const xqc_conn_ssl_config_t *conn_ssl_config, const struct sockaddr *peer_addr,
     socklen_t peer_addrlen, void *user_data);
 
+/**
+ * @brief create an extended HTTP/3 connection using the "h3-ext" ALPN
+ *
+ * The engine configuration must set enable_h3_ext before xqc_engine_create.
+ * The remaining arguments and CID lifetime are identical to xqc_h3_connect.
+ */
+XQC_EXPORT_PUBLIC_API
+const xqc_cid_t *xqc_h3_ext_connect(xqc_engine_t *engine,
+    const xqc_conn_settings_t *conn_settings,
+    const unsigned char *token, unsigned token_len, const char *server_host,
+    int no_crypto_flag, const xqc_conn_ssl_config_t *conn_ssl_config,
+    const struct sockaddr *peer_addr, socklen_t peer_addrlen,
+    void *user_data);
+
 
 /**
  * @brief manually close a http3 connection

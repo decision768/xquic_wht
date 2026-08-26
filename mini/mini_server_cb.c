@@ -1955,6 +1955,11 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
     printf("[stats] xqc_mini_svr_h3_conn_close_notify success \n");
     if (user_conn->is_connection_scope) {
         xqc_mini_svr_user_conn_t *listener_conn = user_conn->listener_conn;
+        if (user_conn->ctx != NULL && user_conn->ctx->args != NULL
+            && user_conn->ctx->args->stream_poc.enabled)
+        {
+            xqc_mini_stream_poc_server_on_connection_close(user_conn);
+        }
         int h3_error = xqc_h3_conn_get_errno(h3_conn);
         user_conn->last_error_code =
             h3_error == H3_NO_ERROR ? 0 : h3_error;

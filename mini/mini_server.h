@@ -17,6 +17,7 @@
 
 #include "common.h"
 #include "platform.h"
+#include "mini_stream_poc.h"
 #include "mini_server_cb.h"
 #define SERVER_DEFAULT_FILE "server_data.bin"
 #define DEFAULT_IP   "10.12.54.143"
@@ -131,6 +132,9 @@ typedef struct xqc_mini_svr_args_s {
     /* environment args */
     xqc_mini_svr_env_config_t    env_cfg;
 
+    /* Dedicated H3 Extended Bytestream POC; disabled for file/API mode. */
+    xqc_mini_stream_poc_config_t stream_poc;
+
 } xqc_mini_svr_args_t;
 
 typedef struct xqc_mini_svr_ctx_s {
@@ -202,6 +206,13 @@ typedef struct xqc_mini_svr_user_conn_s {
     uint64_t                get_split_max_ns;
 
     void                   *file_task_state;
+
+    /* Stream POC state is per accepted connection; results live on listener. */
+    void                   *stream_poc_state;
+    int                     stream_poc_completed;
+    int                     stream_poc_result;
+    uint64_t                stream_poc_total_bytes;
+    uint64_t                stream_poc_digest;
 
 } xqc_mini_svr_user_conn_t;
 

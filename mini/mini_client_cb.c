@@ -183,6 +183,11 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     }
 
     xqc_mini_cli_diag_maybe_log(user_conn, "h3_conn_close", 1);
+    if (user_conn->ctx != NULL && user_conn->ctx->args != NULL
+        && user_conn->ctx->args->stream_poc.enabled)
+    {
+        xqc_mini_stream_poc_client_on_connection_close(user_conn);
+    }
     user_conn->last_error_code = xqc_h3_conn_get_errno(conn);
     user_conn->h3_conn = NULL;
     user_conn->connection_closed = 1;
@@ -215,6 +220,17 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
     user_conn->handshake_finished = 1;
     user_conn->path_wait_rounds_after_handshake = 0;
     printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
+
+    if (user_conn->ctx != NULL && user_conn->ctx->args != NULL
+        && user_conn->ctx->args->stream_poc.enabled)
+    {
+        if (xqc_mini_stream_poc_client_start(user_conn) != XQC_OK) {
+            printf("[stream_poc_error] role=client reason=start failed\n");
+            (void)xqc_h3_conn_close(user_conn->ctx->engine,
+                &user_conn->cid);
+        }
+        return;
+    }
 
     if (!user_conn->auto_start_requests) {
         return;

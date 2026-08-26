@@ -15,6 +15,7 @@
 #define XQC_ALPN_H3_EXT     XQC_DEFINED_ALPN_H3_EXT
 
 extern const char *const xqc_h3_alpn[];
+extern const char *const xqc_h3_ext_alpn[];
 
 
 /**
