@@ -227,6 +227,9 @@ mini_backend_server_poll(mini_backend_server_t *server)
     if (server == NULL || server->ctx.eb == NULL) {
         return EINVAL;
     }
+    if (server->active_stream != NULL) {
+        return 0;
+    }
     return event_base_loop(server->ctx.eb, EVLOOP_NONBLOCK) < 0 ? EIO : 0;
 }
 
@@ -264,6 +267,7 @@ mini_backend_server_accept(mini_backend_server_t *server,
     uint32_t timeout_ms, mini_backend_server_connection_t **out_connection)
 {
     if (server == NULL || out_connection == NULL || server->listener == NULL
+        || server->active_stream != NULL
         || !server->listener->accepting)
     {
         return EINVAL;

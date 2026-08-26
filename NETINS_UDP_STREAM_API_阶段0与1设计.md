@@ -131,6 +131,10 @@ void netins_udp_stream_close(netins_udp_stream_t *stream);
   和总长度，为阶段 3 的多 lane 重排保留兼容格式；
 - 一个连接同时只允许一个逻辑数据流，且不能和文件任务混用。
 
+阶段 3 已解除阶段 2 的单 lane 编译门，允许 `lane_count=1..8`。DATA record 按逻辑
+offset 在各 lane 间轮询分流，接收端使用有界乱序缓存连续交付；详细实现和测试方法见
+`NETINS_UDP_STREAM_API_阶段2与3实现.md`。
+
 ## 4. 阶段 1 POC 协议
 
 POC 正向数据不增加 DATA 帧头，生成的字节直接写入一个 Bytestream。客户端发送 FIN 后，

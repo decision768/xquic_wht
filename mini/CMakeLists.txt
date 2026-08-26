@@ -30,6 +30,7 @@ add_library(mini_common_backend_obj OBJECT
     common.c
     mini_stream_backend.c
     mini_stream_protocol.c
+    mini_stream_reorder.c
     mini_stream_poc_protocol.c
 )
 add_library(mini_client_backend_obj OBJECT
@@ -177,6 +178,9 @@ if(XQC_ENABLE_MINI_API)
     add_executable(mini_stream_protocol_test
         ../tests/mini_stream_protocol_test.c
         mini_stream_protocol.c)
+    add_executable(mini_stream_reorder_test
+        ../tests/mini_stream_reorder_test.c
+        mini_stream_reorder.c)
 
     foreach(target_name
         netins_udp_mini_api_client
@@ -193,5 +197,7 @@ if(XQC_ENABLE_MINI_API)
             ${ZLOG_STATIC_LIB})
     endforeach()
     target_include_directories(mini_stream_protocol_test PRIVATE
+        ${MINI_BACKEND_INCLUDE_DIRS})
+    target_include_directories(mini_stream_reorder_test PRIVATE
         ${MINI_BACKEND_INCLUDE_DIRS})
 endif()

@@ -10,15 +10,15 @@
 
 #include "common.h"
 #include "mini_stream_protocol.h"
+#include "mini_stream_reorder.h"
 
 #define MINI_STREAM_MAGIC 0x4e535452U
 #define MINI_STREAM_LANE_MAGIC 0x4e534c4eU
 #define MINI_STREAM_ALLOWED_FLAGS 1U
-/* Stage 2 gate. Stage 3 raises this to the public maximum after review. */
-#define MINI_STREAM_ENABLED_MAX_LANES 1U
+/* One logical stream may aggregate up to eight independent Bytestreams. */
+#define MINI_STREAM_ENABLED_MAX_LANES 8U
 
 typedef struct mini_stream_send_chunk_s mini_stream_send_chunk_t;
-typedef struct mini_stream_recv_chunk_s mini_stream_recv_chunk_t;
 typedef struct mini_stream_lane_s mini_stream_lane_t;
 
 struct mini_stream_send_chunk_s {
@@ -28,14 +28,6 @@ struct mini_stream_send_chunk_s {
     size_t wire_length;
     size_t wire_sent;
     unsigned char wire[];
-};
-
-struct mini_stream_recv_chunk_s {
-    mini_stream_recv_chunk_t *next;
-    uint64_t offset;
-    size_t length;
-    size_t received;
-    unsigned char data[];
 };
 
 struct mini_stream_lane_s {
@@ -55,7 +47,7 @@ struct mini_stream_lane_s {
     unsigned char frame_header[MINI_STREAM_FRAME_HEADER_SIZE];
     size_t frame_header_bytes;
     mini_stream_frame_header_t incoming_frame;
-    mini_stream_recv_chunk_t *incoming_chunk;
+    mini_stream_reorder_chunk_t *incoming_chunk;
 
     unsigned char fin_frame[MINI_STREAM_FRAME_HEADER_SIZE];
     size_t fin_frame_sent;
@@ -102,15 +94,13 @@ struct mini_backend_stream_s {
     uint32_t next_send_lane;
     uint64_t session_id;
     uint64_t next_send_offset;
-    uint64_t next_delivery_offset;
     uint64_t accepted_bytes;
     uint64_t peer_received_bytes;
     uint64_t digest;
     uint64_t start_time_us;
     uint64_t completed_time_us;
     size_t send_queue_bytes;
-    size_t receive_queue_bytes;
-    mini_stream_recv_chunk_t *receive_head;
+    mini_stream_reorder_t reorder;
 
     int finish_requested;
     int reset_requested;
@@ -366,8 +356,8 @@ mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
     if (ready <= 0) {
         return ready;
     }
-    if (stream->receive_head != NULL
-        || stream->next_delivery_offset != total_bytes)
+    if (mini_stream_reorder_has_pending(&stream->reorder)
+        || stream->reorder.next_offset != total_bytes)
     {
         return mini_stream_fail_locked(stream, EPROTO);
     }
@@ -588,6 +578,8 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->owner = owner;
     stream->detach = detach;
     stream->digest = mini_stream_digest_init();
+    mini_stream_reorder_init(&stream->reorder,
+        stream->receive_queue_limit);
     if (role == MINI_STREAM_ENDPOINT_OPEN) {
         stream->session_id = mini_stream_now()
             ^ (uint64_t)(uintptr_t)stream ^ ((uint64_t)getpid() << 32);
@@ -867,15 +859,11 @@ mini_stream_free_queues(mini_backend_stream_t *stream)
             free(send);
             send = next;
         }
-        free(lane->incoming_chunk);
+        mini_stream_reorder_discard(&stream->reorder,
+            lane->incoming_chunk);
         lane->incoming_chunk = NULL;
     }
-    mini_stream_recv_chunk_t *receive = stream->receive_head;
-    while (receive != NULL) {
-        mini_stream_recv_chunk_t *next = receive->next;
-        free(receive);
-        receive = next;
-    }
+    mini_stream_reorder_release(&stream->reorder);
 }
 
 void
@@ -937,32 +925,15 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
 
 static int
 mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
-    mini_stream_recv_chunk_t *chunk)
+    mini_stream_reorder_chunk_t *chunk)
 {
-    mini_stream_recv_chunk_t **cursor = &stream->receive_head;
-    mini_stream_recv_chunk_t *previous = NULL;
-    if (chunk->offset > UINT64_MAX - chunk->length) {
-        return mini_stream_fail_locked(stream, EOVERFLOW);
+    int ret = mini_stream_reorder_insert(&stream->reorder, chunk);
+    if (ret != 0) {
+        mini_stream_reorder_discard(&stream->reorder, chunk);
+        return mini_stream_fail_locked(stream, ret);
     }
-    while (*cursor != NULL && (*cursor)->offset < chunk->offset) {
-        previous = *cursor;
-        cursor = &(*cursor)->next;
-    }
-    if ((previous != NULL
-            && previous->offset + previous->length > chunk->offset)
-        || (*cursor != NULL
-            && chunk->offset + chunk->length > (*cursor)->offset))
-    {
-        return mini_stream_fail_locked(stream, EPROTO);
-    }
-    chunk->next = *cursor;
-    *cursor = chunk;
-
-    while (stream->receive_head != NULL
-        && stream->receive_head->offset == stream->next_delivery_offset)
-    {
-        mini_stream_recv_chunk_t *ready = stream->receive_head;
-        stream->receive_head = ready->next;
+    mini_stream_reorder_chunk_t *ready;
+    while ((ready = mini_stream_reorder_pop_ready(&stream->reorder)) != NULL) {
         if (stream->start_time_us == 0) {
             stream->start_time_us = mini_stream_now();
         }
@@ -972,9 +943,7 @@ mini_stream_insert_receive_locked(mini_backend_stream_t *stream,
             stream->on_data(stream->user_data, ready->data, ready->length,
                 ready->offset);
         }
-        stream->next_delivery_offset += ready->length;
-        stream->accepted_bytes = stream->next_delivery_offset;
-        stream->receive_queue_bytes -= ready->length;
+        stream->accepted_bytes = stream->reorder.next_offset;
         free(ready);
     }
     return 0;
@@ -1034,25 +1003,19 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
     }
     if (lane->incoming_frame.type != MINI_STREAM_FRAME_DATA
         || lane->incoming_frame.payload_length == 0
-        || lane->incoming_frame.payload_length > MINI_STREAM_MAX_FRAME_PAYLOAD
-        || lane->incoming_frame.payload_length
-            > stream->receive_queue_limit - stream->receive_queue_bytes)
+        || lane->incoming_frame.payload_length > MINI_STREAM_MAX_FRAME_PAYLOAD)
     {
-        return mini_stream_fail_locked(stream,
-            lane->incoming_frame.payload_length
-                > stream->receive_queue_limit - stream->receive_queue_bytes
-                ? ENOBUFS : EPROTO);
+        return mini_stream_fail_locked(stream, EPROTO);
     }
-    mini_stream_recv_chunk_t *chunk = malloc(sizeof(*chunk)
-        + lane->incoming_frame.payload_length);
+    int error_code = 0;
+    mini_stream_reorder_chunk_t *chunk = mini_stream_reorder_allocate(
+        &stream->reorder, lane->incoming_frame.offset,
+        lane->incoming_frame.payload_length, &error_code);
     if (chunk == NULL) {
-        return mini_stream_fail_locked(stream, ENOMEM);
+        return mini_stream_fail_locked(stream,
+            error_code != 0 ? error_code : ENOMEM);
     }
-    memset(chunk, 0, sizeof(*chunk));
-    chunk->offset = lane->incoming_frame.offset;
-    chunk->length = lane->incoming_frame.payload_length;
     lane->incoming_chunk = chunk;
-    stream->receive_queue_bytes += chunk->length;
     return 0;
 }
 
@@ -1097,7 +1060,7 @@ mini_stream_receive_forward_locked(mini_backend_stream_t *stream,
             }
             continue;
         }
-        mini_stream_recv_chunk_t *chunk = lane->incoming_chunk;
+        mini_stream_reorder_chunk_t *chunk = lane->incoming_chunk;
         size_t count = chunk->length - chunk->received;
         if (count > data_len - offset) {
             count = data_len - offset;
