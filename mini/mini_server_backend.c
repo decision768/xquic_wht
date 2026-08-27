@@ -173,6 +173,7 @@ mini_backend_server_drain_pending_streams(mini_backend_server_t *server)
             if (!attached) {
                 xqc_h3_ext_bytestream_set_user_data(pending->bs, NULL);
             }
+            /* close() may synchronously destroy the Bytestream. */
             (void)xqc_h3_ext_bytestream_close(pending->bs);
             if (node != NULL && pending_error == 0) {
                 mini_stream_backend_on_connection_close(node->stream,
@@ -182,7 +183,7 @@ mini_backend_server_drain_pending_streams(mini_backend_server_t *server)
 
         pthread_mutex_lock(&server->lock);
         mini_backend_server_pending_free(pending->connection, pending,
-            ret != XQC_OK && !attached);
+            0);
         mini_backend_server_stream_release_locked(server, node);
         pthread_mutex_unlock(&server->lock);
     }
@@ -1172,7 +1173,7 @@ mini_backend_server_on_handshake_finished(void *backend,
 
 void
 mini_backend_server_on_connection_closed(void *backend,
-    mini_backend_server_connection_t *connection)
+    mini_backend_server_connection_t *connection, int error_code)
 {
     mini_backend_server_t *server = backend;
     if (server == NULL || connection == NULL || server->listener == NULL) {
@@ -1180,6 +1181,7 @@ mini_backend_server_on_connection_closed(void *backend,
     }
     int release = 0;
     pthread_mutex_lock(&server->lock);
+    connection->last_error_code = error_code;
     connection->connection_closed = 1;
     connection->serve_cancelled = 1;
     connection->serve_configured = 0;
@@ -1193,6 +1195,23 @@ mini_backend_server_on_connection_closed(void *backend,
     if (release) {
         xqc_mini_svr_free_user_conn(connection);
     }
+}
+
+void
+mini_backend_server_on_listener_error(void *backend, int error_code)
+{
+    mini_backend_server_t *server = backend;
+    if (server == NULL || server->listener == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&server->lock);
+    if (server->listener->last_error_code == 0) {
+        server->listener->last_error_code = error_code != 0
+            ? error_code : EIO;
+    }
+    server->listener->accepting = 0;
+    pthread_cond_broadcast(&server->state_cond);
+    pthread_mutex_unlock(&server->lock);
 }
 
 void
@@ -1503,7 +1522,7 @@ mini_backend_server_stream_accept(mini_backend_server_t *server,
     mini_backend_stream_t *stream = NULL;
     int ret = mini_stream_backend_create(server->ctx.engine,
         &cid, server->ctx.eb, MINI_STREAM_ENDPOINT_ACCEPT,
-        &stream_config, NULL, server,
+        &stream_config, NULL, NULL, server,
         mini_backend_server_stream_detach, out_stream);
     if (ret != 0) {
         free(node);

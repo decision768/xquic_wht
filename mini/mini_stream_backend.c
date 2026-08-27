@@ -78,6 +78,7 @@ struct mini_backend_stream_s {
     mini_backend_stream_data_fn on_data;
     void *user_data;
     void **connection_state_slot;
+    pthread_mutex_t *engine_lock;
     void *owner;
     mini_stream_owner_detach_fn detach;
 
@@ -132,6 +133,22 @@ struct mini_backend_stream_s {
 static void mini_stream_wake(mini_backend_stream_t *stream);
 static int mini_stream_process_locked(mini_backend_stream_t *stream);
 static void *mini_stream_delivery_worker(void *arg);
+
+static void
+mini_stream_engine_acquire(mini_backend_stream_t *stream)
+{
+    if (stream->engine_lock != NULL) {
+        pthread_mutex_lock(stream->engine_lock);
+    }
+}
+
+static void
+mini_stream_engine_release(mini_backend_stream_t *stream)
+{
+    if (stream->engine_lock != NULL) {
+        pthread_mutex_unlock(stream->engine_lock);
+    }
+}
 
 static uint64_t
 mini_stream_now(void)
@@ -500,6 +517,7 @@ static void *
 mini_stream_worker(void *arg)
 {
     mini_backend_stream_t *stream = arg;
+    mini_stream_engine_acquire(stream);
     pthread_mutex_lock(&stream->lock);
     if (stream->role == MINI_STREAM_ENDPOINT_OPEN) {
         uint32_t i;
@@ -515,6 +533,7 @@ mini_stream_worker(void *arg)
         (void)mini_stream_process_locked(stream);
     }
     pthread_mutex_unlock(&stream->lock);
+    mini_stream_engine_release(stream);
 
     for (;;) {
         pthread_mutex_lock(&stream->lock);
@@ -523,26 +542,31 @@ mini_stream_worker(void *arg)
         if (stop) {
             break;
         }
+        mini_stream_engine_acquire(stream);
         int ret = event_base_loop(stream->event_base, EVLOOP_ONCE);
         if (ret < 0) {
             pthread_mutex_lock(&stream->lock);
             (void)mini_stream_fail_locked(stream, EIO);
             pthread_mutex_unlock(&stream->lock);
+            mini_stream_engine_release(stream);
             break;
         }
         pthread_mutex_lock(&stream->lock);
         (void)mini_stream_process_locked(stream);
         stop = stream->stop_requested;
         pthread_mutex_unlock(&stream->lock);
+        mini_stream_engine_release(stream);
         if (stop) {
             break;
         }
     }
+    mini_stream_engine_acquire(stream);
     pthread_mutex_lock(&stream->lock);
     (void)mini_stream_process_locked(stream);
     stream->io_stopped = 1;
     mini_stream_signal_locked(stream);
     pthread_mutex_unlock(&stream->lock);
+    mini_stream_engine_release(stream);
     return NULL;
 }
 
@@ -622,7 +646,7 @@ int
 mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     struct event_base *event_base, int role,
     const mini_backend_stream_config_t *config,
-    void **connection_state_slot, void *owner,
+    void **connection_state_slot, pthread_mutex_t *engine_lock, void *owner,
     mini_stream_owner_detach_fn detach,
     mini_backend_stream_t **out_stream)
 {
@@ -658,6 +682,7 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->on_data = config->on_data;
     stream->user_data = config->user_data;
     stream->connection_state_slot = connection_state_slot;
+    stream->engine_lock = engine_lock;
     stream->owner = owner;
     stream->detach = detach;
     stream->digest = mini_stream_digest_init();
@@ -1141,6 +1166,17 @@ mini_stream_backend_external_driver_stopped(mini_backend_stream_t *stream,
     }
     stream->io_stopped = 1;
     mini_stream_signal_locked(stream);
+    pthread_mutex_unlock(&stream->lock);
+}
+
+void
+mini_stream_backend_request_wakeup(mini_backend_stream_t *stream)
+{
+    if (!mini_stream_valid(stream)) {
+        return;
+    }
+    pthread_mutex_lock(&stream->lock);
+    mini_stream_wake(stream);
     pthread_mutex_unlock(&stream->lock);
 }
 

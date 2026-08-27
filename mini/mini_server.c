@@ -925,8 +925,13 @@ xqc_mini_svr_socket_event_callback(int fd, short what, void *arg)
 
     } else {
         printf("event callback: fd=%d, what=%d\n", fd, what);
-        user_conn->last_error_code = EIO;
-        user_conn->accepting = 0;
+        if (user_conn->api_listener_mode && user_conn->api_backend != NULL) {
+            mini_backend_server_on_listener_error(
+                user_conn->api_backend, EIO);
+        } else {
+            user_conn->last_error_code = EIO;
+            user_conn->accepting = 0;
+        }
         event_base_loopbreak(user_conn->ctx->eb);
     }
 }

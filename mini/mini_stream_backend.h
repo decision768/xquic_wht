@@ -2,6 +2,7 @@
 #define XQC_MINI_STREAM_BACKEND_H
 
 #include <event2/event.h>
+#include <pthread.h>
 #include <xquic/xqc_http3.h>
 
 #include "mini_backend.h"
@@ -17,7 +18,7 @@ typedef void (*mini_stream_owner_detach_fn)(void *owner,
 int mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     struct event_base *event_base, int role,
     const mini_backend_stream_config_t *config,
-    void **connection_state_slot, void *owner,
+    void **connection_state_slot, pthread_mutex_t *engine_lock, void *owner,
     mini_stream_owner_detach_fn detach,
     mini_backend_stream_t **out_stream);
 
@@ -25,6 +26,7 @@ void mini_stream_backend_on_connection_close(
     mini_backend_stream_t *stream, int error_code);
 void mini_stream_backend_external_driver_stopped(
     mini_backend_stream_t *stream, int error_code);
+void mini_stream_backend_request_wakeup(mini_backend_stream_t *stream);
 
 /* Drive completion checks from a shared server event-loop thread. */
 int mini_stream_backend_drive(mini_backend_stream_t *stream);

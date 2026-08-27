@@ -178,11 +178,11 @@ int mini_backend_client_transfer(mini_backend_client_t *client,
 int mini_backend_client_shutdown(mini_backend_client_t *client,
     uint32_t timeout_ms);
 void mini_backend_client_destroy(mini_backend_client_t *client);
-int mini_backend_client_is_connected(const mini_backend_client_t *client);
-int mini_backend_client_is_closed(const mini_backend_client_t *client);
-int mini_backend_client_last_error(const mini_backend_client_t *client);
-int mini_backend_client_active_path_count(const mini_backend_client_t *client);
-int mini_backend_client_get_snapshot(const mini_backend_client_t *client,
+int mini_backend_client_is_connected(mini_backend_client_t *client);
+int mini_backend_client_is_closed(mini_backend_client_t *client);
+int mini_backend_client_last_error(mini_backend_client_t *client);
+int mini_backend_client_active_path_count(mini_backend_client_t *client);
+int mini_backend_client_get_snapshot(mini_backend_client_t *client,
     mini_backend_snapshot_t *snapshot);
 int mini_backend_client_stream_open(mini_backend_client_t *client,
     const mini_backend_stream_config_t *config,
@@ -232,7 +232,8 @@ void mini_backend_server_on_connection_created(void *backend,
 void mini_backend_server_on_handshake_finished(void *backend,
     mini_backend_server_connection_t *connection);
 void mini_backend_server_on_connection_closed(void *backend,
-    mini_backend_server_connection_t *connection);
+    mini_backend_server_connection_t *connection, int error_code);
+void mini_backend_server_on_listener_error(void *backend, int error_code);
 void mini_backend_server_on_stream_connection_closed(void *backend,
     mini_backend_server_connection_t *connection, int error_code);
 

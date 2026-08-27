@@ -2,6 +2,7 @@
 
 #include <errno.h>
 #include <netdb.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,7 @@ struct mini_backend_client_s {
     int api_mode;
     int connect_started;
     mini_backend_stream_t *active_stream;
+    pthread_mutex_t engine_lock;
 };
 
 static void
@@ -183,6 +185,12 @@ mini_backend_client_create(const mini_backend_config_t *config,
         free(client);
         return ENOMEM;
     }
+    int sync_ret = pthread_mutex_init(&client->engine_lock, NULL);
+    if (sync_ret != 0) {
+        free(args);
+        free(client);
+        return sync_ret;
+    }
 
     client->args = args;
     client->api_mode = config != NULL && config->api_mode;
@@ -209,6 +217,7 @@ mini_backend_client_create(const mini_backend_config_t *config,
 
     if (xqc_mini_cli_init_ctx(&client->ctx, args) != XQC_OK) {
         xqc_mini_cli_free_ctx(&client->ctx);
+        pthread_mutex_destroy(&client->engine_lock);
         free(client);
         return EIO;
     }
@@ -220,6 +229,7 @@ mini_backend_client_create(const mini_backend_config_t *config,
             client->ctx.engine = NULL;
         }
         xqc_mini_cli_free_ctx(&client->ctx);
+        pthread_mutex_destroy(&client->engine_lock);
         free(client);
         return EIO;
     }
@@ -329,7 +339,13 @@ mini_backend_client_poll(mini_backend_client_t *client)
     if (client == NULL || client->ctx.eb == NULL) {
         return EINVAL;
     }
-    return event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK) < 0 ? EIO : 0;
+    if (client->active_stream != NULL) {
+        return 0;
+    }
+    pthread_mutex_lock(&client->engine_lock);
+    int ret = event_base_loop(client->ctx.eb, EVLOOP_NONBLOCK) < 0 ? EIO : 0;
+    pthread_mutex_unlock(&client->engine_lock);
+    return ret;
 }
 
 int
@@ -500,6 +516,7 @@ mini_backend_client_destroy(mini_backend_client_t *client)
     }
     xqc_mini_cli_free_ctx(&client->ctx);
     client->args = NULL;
+    pthread_mutex_destroy(&client->engine_lock);
     free(client);
 }
 
@@ -510,6 +527,14 @@ mini_backend_client_stream_detach(void *owner,
     mini_backend_client_t *client = owner;
     if (client != NULL && client->active_stream == stream) {
         client->active_stream = NULL;
+    }
+}
+
+static void
+mini_backend_client_wake_stream(mini_backend_client_t *client)
+{
+    if (client != NULL && client->active_stream != NULL) {
+        mini_stream_backend_request_wakeup(client->active_stream);
     }
 }
 
@@ -531,7 +556,7 @@ mini_backend_client_stream_open(mini_backend_client_t *client,
     int ret = mini_stream_backend_create(client->ctx.engine,
         &client->connection->cid, client->ctx.eb,
         MINI_STREAM_ENDPOINT_OPEN, config,
-        &client->connection->stream_api_state, client,
+        &client->connection->stream_api_state, &client->engine_lock, client,
         mini_backend_client_stream_detach, out_stream);
     if (ret == 0) {
         client->active_stream = *out_stream;
@@ -540,32 +565,60 @@ mini_backend_client_stream_open(mini_backend_client_t *client,
 }
 
 int
-mini_backend_client_is_connected(const mini_backend_client_t *client)
+mini_backend_client_is_connected(mini_backend_client_t *client)
 {
-    return client != NULL && client->connection != NULL
+    if (client == NULL) {
+        return 0;
+    }
+    mini_backend_client_wake_stream(client);
+    pthread_mutex_lock(&client->engine_lock);
+    int connected = client->connection != NULL
         && client->connection->handshake_finished
         && !client->connection->connection_closed;
+    pthread_mutex_unlock(&client->engine_lock);
+    return connected;
 }
 
 int
-mini_backend_client_is_closed(const mini_backend_client_t *client)
+mini_backend_client_is_closed(mini_backend_client_t *client)
 {
-    return client == NULL || client->connection == NULL
+    if (client == NULL) {
+        return 1;
+    }
+    mini_backend_client_wake_stream(client);
+    pthread_mutex_lock(&client->engine_lock);
+    int closed = client->connection == NULL
         || client->connection->connection_closed;
+    pthread_mutex_unlock(&client->engine_lock);
+    return closed;
 }
 
 int
-mini_backend_client_last_error(const mini_backend_client_t *client)
+mini_backend_client_last_error(mini_backend_client_t *client)
 {
-    return client != NULL && client->connection != NULL
+    if (client == NULL) {
+        return 0;
+    }
+    mini_backend_client_wake_stream(client);
+    pthread_mutex_lock(&client->engine_lock);
+    int error_code = client->connection != NULL
         ? client->connection->last_error_code : 0;
+    pthread_mutex_unlock(&client->engine_lock);
+    return error_code;
 }
 
 int
-mini_backend_client_active_path_count(const mini_backend_client_t *client)
+mini_backend_client_active_path_count(mini_backend_client_t *client)
 {
-    return client != NULL && client->connection != NULL
+    if (client == NULL) {
+        return 0;
+    }
+    mini_backend_client_wake_stream(client);
+    pthread_mutex_lock(&client->engine_lock);
+    int path_count = client->connection != NULL
         ? client->connection->active_path_cnt : 0;
+    pthread_mutex_unlock(&client->engine_lock);
+    return path_count;
 }
 
 static void
@@ -595,7 +648,7 @@ mini_backend_client_format_address(const struct sockaddr *address,
 }
 
 int
-mini_backend_client_get_snapshot(const mini_backend_client_t *client,
+mini_backend_client_get_snapshot(mini_backend_client_t *client,
     mini_backend_snapshot_t *snapshot)
 {
     if (client == NULL || snapshot == NULL || client->connection == NULL
@@ -604,6 +657,8 @@ mini_backend_client_get_snapshot(const mini_backend_client_t *client,
         return EINVAL;
     }
 
+    mini_backend_client_wake_stream(client);
+    pthread_mutex_lock(&client->engine_lock);
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->snapshot_time_us = xqc_now();
     snapshot->handshake_finished =
@@ -669,5 +724,6 @@ mini_backend_client_get_snapshot(const mini_backend_client_t *client,
         }
         snapshot->path_count++;
     }
+    pthread_mutex_unlock(&client->engine_lock);
     return 0;
 }

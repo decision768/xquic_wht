@@ -114,6 +114,36 @@ def main() -> int:
             r"stream_api_pending_head.*?xqc_h3_ext_bytestream_set_user_data",
         ),
         (
+            "pending Bytestream cleanup does not touch a stream after close",
+            "server_backend",
+            r"xqc_h3_ext_bytestream_close\(pending->bs\).*?"
+            r"mini_backend_server_pending_free\(pending->connection,\s*"
+            r"pending,\s*0\s*\)",
+        ),
+        (
+            "client state polling yields to the active stream worker",
+            "client_backend",
+            r"mini_backend_client_poll\s*\(.*?"
+            r"client->active_stream\s*!=\s*NULL\s*\)\s*\{\s*"
+            r"return\s+0\s*;.*?pthread_mutex_lock\(&client->engine_lock\)",
+        ),
+        (
+            "client stream worker shares engine serialization with snapshots",
+            "client_backend",
+            r"mini_backend_client_stream_open\s*\(.*?"
+            r"&client->engine_lock.*?mini_backend_client_get_snapshot\s*\("
+            r".*?mini_backend_client_wake_stream\(client\).*?"
+            r"pthread_mutex_lock\(&client->engine_lock\).*?"
+            r"xqc_conn_get_stats",
+        ),
+        (
+            "internal stream worker serializes event-base entry",
+            "stream_backend",
+            r"mini_stream_worker\s*\(.*?mini_stream_engine_acquire\(stream\)"
+            r".*?event_base_loop\(stream->event_base,\s*EVLOOP_ONCE\).*?"
+            r"mini_stream_engine_release\(stream\)",
+        ),
+        (
             "server worker exit stops every external stream driver",
             "server_backend",
             r"io_worker_running\s*=\s*0;.*?"
@@ -125,6 +155,13 @@ def main() -> int:
             r"pthread_mutex_lock\(&server->engine_lock\);.*?"
             r"xqc_conn_get_stats.*?"
             r"pthread_mutex_unlock\(&server->engine_lock\);",
+        ),
+        (
+            "server connection close publishes errors under the backend lock",
+            "server_backend",
+            r"mini_backend_server_on_connection_closed\s*\(.*?"
+            r"pthread_mutex_lock\(&server->lock\);\s*"
+            r"connection->last_error_code\s*=\s*error_code;",
         ),
     )
 
