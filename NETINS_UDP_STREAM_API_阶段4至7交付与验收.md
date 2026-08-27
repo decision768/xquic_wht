@@ -10,7 +10,7 @@
 | 阶段 | 已完成内容 |
 |---|---|
 | 4：可靠性 | 取消后确定的 `ECANCELED` 语义、幂等失败完成时间、连接/协议错误状态、应用 reset 错误码可查询 |
-| 5：测试能力 | 固定 4 lane 的边界长度、非阻塞背压、部分写、连接中断和自动验收脚本 |
+| 5：测试能力 | 固定 4 lane 的边界长度、本地队列背压、慢回调累计 CREDIT、延迟 accept、连接中断和自动验收脚本 |
 | 6：性能与观测 | 唤醒合并、有界队列/重排高水位、记录计数、逐 lane 收发字节和 demo 吞吐输出 |
 | 7：交付收口 | API 初始化器契约测试、28 个公开符号检查、文件/流连接模式隔离守卫、统一验收入口 |
 
@@ -110,6 +110,7 @@ netins_udp_stream_close(stream);
 | lane 数/session/offset/FIN 不一致 | 流进入 ERROR，通常为 `EPROTO` |
 | 连接或 lane 提前关闭 | 流进入 ERROR，通常为 `ECONNRESET` |
 | 等待超时 | 本次调用返回 `ETIMEDOUT`；读取 accepted/结果后由应用决定重试或 reset |
+| 累计逻辑 offset 无法继续用 `uint64_t` 表示 | `write()` 返回 `EOVERFLOW`，不再接受会回绕的数据 |
 
 `reset(code)` 的 `code` 可通过 `netins_udp_stream_get_snapshot()` 的 `app_error_code` 在本端
 查询。API v1 只通过关闭让对端感知失败，不保证把该 64 位应用错误码传到对端。
@@ -213,9 +214,11 @@ python3 tests/stream_api_acceptance.py \
 4. 0、1、65535、65536、65537 字节边界；
 5. 固定 4 lane、逐 lane 统计总和和足量数据下的 lane 利用；
 6. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
-7. 两个 accepted connection 并发传输；
-8. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
-9. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
+7. 64 KiB 接收队列、20 ms 慢回调和 2 MiB 数据强制累计 CREDIT 反复推进，并检查接收高水位；
+8. 非空流与空流各延迟 500 ms 调用 `stream_accept()`，验证 payload/FIN 等待初始 CREDIT；
+9. 两个 accepted connection 并发传输；
+10. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
+11. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
 
 脚本会自己生成确定性字节模式，不创建输入文件，也不把完整测试数据放入内存。
 
@@ -267,14 +270,43 @@ scheduler 不变，分别运行：
 `sar -n DEV 1`，或读取 `/sys/class/net/接口名/statistics/tx_bytes`，用于确认数据确实经过
 指定网卡；最终有效吞吐以客户端 `throughput_mbps` 为准。
 
-强制背压测试（4 lane、64 KiB 发送队列、非阻塞 flag=1）：
+本地发送队列背压测试（4 lane、64 KiB 发送队列、非阻塞 flag=1）：
 
 ```bash
 ./netins_udp_stream_client SERVER_IP 18460 8388608 7 \
   65536 8388608 1 60000 60000
 ```
 
-成功且输出 `eagain>0`、`partial>0` 才证明测试确实触发了背压，而不是只走了普通成功路径。
+成功且输出 `eagain>0`、`partial>0`，证明业务写入侧触发了本地队列背压。它不等同于
+接收端累计 CREDIT 测试。
+
+接收端 CREDIT 循环测试使用 2 MiB 数据、64 KiB 接收窗口和每次回调 20 ms 延迟。初始额度
+只能覆盖一个最大 DATA record，完整传输必须在 `on_data()` 返回后反复推进 CREDIT：
+
+```bash
+./netins_udp_stream_server 0.0.0.0 18461 2097152 8 \
+  65536 60000 --callback-delay-ms 20
+
+./netins_udp_stream_client SERVER_IP 18461 2097152 8 \
+  8388608 65536 0 60000 60000 --scheduler adaptive
+```
+
+成功时服务端 `records_delivered` 应大于 1，且 `reorder_high_water` 必须大于 0、不超过
+65536。自动验收脚本会检查这些条件。
+
+延迟 accept 测试在 QUIC 连接 accept 后等待 500 ms，再挂接逻辑流：
+
+```bash
+./netins_udp_stream_server 0.0.0.0 18462 1048576 9 \
+  8388608 60000 --accept-delay-ms 500
+
+./netins_udp_stream_client SERVER_IP 18462 1048576 9 \
+  8388608 8388608 0 60000 60000 --scheduler adaptive
+```
+
+等待期间客户端只能发送四个 40 字节 lane header；payload 和 FIN 必须等初始 CREDIT。自动
+验收还会执行一个 0 字节延迟 accept 用例，覆盖“只有 FIN”的边界。两个 delay 参数默认均为
+0，只用于正确性验收，吞吐性能测试不得启用。
 
 ## 10. 文件 API 回归
 
@@ -303,7 +335,7 @@ python3 tests/stream_api_acceptance.py \
 - 真实依赖下两种架构完整编译、链接成功，ABI 检查为 28 个公开函数；
 - 快速与 `--full` 回环验收全部 PASS；
 - 主板到云服务器固定 4 lane 的字节、摘要、逐 lane 总和正确；
-- 背压用例看到 `EAGAIN` 和部分写，RSS 不随总传输字节无限增长；
+- 本地队列背压用例看到 `EAGAIN` 和部分写；慢回调 CREDIT 用例完成且接收高水位不越界；
 - 断网或服务端提前结束时不能误报成功；
 - 原文件 API GET/POST 回归通过；
 - 关闭流和连接后无崩溃、死锁和残留测试进程。

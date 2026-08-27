@@ -12,7 +12,7 @@ GET/POST 文件收发、持续数据流、状态查询、错误处理和连接�
 ## 1. API 能做什么
 
 Mini API 同时提供基于 QUIC/HTTP3 的完整文件任务 API，以及需要显式启用的持续数据流 API。
-数据流不是透明 TCP socket：SDK 会把连续字节切成带逻辑 offset 的记录，并可聚合到 1～8 条
+数据流不是透明 TCP socket：SDK 会把连续字节切成带逻辑 offset 的记录，并固定聚合到 4 条
 H3 Extended Bytestream lane，以保留多流聚合、跨 lane 重排和完成回执能力。
 
 - `netins_udp_connect()` 建立客户端 QUIC/HTTP3 连接；
@@ -141,7 +141,7 @@ netins_udp_cleanup()
 |---|---|
 | `netins_udp_stream_open()` | 在启用流模式的已连接 CLIENT 上创建发送端 |
 | `netins_udp_stream_accept()` | 在启用流模式的 ACCEPTED handle 上创建接收端 |
-| `netins_udp_stream_write()` | 复制调用方 Buffer；支持阻塞、超时、非阻塞和部分 accepted |
+| `netins_udp_stream_write()` | 复制调用方 Buffer；`*accepted` 先清零，支持阻塞、超时、非阻塞和部分 accepted；累计 offset 溢出返回 `EOVERFLOW` |
 | `netins_udp_stream_flush()` | 等待本地队列提交给 XQUIC，不等于对端已经收到 |
 | `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN 并提交回执 |
 | `netins_udp_stream_reset()` | 取消本地逻辑流；API v1 不把应用错误码传给对端 |
@@ -151,7 +151,9 @@ netins_udp_cleanup()
 两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`。本交付版本的
 数据流公共 API 和 stream client/server 都固定使用 4 lane，不提供 `lane_count` 字段或命令行
 lane 参数，也不允许调用方自行选择不同数量；只读快照中的 `lane_count` 恒为 4。一个连接只能
-有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收方法见
+有一个活动逻辑流，且不得与文件传输混用。设置流模式后，即使还没有创建逻辑流，
+`netins_udp_transfer()` 和 `netins_udp_serve()` 也会以 `EOPNOTSUPP` 明确拒绝。完整调用示例、
+背压语义与验收方法见
 [`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
 
 ### 3.5 状态和统计
@@ -1208,7 +1210,12 @@ netins_udp_stream_client HOST PORT BYTES SEED
 ```text
 netins_udp_stream_server LISTEN_IP PORT EXPECTED_BYTES SEED
   [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]
+  [--callback-delay-ms N] [--accept-delay-ms N]
 ```
+
+两个 delay 参数仅用于验收：前者让每次 `on_data()` 返回前等待 N ms，以验证接收端累计
+CREDIT 背压；后者在连接 accept 后、`netins_udp_stream_accept()` 前等待 N ms，以验证 accept 前
+只有四个 lane header。二者默认均为 0，性能测试不得启用。
 
 客户端和服务端内部都固定为 4 lane。`BYTES` 和 `EXPECTED_BYTES` 应一致；接收端传 0 时
 不校验预期总长度，但仍校验数据模式、最终回执和逐 lane 统计。

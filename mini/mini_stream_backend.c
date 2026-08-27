@@ -959,13 +959,16 @@ int
 mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
     size_t data_len, uint32_t timeout_ms, size_t *accepted)
 {
-    if (!mini_stream_valid(stream) || accepted == NULL
+    if (accepted == NULL) {
+        return EINVAL;
+    }
+    *accepted = 0;
+    if (!mini_stream_valid(stream)
         || (data == NULL && data_len != 0)
         || stream->role != MINI_STREAM_ENDPOINT_OPEN)
     {
         return EINVAL;
     }
-    *accepted = 0;
     if (data_len == 0) {
         return 0;
     }
@@ -1007,6 +1010,12 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
         }
         if (count > MINI_STREAM_MAX_FRAME_PAYLOAD) {
             count = MINI_STREAM_MAX_FRAME_PAYLOAD;
+        }
+        if (stream->next_send_offset > UINT64_MAX - count
+            || stream->accepted_bytes > UINT64_MAX - count)
+        {
+            result = EOVERFLOW;
+            break;
         }
         mini_stream_send_chunk_t *chunk = mini_stream_make_send_chunk(
             stream->next_send_offset, bytes + *accepted, count);

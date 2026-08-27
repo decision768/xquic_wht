@@ -940,11 +940,18 @@ netins_udp_transfer(netins_udp_t *client,
 {
     if (!netins_udp_valid(client) || client->role != NETINS_UDP_ROLE_CLIENT
         || client->state != NETINS_UDP_STATE_CONNECTED
-        || client->client_backend == NULL || client->active_stream != NULL
-        || task == NULL || result == NULL)
+        || client->client_backend == NULL || task == NULL || result == NULL)
     {
         return netins_udp_set_error(client, EINVAL,
             "transfer requires a connected client, task and result");
+    }
+    if (client->backend_config.stream_mode) {
+        return netins_udp_set_error(client, EOPNOTSUPP,
+            "file transfer is unavailable on a stream-mode connection");
+    }
+    if (client->active_stream != NULL) {
+        return netins_udp_set_error(client, EBUSY,
+            "file transfer is unavailable while a data stream is active");
     }
     if (task->struct_size < sizeof(*task)
         || task->api_version != NETINS_UDP_API_VERSION
@@ -1019,11 +1026,18 @@ netins_udp_serve(netins_udp_t *connection,
         || connection->role != NETINS_UDP_ROLE_ACCEPTED
         || connection->state != NETINS_UDP_STATE_CONNECTED
         || connection->server_backend == NULL
-        || connection->server_connection == NULL
-        || connection->active_stream != NULL || config == NULL)
+        || connection->server_connection == NULL || config == NULL)
     {
         return netins_udp_set_error(connection, EINVAL,
             "serve requires a connected accepted handle");
+    }
+    if (connection->backend_config.stream_mode) {
+        return netins_udp_set_error(connection, EOPNOTSUPP,
+            "file serving is unavailable on a stream-mode connection");
+    }
+    if (connection->active_stream != NULL) {
+        return netins_udp_set_error(connection, EBUSY,
+            "file serving is unavailable while a data stream is active");
     }
     if (config->struct_size < sizeof(*config)
         || config->api_version != NETINS_UDP_API_VERSION
@@ -1203,7 +1217,12 @@ int
 netins_udp_stream_write(netins_udp_stream_t *stream, const void *data,
     size_t data_len, uint32_t timeout_ms, size_t *accepted)
 {
-    if (!netins_udp_stream_valid(stream) || accepted == NULL) {
+    if (accepted == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    *accepted = 0;
+    if (!netins_udp_stream_valid(stream)) {
         errno = EINVAL;
         return -1;
     }

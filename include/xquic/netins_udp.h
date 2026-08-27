@@ -502,7 +502,10 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;
- * do not mix a file transfer and a data stream on the same connection.
+ * file transfer/serve calls reject every stream-mode connection with
+ * EOPNOTSUPP, even before a logical stream has been opened or accepted.
+ * For a non-NULL `accepted` output, stream_write() initializes `*accepted` to
+ * zero before validation and then reports bytes copied before a later error.
  */
 NETINS_UDP_PUBLIC int netins_udp_stream_open(
     netins_udp_t *connected_client,

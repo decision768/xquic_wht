@@ -17,6 +17,7 @@ from typing import Sequence
 
 
 RESULT_RE = re.compile(r"\[stream_api_result\]\s+(?P<fields>.*)")
+SNAPSHOT_RE = re.compile(r"\[stream_api_snapshot\]\s+(?P<fields>.*)")
 LANE_RE = re.compile(r"\[stream_api_lane\]\s+(?P<fields>.*)")
 FIELD_RE = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
 FIXED_LANES = 4
@@ -28,8 +29,13 @@ class TransferCase:
     size: int
     seed: int
     send_queue: int = 8 * 1024 * 1024
+    receive_queue: int = 8 * 1024 * 1024
     flags: int = 0
     require_backpressure: bool = False
+    callback_delay_ms: int = 0
+    accept_delay_ms: int = 0
+    require_receiver_credit: bool = False
+    require_delayed_accept: bool = False
 
 
 def executable(bin_dir: Path, name: str) -> Path:
@@ -55,6 +61,21 @@ def fields(output: str, role: str) -> dict[str, str]:
         if values.get("role") == role:
             return values
     return {}
+
+
+def snapshot_fields(output: str, role: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for line in output.splitlines():
+        match = SNAPSHOT_RE.search(line)
+        if not match:
+            continue
+        values = {
+            item.group("key"): item.group("value")
+            for item in FIELD_RE.finditer(match.group("fields"))
+        }
+        if values.get("role") == role:
+            result = values
+    return result
 
 
 def integer(values: dict[str, str], key: str) -> int:
@@ -116,11 +137,13 @@ def run_pair(
     size: int,
     seed: int,
     send_queue: int,
+    receive_queue: int,
     flags: int,
+    callback_delay_ms: int,
+    accept_delay_ms: int,
     timeout_s: float,
 ) -> tuple[int, str, int, str]:
     api_timeout_ms = max(3000, int(timeout_s * 1000))
-    receive_queue = 8 * 1024 * 1024
     with tempfile.TemporaryDirectory(prefix="netins-stream-test-") as temp_dir:
         server_log_path = Path(temp_dir) / "server.log"
         server_log = server_log_path.open("w", encoding="utf-8")
@@ -128,6 +151,14 @@ def run_pair(
             str(server_binary), listen_ip, str(port), str(size),
             str(seed), str(receive_queue), str(api_timeout_ms),
         ]
+        if callback_delay_ms:
+            server_command.extend([
+                "--callback-delay-ms", str(callback_delay_ms),
+            ])
+        if accept_delay_ms:
+            server_command.extend([
+                "--accept-delay-ms", str(accept_delay_ms),
+            ])
         server = subprocess.Popen(
             server_command,
             stdout=server_log,
@@ -329,6 +360,30 @@ def validate_success(
             raise ValueError("nonblocking case did not observe EAGAIN")
         if integer(client_values, "partial") == 0:
             raise ValueError("nonblocking case did not observe a partial write")
+    if case.require_receiver_credit:
+        if case.size <= case.receive_queue:
+            raise ValueError("receiver-credit case fits in its initial credit")
+        snapshot = snapshot_fields(server_output, "server")
+        delivered = integer(snapshot, "records_delivered")
+        high_water = integer(snapshot, "reorder_high_water")
+        if delivered <= 1:
+            raise ValueError("receiver-credit case did not deliver multiple records")
+        if high_water == 0 or high_water > case.receive_queue:
+            raise ValueError(
+                "receiver queue high-water exceeded its advertised credit"
+            )
+        expected_delay = f"callback_delay_ms={case.callback_delay_ms}"
+        expected_queue = f"receive_queue={case.receive_queue}"
+        if (expected_delay not in server_output
+                or expected_queue not in server_output):
+            raise ValueError(
+                "server did not enable the requested receiver-credit limits"
+            )
+    if case.require_delayed_accept:
+        expected_delay = f"delay_ms={case.accept_delay_ms}"
+        if ("[stream_api_accept_delay]" not in server_output
+                or expected_delay not in server_output):
+            raise ValueError("server did not exercise delayed stream_accept")
 
 
 def print_failure(server_output: str, client_output: str) -> None:
@@ -340,7 +395,10 @@ def print_failure(server_output: str, client_output: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run protocol, ordering, backpressure and loopback checks"
+        description=(
+            "Run protocol, ordering, local/receiver backpressure, "
+            "delayed-accept and loopback checks"
+        )
     )
     parser.add_argument("--bin-dir", type=Path, default=Path("build/mini"))
     parser.add_argument("--listen-ip", default="0.0.0.0")
@@ -460,8 +518,21 @@ def main() -> int:
         TransferCase("over-record", 65537, 5),
         TransferCase("multi-lane", 8 * 1024 * 1024, 6),
         TransferCase(
-            "nonblocking-backpressure", 8 * 1024 * 1024, 7,
+            "nonblocking-send-queue-backpressure", 8 * 1024 * 1024, 7,
             send_queue=65536, flags=1, require_backpressure=True,
+        ),
+        TransferCase(
+            "receiver-credit-slow-callback", 2 * 1024 * 1024, 8,
+            receive_queue=65536, callback_delay_ms=20,
+            require_receiver_credit=True,
+        ),
+        TransferCase(
+            "delayed-accept-data", 1024 * 1024, 9,
+            accept_delay_ms=500, require_delayed_accept=True,
+        ),
+        TransferCase(
+            "delayed-accept-empty", 0, 10,
+            accept_delay_ms=500, require_delayed_accept=True,
         ),
     ]
     if args.full:
@@ -473,7 +544,9 @@ def main() -> int:
         port = args.base_port + index
         server_rc, server_output, client_rc, client_output = run_pair(
             server_binary, client_binary, args.listen_ip, args.host, port,
-            case.size, case.seed, case.send_queue, case.flags, args.timeout,
+            case.size, case.seed, case.send_queue, case.receive_queue,
+            case.flags, case.callback_delay_ms, case.accept_delay_ms,
+            args.timeout,
         )
         try:
             validate_success(

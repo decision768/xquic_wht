@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guard the file API and stream API connection-mode isolation contract."""
+"""Guard Mini stream API safety and connection-mode isolation contracts."""
 
 from __future__ import annotations
 
@@ -68,6 +68,18 @@ def main() -> int:
             "file serving rejects an active stream",
             "api",
             r"netins_udp_serve\s*\(.*?connection->active_stream\s*!=\s*NULL",
+        ),
+        (
+            "file transfer rejects every stream-mode connection",
+            "api",
+            r"netins_udp_transfer\s*\(.*?"
+            r"client->backend_config\.stream_mode.*?EOPNOTSUPP",
+        ),
+        (
+            "file serving rejects every stream-mode connection",
+            "api",
+            r"netins_udp_serve\s*\(.*?"
+            r"connection->backend_config\.stream_mode.*?EOPNOTSUPP",
         ),
         (
             "stream creation requires explicit stream mode",
@@ -143,6 +155,24 @@ def main() -> int:
             r"stream->accepted_bytes\s*\+\s*stream->receive_queue_limit"
             r".*?mini_stream_delivery_worker\s*\(.*?callback\(.*?"
             r"stream->accepted_bytes\s*=.*?mini_stream_wake\(stream\)",
+        ),
+        (
+            "public stream write initializes accepted before backend errors",
+            "api",
+            r"netins_udp_stream_write\s*\(.*?accepted\s*==\s*NULL.*?"
+            r"\*accepted\s*=\s*0\s*;.*?mini_backend_stream_write",
+        ),
+        (
+            "backend stream write initializes accepted before validation",
+            "stream_backend",
+            r"mini_backend_stream_write\s*\(.*?accepted\s*==\s*NULL.*?"
+            r"\*accepted\s*=\s*0\s*;.*?data\s*==\s*NULL",
+        ),
+        (
+            "stream sender rejects cumulative offset overflow",
+            "stream_backend",
+            r"next_send_offset\s*>\s*UINT64_MAX\s*-\s*count.*?"
+            r"accepted_bytes\s*>\s*UINT64_MAX\s*-\s*count.*?EOVERFLOW",
         ),
         (
             "pending Bytestream cleanup does not touch a stream after close",
