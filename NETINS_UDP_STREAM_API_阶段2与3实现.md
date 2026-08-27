@@ -141,14 +141,15 @@ BUILD_DIR/mini/mini_stream_protocol_test
 BUILD_DIR/mini/mini_stream_reorder_test
 ```
 
-Linux 回环测试，示例为 64 MiB、4 lane、seed 7：
+Linux 回环测试，示例为 64 MiB、固定 4 lane、seed 7。lane 已在两个 Demo 内部固定，
+命令行不再传入 lane 数：
 
 ```bash
 BUILD_DIR/mini/netins_udp_stream_server \
-  0.0.0.0 8443 67108864 4 7
+  0.0.0.0 8443 67108864 7
 
 BUILD_DIR/mini/netins_udp_stream_client \
-  127.0.0.1 8443 67108864 4 7
+  127.0.0.1 8443 67108864 7
 ```
 
 成功时双方输出：
@@ -163,7 +164,7 @@ BUILD_DIR/mini/netins_udp_stream_client \
 单测。由于本机不直接控制主板和云端，以下项目必须在目标 Linux/AARCH64 环境补做：
 
 - 使用真实 Tongsuo、Libevent 和 zlog 完整链接；
-- 1、2、4、8 lane 的回环传输；
+- 固定 4 lane 的回环传输和逐 lane 统计；
 - 主板到云端的双网卡/多路径传输；
 - 丢包、乱序、lane 中断、生产速度高于网络速度时的背压；
 - 文件 API 回归以及流 API 长时间稳定性和吞吐对比。

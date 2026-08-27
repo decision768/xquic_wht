@@ -1040,16 +1040,14 @@ def build_client_command(
     ]
     for interface in MODE_INTERFACES[mode]:
         argv.extend(["--interface", interface])
-    argv.extend(
-        [
-            "--scheduler",
-            args.scheduler,
-            "--cc",
-            args.cc,
-            "--timeout-ms",
-            str(args.client_timeout_ms),
-        ]
-    )
+    argv.extend([
+        "--scheduler",
+        "adaptive" if direction == "get" else args.scheduler,
+        "--cc",
+        args.cc,
+        "--timeout-ms",
+        str(args.client_timeout_ms),
+    ])
     client_command = " ".join(q(item) for item in argv)
     gate_file = f"/tmp/{attempt_token}_client.start"
 
@@ -1538,7 +1536,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         type=validate_remote_path,
         default="/upload/post-agg-kkk.txt",
     )
-    parser.add_argument("--scheduler", default="balanced")
+    parser.add_argument(
+        "--scheduler",
+        default="adaptive",
+        help="POST scheduler; GET is always adaptive (default: adaptive)",
+    )
     parser.add_argument("--cc", default="bbr")
     parser.add_argument(
         "--client-timeout-ms",

@@ -19,13 +19,13 @@ from typing import Sequence
 RESULT_RE = re.compile(r"\[stream_api_result\]\s+(?P<fields>.*)")
 LANE_RE = re.compile(r"\[stream_api_lane\]\s+(?P<fields>.*)")
 FIELD_RE = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
+FIXED_LANES = 4
 
 
 @dataclass(frozen=True)
 class TransferCase:
     name: str
     size: int
-    lanes: int
     seed: int
     send_queue: int = 8 * 1024 * 1024
     flags: int = 0
@@ -114,8 +114,6 @@ def run_pair(
     host: str,
     port: int,
     size: int,
-    server_lanes: int,
-    client_lanes: int,
     seed: int,
     send_queue: int,
     flags: int,
@@ -128,8 +126,7 @@ def run_pair(
         server_log = server_log_path.open("w", encoding="utf-8")
         server_command = [
             str(server_binary), listen_ip, str(port), str(size),
-            str(server_lanes), str(seed), str(receive_queue),
-            str(api_timeout_ms),
+            str(seed), str(receive_queue), str(api_timeout_ms),
         ]
         server = subprocess.Popen(
             server_command,
@@ -157,9 +154,9 @@ def run_pair(
 
             client_command = [
                 str(client_binary), host, str(port), str(size),
-                str(client_lanes), str(seed), str(send_queue),
-                str(receive_queue), str(flags), str(api_timeout_ms),
-                str(api_timeout_ms),
+                str(seed), str(send_queue), str(receive_queue), str(flags),
+                str(api_timeout_ms), str(api_timeout_ms),
+                "--scheduler", "adaptive",
             ]
             try:
                 client_result = subprocess.run(
@@ -192,7 +189,6 @@ def run_multi_pair(
     host: str,
     port: int,
     size: int,
-    lanes: int,
     seed: int,
     timeout_s: float,
 ) -> tuple[int, str, list[tuple[int, str]]]:
@@ -202,8 +198,7 @@ def run_multi_pair(
         with server_log_path.open("w", encoding="utf-8") as server_log:
             server = subprocess.Popen([
                 str(server_binary), listen_ip, str(port), str(size),
-                str(lanes), str(seed), str(8 * 1024 * 1024),
-                str(api_timeout_ms), "2",
+                str(seed), str(8 * 1024 * 1024), str(api_timeout_ms), "2",
             ], stdout=server_log, stderr=subprocess.STDOUT, text=True)
         clients: list[subprocess.Popen[str]] = []
         try:
@@ -218,9 +213,10 @@ def run_multi_pair(
                 stop_process(server)
                 return server.returncode or 1, read_text(server_log_path), []
             command = [
-                str(client_binary), host, str(port), str(size), str(lanes),
-                str(seed), str(8 * 1024 * 1024), str(8 * 1024 * 1024),
-                "0", str(api_timeout_ms), str(api_timeout_ms),
+                str(client_binary), host, str(port), str(size), str(seed),
+                str(8 * 1024 * 1024), str(8 * 1024 * 1024), "0",
+                str(api_timeout_ms), str(api_timeout_ms),
+                "--scheduler", "adaptive",
             ]
             clients = [subprocess.Popen(
                 command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -260,7 +256,7 @@ def run_server_abort(
         with server_log_path.open("w", encoding="utf-8") as server_log:
             server = subprocess.Popen([
                 str(server_binary), listen_ip, str(port), str(4 << 30),
-                "4", "101", str(8 * 1024 * 1024), "10000",
+                "101", str(8 * 1024 * 1024), "10000",
             ], stdout=server_log, stderr=subprocess.STDOUT, text=True)
         client = None
         try:
@@ -272,9 +268,9 @@ def run_server_abort(
                     break
                 time.sleep(0.05)
             client = subprocess.Popen([
-                str(client_binary), host, str(port), str(4 << 30), "4",
-                "101", "65536", str(8 * 1024 * 1024), "0", "5000",
-                "10000",
+                str(client_binary), host, str(port), str(4 << 30), "101",
+                "65536", str(8 * 1024 * 1024), "0", "5000", "10000",
+                "--scheduler", "adaptive",
             ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             time.sleep(0.5)
             stop_process(server)
@@ -317,11 +313,13 @@ def validate_success(
         raise ValueError("peer receipt byte count differs from requested size")
     client_lanes = lane_values(client_output, "client", "sent")
     server_lanes = lane_values(server_output, "server", "received")
-    if len(client_lanes) != case.lanes or sum(client_lanes.values()) != case.size:
+    if (len(client_lanes) != FIXED_LANES
+        or sum(client_lanes.values()) != case.size):
         raise ValueError("client per-lane counters do not sum to total bytes")
-    if len(server_lanes) != case.lanes or sum(server_lanes.values()) != case.size:
+    if (len(server_lanes) != FIXED_LANES
+        or sum(server_lanes.values()) != case.size):
         raise ValueError("server per-lane counters do not sum to total bytes")
-    if case.size >= case.lanes * 65536:
+    if case.size >= FIXED_LANES * 65536:
         if any(value == 0 for value in client_lanes.values()):
             raise ValueError("one or more configured lanes carried no payload")
         if any(value == 0 for value in server_lanes.values()):
@@ -350,7 +348,7 @@ def main() -> int:
     parser.add_argument("--base-port", type=int, default=18460)
     parser.add_argument("--timeout", type=float, default=90.0)
     parser.add_argument("--full", action="store_true",
-                        help="also run 64 MiB cases on 1, 4 and 8 lanes")
+                        help="also run a 64 MiB fixed-4-lane case")
     parser.add_argument(
         "--release", action="store_true",
         help="require full cases, a real library and file-API regression",
@@ -455,36 +453,33 @@ def main() -> int:
                 print(f"[FAIL] {name}: {error}", file=sys.stderr)
 
     cases = [
-        TransferCase("zero", 0, 1, 1),
-        TransferCase("one-byte", 1, 1, 2),
-        TransferCase("below-record", 65535, 1, 3),
-        TransferCase("one-record", 65536, 4, 4),
-        TransferCase("over-record", 65537, 4, 5),
-        TransferCase("multi-lane", 8 * 1024 * 1024, 8, 6),
+        TransferCase("zero", 0, 1),
+        TransferCase("one-byte", 1, 2),
+        TransferCase("below-record", 65535, 3),
+        TransferCase("one-record", 65536, 4),
+        TransferCase("over-record", 65537, 5),
+        TransferCase("multi-lane", 8 * 1024 * 1024, 6),
         TransferCase(
-            "nonblocking-backpressure", 8 * 1024 * 1024, 4, 7,
+            "nonblocking-backpressure", 8 * 1024 * 1024, 7,
             send_queue=65536, flags=1, require_backpressure=True,
         ),
     ]
     if args.full:
-        for lanes in (1, 4, 8):
-            cases.append(TransferCase(
-                f"64MiB-{lanes}-lane", 64 * 1024 * 1024,
-                lanes, 20 + lanes,
-            ))
+        cases.append(TransferCase(
+            "64MiB-fixed-4-lane", 64 * 1024 * 1024, 24,
+        ))
 
     for index, case in enumerate(cases):
         port = args.base_port + index
         server_rc, server_output, client_rc, client_output = run_pair(
             server_binary, client_binary, args.listen_ip, args.host, port,
-            case.size, case.lanes, case.lanes, case.seed, case.send_queue,
-            case.flags, args.timeout,
+            case.size, case.seed, case.send_queue, case.flags, args.timeout,
         )
         try:
             validate_success(
                 case, server_rc, server_output, client_rc, client_output
             )
-            print(f"[PASS] {case.name}: bytes={case.size} lanes={case.lanes}")
+            print(f"[PASS] {case.name}: bytes={case.size} lanes={FIXED_LANES}")
         except (RuntimeError, ValueError) as error:
             failures += 1
             print(f"[FAIL] {case.name}: {error}", file=sys.stderr)
@@ -493,7 +488,7 @@ def main() -> int:
     multi_port = args.base_port + len(cases)
     server_rc, server_output, client_results = run_multi_pair(
         server_binary, client_binary, args.listen_ip, args.host,
-        multi_port, 2 * 1024 * 1024, 4, 88, args.timeout,
+        multi_port, 2 * 1024 * 1024, 88, args.timeout,
     )
     server_successes = sum(
         1 for line in server_output.splitlines()
@@ -515,26 +510,7 @@ def main() -> int:
         )
 
     if not args.skip_fault:
-        port = multi_port + 1
-        server_rc, server_output, client_rc, client_output = run_pair(
-            server_binary, client_binary, args.listen_ip, args.host, port,
-            65536, 4, 1, 99, 8 * 1024 * 1024, 0,
-            min(args.timeout, 10.0),
-        )
-        combined = server_output + client_output
-        unexpected_success = (
-            server_rc == 0 or client_rc == 0
-            or "success=1" in combined
-            or "last_error=" not in combined
-        )
-        if unexpected_success:
-            failures += 1
-            print("[FAIL] lane-mismatch fault was not rejected", file=sys.stderr)
-            print_failure(server_output, client_output)
-        else:
-            print("[PASS] lane-mismatch fault rejected with observable error")
-
-        abort_port = multi_port + 2
+        abort_port = multi_port + 1
         server_rc, server_output, client_rc, client_output = run_server_abort(
             server_binary, client_binary, args.listen_ip, args.host,
             abort_port, args.timeout,

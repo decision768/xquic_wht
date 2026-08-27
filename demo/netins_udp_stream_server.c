@@ -5,6 +5,8 @@
 
 #include <xquic/netins_udp.h>
 
+#include "netins_udp_stream_demo.h"
+
 typedef struct stream_demo_receiver_s {
     uint32_t seed;
     uint64_t received;
@@ -66,25 +68,26 @@ stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
 int
 main(int argc, char **argv)
 {
-    if (argc < 6 || argc > 9) {
+    if (argc < 5 || argc > 8) {
         fprintf(stderr,
-            "usage: %s LISTEN_IP PORT EXPECTED_BYTES LANES SEED"
+            "usage: %s LISTEN_IP PORT EXPECTED_BYTES SEED"
             " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]\n",
             argv[0]);
+        fprintf(stderr, "  lanes are fixed at %u\n",
+            NETINS_UDP_STREAM_DEMO_LANE_COUNT);
         return 2;
     }
     const char *listen_ip = argv[1];
     uint16_t port = (uint16_t)strtoul(argv[2], NULL, 10);
     uint64_t expected_bytes = strtoull(argv[3], NULL, 10);
-    uint32_t lane_count = (uint32_t)strtoul(argv[4], NULL, 10);
-    uint32_t seed = (uint32_t)strtoul(argv[5], NULL, 10);
-    size_t receive_queue_size = argc > 6
-        ? (size_t)strtoull(argv[6], NULL, 10)
+    uint32_t seed = (uint32_t)strtoul(argv[4], NULL, 10);
+    size_t receive_queue_size = argc > 5
+        ? (size_t)strtoull(argv[5], NULL, 10)
         : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
-    uint32_t finish_timeout_ms = argc > 7
-        ? (uint32_t)strtoul(argv[7], NULL, 10) : 60000;
-    size_t client_count = argc > 8
-        ? (size_t)strtoull(argv[8], NULL, 10) : 1;
+    uint32_t finish_timeout_ms = argc > 6
+        ? (uint32_t)strtoul(argv[6], NULL, 10) : 60000;
+    size_t client_count = argc > 7
+        ? (size_t)strtoull(argv[7], NULL, 10) : 1;
     int result = 1;
     netins_udp_t *server = NULL;
     netins_udp_t **connections = calloc(client_count, sizeof(*connections));
@@ -92,7 +95,7 @@ main(int argc, char **argv)
     stream_demo_receiver_t *receivers =
         calloc(client_count, sizeof(*receivers));
 
-    if (port == 0 || lane_count == 0 || client_count == 0
+    if (port == 0 || client_count == 0
         || connections == NULL || streams == NULL || receivers == NULL
         || netins_udp_init() != 0)
     {
@@ -114,6 +117,8 @@ main(int argc, char **argv)
     }
     printf("[stream_api_ready] listen=%s port=%u\n",
         listen_ip, (unsigned)port);
+    printf("[stream_api_config] role=server lanes=%u\n",
+        NETINS_UDP_STREAM_DEMO_LANE_COUNT);
     fflush(stdout);
     for (size_t i = 0; i < client_count; i++) {
         connections[i] = netins_udp_accept(server);
@@ -125,7 +130,7 @@ main(int argc, char **argv)
         receivers[i].first_bad_offset = UINT64_MAX;
         netins_udp_stream_config_t config =
             NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-        config.lane_count = lane_count;
+        config.lane_count = NETINS_UDP_STREAM_DEMO_LANE_COUNT;
         config.receive_queue_size = receive_queue_size;
         config.on_data = stream_demo_on_data;
         config.user_data = &receivers[i];
@@ -157,7 +162,8 @@ main(int argc, char **argv)
         printf("[stream_api_result] role=server client=%zu success=%d"
                " lanes=%u received=%" PRIu64 " peer_received=%" PRIu64
                " first_bad_offset=%" PRIu64 " elapsed_us=%" PRIu64 "\n",
-            i, success, lane_count, receivers[i].received,
+            i, success, NETINS_UDP_STREAM_DEMO_LANE_COUNT,
+            receivers[i].received,
             stream_result.peer_received_bytes,
             receivers[i].first_bad_offset, stream_result.elapsed_us);
         if (!success) {

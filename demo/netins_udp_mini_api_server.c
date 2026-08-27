@@ -17,7 +17,6 @@ typedef struct server_options_s {
     uint32_t serve_timeout_ms;
     uint32_t max_connections;
     uint16_t port;
-    int scheduler;
     int log_level;
 } server_options_t;
 
@@ -34,9 +33,7 @@ usage(const char *program)
         "  --accept-timeout-ms MS  Per-accept timeout; 0 is infinite\n"
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
         "  --max-connections N     Connections to serve (default 1)\n"
-        "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
-        "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
-        "                          fastprobe20|fastonly|adaptive (default adaptive)\n"
+        "  scheduler               Fixed to adaptive\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
         "  --zlog-category NAME    zlog category (default xquic_mini_api_server)\n",
@@ -59,37 +56,6 @@ parse_u32(const char *text, uint32_t maximum, uint32_t *out)
 }
 
 static int
-parse_scheduler(const char *name, int *out)
-{
-    static const struct {
-        const char *name;
-        int value;
-    } schedulers[] = {
-        {"default", NETINS_UDP_SCHEDULER_DEFAULT},
-        {"minrtt", NETINS_UDP_SCHEDULER_MINRTT},
-        {"backup", NETINS_UDP_SCHEDULER_BACKUP},
-        {"balanced", NETINS_UDP_SCHEDULER_BALANCED},
-        {"rap", NETINS_UDP_SCHEDULER_RAP},
-        {"act", NETINS_UDP_SCHEDULER_ACT},
-        {"bandwidth", NETINS_UDP_SCHEDULER_BANDWIDTH},
-        {"fastprobe", NETINS_UDP_SCHEDULER_FASTPROBE},
-        {"fastprobe5", NETINS_UDP_SCHEDULER_FASTPROBE5},
-        {"fastprobe10", NETINS_UDP_SCHEDULER_FASTPROBE10},
-        {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
-        {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
-        {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
-    };
-
-    for (size_t i = 0; i < sizeof(schedulers) / sizeof(schedulers[0]); ++i) {
-        if (strcmp(name, schedulers[i].name) == 0) {
-            *out = schedulers[i].value;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-static int
 need_value(int argc, char **argv, int *index, const char **out)
 {
     if (*index + 1 >= argc) {
@@ -109,7 +75,6 @@ parse_args(int argc, char **argv, server_options_t *options)
     options->bind_address = "0.0.0.0";
     options->port = 8443;
     options->max_connections = 1;
-    options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     options->log_level = NETINS_UDP_LOG_DEBUG;
 
     for (i = 1; i < argc; ++i) {
@@ -158,12 +123,6 @@ parse_args(int argc, char **argv, server_options_t *options)
                 || parse_u32(value, UINT32_MAX,
                     &options->max_connections) != 0
                 || options->max_connections == 0)
-            {
-                return -1;
-            }
-        } else if (strcmp(argv[i], "--scheduler") == 0) {
-            if (need_value(argc, argv, &i, &value) != 0
-                || parse_scheduler(value, &options->scheduler) != 0)
             {
                 return -1;
             }
@@ -234,6 +193,7 @@ configure_server(netins_udp_t *server, const server_options_t *options)
     netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
     netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
+    int scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
 
     logger.callback = api_logger;
     logger.user_data = stderr;
@@ -242,7 +202,7 @@ configure_server(netins_udp_t *server, const server_options_t *options)
     if (netins_udp_set_opt(server, NETINS_UDP_OPT_LOGGER,
             &logger, sizeof(logger)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_SCHEDULER,
-            &options->scheduler, sizeof(options->scheduler)) != 0
+            &scheduler, sizeof(scheduler)) != 0
         || netins_udp_set_opt(server, NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS,
             &options->accept_timeout_ms,
             sizeof(options->accept_timeout_ms)) != 0)
@@ -319,7 +279,8 @@ main(int argc, char **argv)
         goto done;
     }
 
-    printf("listening address=%s port=%" PRIu16 " root=%s\n",
+    printf("listening address=%s port=%" PRIu16
+           " root=%s scheduler=adaptive\n",
         options.bind_address, options.port, options.root_path);
     while (served < options.max_connections) {
         netins_udp_t *connection = netins_udp_accept(server);

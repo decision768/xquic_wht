@@ -189,7 +189,8 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 | 服务器资源监控脚本 | `/root/test_xquic_server/monitor_server_memory.sh` |
 | GET 远端文件 | `/upload/1` |
 | POST 本地文件 | `/oemdata/gx/xquic_file/download/kkk.txt` |
-| 客户端调度算法 | `balanced` |
+| GET 调度算法 | 固定 `adaptive` |
+| POST 客户端调度算法 | `adaptive`（可选 minrtt、rap 等） |
 | 客户端拥塞控制 | `bbr` |
 | 测试轮数 | 20 |
 | 模式顺序 | `rmnet,agg,usb`（5G1、聚合、5G2） |
@@ -198,7 +199,8 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 | 资源采样间隔 | 0.5 s |
 | SHA-256 校验 | 默认关闭 |
 
-服务端由 Python 脚本在 `/root/test_xquic_server` 中自动启动。Python 没有显式传递服务端调度参数，因此使用当前服务端 Demo 的默认 `adaptive` 调度算法。
+服务端由 Python 脚本在 `/root/test_xquic_server` 中自动启动，服务端 Demo 固定使用
+`adaptive`。Python 的 `--scheduler` 只控制 POST 客户端；GET 命令始终传入 `adaptive`。
 
 每轮先完成全部 GET，再完成全部 POST；GET 和 POST 内部都按照 `--order` 指定的网络模式顺序执行。默认一轮的实际顺序为：
 
@@ -398,14 +400,16 @@ mkdir -p /data/mini_test/post_result
 - 脚本会在每次POST前删除本次目标文件，因此不要把生产文件配置为POST测试目标；
 - 默认只检查文件大小和完整分片，正式完整性验收建议增加 `--verify-sha256`。
 
-### 6.6 修改客户端调度算法和拥塞控制
+### 6.6 修改 POST 调度算法和客户端拥塞控制
 
-当前 Python 参数 `--scheduler` 只传给主板客户端，不会修改服务端调度算法。
+Python 参数 `--scheduler` 只用于 POST 客户端。GET 客户端和文件服务端均固定为
+`adaptive`，不会随该参数变化。
 
-默认客户端配置：
+默认配置：
 
 ```text
---scheduler balanced
+GET:  adaptive
+POST: --scheduler adaptive
 --cc bbr
 ```
 
@@ -441,20 +445,11 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
   --cc cubic
 ```
 
-进行不同版本或不同网络环境的对比测试时，必须保持调度算法和拥塞控制配置一致，并在测试记录中写明实际参数。
+进行不同版本或不同网络环境的对比测试时，POST 必须保持 `--scheduler` 和 `--cc` 一致，
+并在记录中写明实际参数。不要把 Python 的 `--scheduler minrtt` 理解为 GET 或服务端也使用
+`minrtt`。
 
-服务端方面，当前自动化脚本不传递服务端 `--scheduler`，所以始终使用当前服务端 Demo 的默认 `adaptive`。不要把 Python 的 `--scheduler minrtt` 理解为客户端和服务端同时改成 `minrtt`。
-
-如果需要测试不同的服务端调度算法，必须修改测试代码中启动服务端 Demo 的命令。打开
-`tests/mini_api_benchmark/mini_api_benchmark.py`，在 `start_server_quiet()` 生成的服务端命令中加入服务端 Demo 参数。例如测试服务端 `minrtt` 时，在 `--max-connections` 后加入：
-
-```python
-f"--max-connections {int(max_connections)} "
-"--scheduler minrtt "
-"> /dev/null 2>&1 < /dev/null & "
-```
-
-对应的实际服务端 Demo 启动命令应包含：
+实际服务端 Demo 启动命令不再包含 scheduler 参数：
 
 ```sh
 ./netins_udp_mini_api_server \
@@ -465,12 +460,10 @@ f"--max-connections {int(max_connections)} "
   --root "$PWD" \
   --accept-timeout-ms 0 \
   --serve-timeout-ms 600000 \
-  --max-connections 3 \
-  --scheduler minrtt
+  --max-connections 3
 ```
 
-上例继续使用外部证书覆盖。使用内置证书时，同时删除 `--cert` 和 `--key` 两行即可，调度器
-参数不受影响。
+上例继续使用外部证书覆盖。使用内置证书时，同时删除 `--cert` 和 `--key` 两行即可。
 
 服务端开始执行 `listen()` 时会输出当前交付版本，例如：
 
@@ -478,7 +471,8 @@ f"--max-connections {int(max_connections)} "
 [mini-api:1] Mini API server version=6.2
 ```
 
-测试其他服务端调度算法时，替换上述 `minrtt`。如果不加入服务端 `--scheduler`，服务端继续使用默认 `adaptive`。这里的服务端参数名是 `--scheduler`，不是 Python 当前用于客户端的同名参数；当前脚本也没有 `--server-scheduler` 命令行参数。
+服务端 scheduler 已在 Demo 内部固定为 `adaptive`，不提供 `--scheduler` 或
+`--server-scheduler` 参数。
 
 ### 6.7 API服务端不在默认位置
 

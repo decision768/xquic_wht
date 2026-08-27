@@ -148,9 +148,11 @@ netins_udp_cleanup()
 | `netins_udp_stream_get_snapshot()` | 查询队列、重排、记录数和逐 lane 字节统计 |
 | `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |
 
-两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`，lane 数必须
-一致。一个连接只能有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收
-方法见 [`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
+两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`。本交付版本的
+stream client/server 封装固定使用 4 lane，不提供命令行 lane 参数，也不允许两端自行选择
+不同数量。公开结构体中的 `lane_count` 为兼容既有 ABI 保留，交付集成代码统一填写 4。一个
+连接只能有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收方法见
+[`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
 
 ### 3.5 状态和统计
 
@@ -409,7 +411,7 @@ buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
 | option | `value` 类型 | 角色 | 默认/约束 |
 |---|---|---|---|
 | `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～8 个非空网卡名 |
-| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | 本说明使用 ADAPTIVE、MINRTT 或 RAP；服务端 Demo 默认 ADAPTIVE |
+| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | Demo 未指定时使用 ADAPTIVE；文件服务端和 GET 固定 ADAPTIVE |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int`，值为 `netins_udp_congestion_control_t` | CLIENT/SERVER | default/CUBIC/BBR |
 | `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 用文件证书覆盖内置证书 |
 | `NETINS_UDP_OPT_TLS_MEMORY` | `netins_udp_tls_memory_config_t` | SERVER | 用 PEM Buffer 覆盖内置证书；每个 Buffer 最大 1 MiB |
@@ -469,8 +471,13 @@ MINRTT
 RAP
 ```
 
-服务端 Demo 未传入 `--scheduler` 时使用 `adaptive`；如需指定，可传入
-`--scheduler minrtt` 或 `--scheduler rap`。
+文件服务端 Demo 固定使用 `adaptive`，不提供 scheduler 参数。文件客户端 Demo 的 GET
+也强制使用 `adaptive`；`--scheduler` 只允许 POST 选择 `minrtt`、`rap`、`balanced` 等
+模式。POST 未传参数时也默认使用 `adaptive`。GET 显式传入非 adaptive scheduler 会直接
+报错，避免测试记录与实际发送端策略不一致。
+
+数据流由客户端发送，因此 stream client 提供 `--scheduler NAME`，默认使用 `adaptive`。
+scheduler 是连接级选项，必须在 `connect()` 前确定，连接建立后不能切换。
 
 拥塞控制可选值：
 
@@ -1140,12 +1147,16 @@ export LD_LIBRARY_PATH=/path/to/package/lib:$LD_LIBRARY_PATH
 
 - [`demo/netins_udp_mini_api_client.c`](demo/netins_udp_mini_api_client.c)
 - [`demo/netins_udp_mini_api_server.c`](demo/netins_udp_mini_api_server.c)
+- [`demo/netins_udp_stream_client.c`](demo/netins_udp_stream_client.c)
+- [`demo/netins_udp_stream_server.c`](demo/netins_udp_stream_server.c)
 
 构建后得到：
 
 ```text
 build/mini/netins_udp_mini_api_client
 build/mini/netins_udp_mini_api_server
+build/mini/netins_udp_stream_client
+build/mini/netins_udp_stream_server
 ```
 
 命令行参数和 C API 的对应关系：
@@ -1155,7 +1166,7 @@ build/mini/netins_udp_mini_api_server
 | `--host`、`--port` | `netins_udp_connect()` |
 | `--interface` | `NETINS_UDP_OPT_INTERFACES` |
 | `--server-name` | client `NETINS_UDP_OPT_TLS` |
-| `--scheduler` | `NETINS_UDP_OPT_SCHEDULER` |
+| client `--scheduler` | `NETINS_UDP_OPT_SCHEDULER`；文件 GET 固定 adaptive，文件 POST 可选 |
 | `--cc` | `NETINS_UDP_OPT_CONGESTION_CONTROL` |
 | `--get`/`--post` | `task.direction` |
 | `--local` | `task.local_path` |
@@ -1165,9 +1176,34 @@ build/mini/netins_udp_mini_api_server
 | `--zlog-config`/`--zlog-category` | `NETINS_UDP_OPT_ZLOG`；不传时 zlog 关闭 |
 | server `--cert`/`--key` | 可选；server `NETINS_UDP_OPT_TLS` 文件覆盖；不传时使用内置证书 |
 | server `--root` | `serve.root_path` |
-| server `--scheduler` | server `NETINS_UDP_OPT_SCHEDULER`；默认 adaptive |
+| server scheduler | Demo 内部固定为 `NETINS_UDP_SCHEDULER_ADAPTIVE`，无命令行参数 |
 | server `--accept-timeout-ms` | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` |
 | server `--serve-timeout-ms` | `serve.timeout_ms` |
+
+### 15.1 数据流 Demo 参数
+
+数据流发送端的命令格式如下，lane 固定为 4，因此参数中没有 `LANES`：
+
+```text
+netins_udp_stream_client HOST PORT BYTES SEED
+  [SEND_QUEUE_BYTES [RECEIVE_QUEUE_BYTES [FLAGS
+  [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]]]
+  [--interface NAME]... [--scheduler NAME]
+```
+
+`--interface` 可以重复 1～8 次并映射到 `NETINS_UDP_OPT_INTERFACES`。只传一个接口用于测
+单网卡；传入 `--interface rmnet_data0 --interface usb0` 用于双路径聚合。未传接口时保留
+底层默认选路，但性能验收必须显式指定，避免受默认路由影响。
+
+数据流接收端命令格式：
+
+```text
+netins_udp_stream_server LISTEN_IP PORT EXPECTED_BYTES SEED
+  [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]
+```
+
+客户端和服务端内部都固定为 4 lane。`BYTES` 和 `EXPECTED_BYTES` 应一致；接收端传 0 时
+不校验预期总长度，但仍校验数据模式、最终回执和逐 lane 统计。
 
 ## 16. 常见错误
 

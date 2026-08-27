@@ -20,6 +20,7 @@ typedef struct client_options_s {
     uint16_t port;
     int direction;
     int scheduler;
+    int scheduler_explicit;
     int congestion_control;
     int log_level;
 } client_options_t;
@@ -34,9 +35,10 @@ usage(const char *program)
         "  --port PORT             Server port (default 8443)\n"
         "  --interface NAME        Client interface; repeat up to 8 times\n"
         "  --server-name NAME      TLS SNI name\n"
-        "  --scheduler NAME        default|minrtt|backup|balanced|rap|act|\n"
+        "  --scheduler NAME        POST scheduler: default|minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
-        "                          fastprobe20|fastonly|adaptive\n"
+        "                          fastprobe20|fastonly|adaptive; default adaptive;\n"
+        "                          GET is fixed adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
         "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
         "  --repeat N              Sequential tasks on one connection (default 1)\n"
@@ -130,7 +132,7 @@ parse_args(int argc, char **argv, client_options_t *options)
     options->port = 8443;
     options->repeat_count = 1;
     options->direction = 0;
-    options->scheduler = NETINS_UDP_SCHEDULER_DEFAULT;
+    options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     options->congestion_control = NETINS_UDP_CC_DEFAULT;
     options->log_level = NETINS_UDP_LOG_DEBUG;
 
@@ -193,6 +195,7 @@ parse_args(int argc, char **argv, client_options_t *options)
             {
                 return -1;
             }
+            options->scheduler_explicit = 1;
         } else if (strcmp(argv[i], "--cc") == 0) {
             if (need_value(argc, argv, &i, &value) != 0
                 || parse_cc(value, &options->congestion_control) != 0)
@@ -228,6 +231,16 @@ parse_args(int argc, char **argv, client_options_t *options)
             && options->zlog_config_file == NULL))
     {
         return -1;
+    }
+    if (options->direction == NETINS_UDP_TRANSFER_GET) {
+        if (options->scheduler_explicit
+            && options->scheduler != NETINS_UDP_SCHEDULER_ADAPTIVE)
+        {
+            fprintf(stderr,
+                "GET scheduler is fixed to adaptive; --scheduler is for POST\n");
+            return -1;
+        }
+        options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     }
     return 0;
 }

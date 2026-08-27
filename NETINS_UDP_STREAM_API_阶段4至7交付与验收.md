@@ -1,7 +1,8 @@
 # NetIns UDP 数据流 API：阶段 4 至 7 交付与验收
 
-本文承接阶段 2 的正式单 lane API 和阶段 3 的 1～8 lane 聚合协议，说明阶段 4～7 的
-可靠性、背压测试、性能观测、回归保护及最终目标机验收方法。公开定义以
+本文承接阶段 2 的正式单 lane API 和阶段 3 的多 lane 聚合协议，说明阶段 4～7 的
+可靠性、背压测试、性能观测、回归保护及最终目标机验收方法。本交付封装已经固定为 4 lane，
+客户端和服务端命令均不再接受 lane 数参数。公开定义以
 [`include/xquic/netins_udp.h`](include/xquic/netins_udp.h) 为准。
 
 ## 1. 本轮交付范围
@@ -9,7 +10,7 @@
 | 阶段 | 已完成内容 |
 |---|---|
 | 4：可靠性 | 取消后确定的 `ECANCELED` 语义、幂等失败完成时间、连接/协议错误状态、应用 reset 错误码可查询 |
-| 5：测试能力 | 边界长度、1/4/8 lane、非阻塞背压、部分写、lane 数不匹配故障和自动验收脚本 |
+| 5：测试能力 | 固定 4 lane 的边界长度、非阻塞背压、部分写、连接中断和自动验收脚本 |
 | 6：性能与观测 | 唤醒合并、有界队列/重排高水位、记录计数、逐 lane 收发字节和 demo 吞吐输出 |
 | 7：交付收口 | API 初始化器契约测试、28 个公开符号检查、文件/流连接模式隔离守卫、统一验收入口 |
 
@@ -119,11 +120,11 @@ netins_udp_stream_close(stream);
 - `on_data()` 在独立 delivery worker 上执行且不持有 XQUIC/stream 锁；内存只在回调期间
   有效，业务要异步处理时必须自行复制；回调长期慢于网络会耗尽有界接收队列并返回
   `ENOBUFS`，不会无限增长内存或卡住 QUIC 事件线程；
-- 多 lane 可能增加乱序占用。生产配置不建议对 4/8 lane 使用只有 64 KiB 的接收队列；
+- 多 lane 可能增加乱序占用。固定 4 lane 的生产配置不建议使用只有 64 KiB 的接收队列；
 - pipe 唤醒已合并：一批 record 在 I/O 线程处理前只保留一个待处理唤醒，不再逐 record 写管道。
 
-吞吐不是由 lane 数单独保证。lane 数增加只有在路径、拥塞窗口、调度和接收端处理能力允许时
-才可能提高总吞吐。最终必须比较同样网络条件下 1、4、8 lane 的实测结果。
+吞吐不是由 lane 数单独保证。本交付固定使用 4 lane，性能验收应保持 lane 不变，比较
+`rmnet_data0` 单网卡、`usb0` 单网卡与双网卡聚合结果，避免把 lane 变化混入网卡聚合结论。
 
 ## 6. 快照字段怎样看
 
@@ -175,7 +176,7 @@ python3 tests/stream_api_acceptance.py \
   --library BUILD_DIR/libxquic.so
 ```
 
-完整模式额外执行 64 MiB 的 1/4/8 lane 对比：
+完整模式额外执行 64 MiB 的固定 4 lane 用例：
 
 ```bash
 python3 tests/stream_api_acceptance.py \
@@ -201,28 +202,49 @@ python3 tests/stream_api_acceptance.py \
 2. 普通文件连接仍走 `xqc_h3_connect()`，流连接才走 H3 Extended；
 3. 协议、重排和公开结构体初始化器单测；
 4. 0、1、65535、65536、65537 字节边界；
-5. 1/4/8 lane、逐 lane 统计总和和足量数据下的 lane 利用；
+5. 固定 4 lane、逐 lane 统计总和和足量数据下的 lane 利用；
 6. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
-7. 客户端/服务端 lane 数不一致必须失败且能观测错误；
-8. 两个 accepted connection 并发传输；
-9. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
-10. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
+7. 两个 accepted connection 并发传输；
+8. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
+9. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
 
 脚本会自己生成确定性字节模式，不创建输入文件，也不把完整测试数据放入内存。
 
 ## 9. 主板到云服务器直接测试
 
-同机回环通过后，在云服务器先启动接收端。例如 64 MiB、4 lane、seed 7：
+同机回环通过后，在云服务器先启动接收端。例如 4 GiB、固定 4 lane、seed 7：
 
 ```bash
-./netins_udp_stream_server 0.0.0.0 18460 67108864 4 7
+./netins_udp_stream_server 0.0.0.0 18460 4294967296 7 \
+  8388608 600000
 ```
 
-再从主板启动发送端，把地址改为云服务器的数值 IPv4：
+客户端参数中不再包含 lane 数。先测 `rmnet_data0` 单网卡：
 
 ```bash
-./netins_udp_stream_client SERVER_IP 18460 67108864 4 7
+./netins_udp_stream_client SERVER_IP 18460 4294967296 7 \
+  8388608 8388608 0 600000 600000 \
+  --interface rmnet_data0 --scheduler adaptive
 ```
+
+每轮服务端只接收一个客户端，完成后重新启动服务端。然后保持字节数、seed、队列和
+scheduler 不变，分别运行：
+
+```bash
+# usb0 单网卡
+./netins_udp_stream_client SERVER_IP 18460 4294967296 7 \
+  8388608 8388608 0 600000 600000 \
+  --interface usb0 --scheduler adaptive
+
+# rmnet_data0 + usb0 双路径聚合
+./netins_udp_stream_client SERVER_IP 18460 4294967296 7 \
+  8388608 8388608 0 600000 600000 \
+  --interface rmnet_data0 --interface usb0 --scheduler adaptive
+```
+
+也可以把 `adaptive` 换成 `minrtt` 或 `rap` 做独立对比，但同一组单网卡/聚合数据必须使用
+相同 scheduler。客户端启动时会输出实际的 `lanes=4`、scheduler、接口数量和每个接口名；
+单网卡用例必须看到 `interfaces=1`，聚合用例必须看到 `interfaces=2`。
 
 两端都必须出现：
 
@@ -231,12 +253,15 @@ python3 tests/stream_api_acceptance.py \
 ```
 
 客户端还会输出 `throughput_mbps`、`eagain`、`partial`，双方都会输出每条 lane 的字节数。
-建议依次测 1、4、8 lane，保持服务器、数据量、seed、网卡、调度器和拥塞控制配置不变。
+每种网卡模式建议执行 3～5 次并取吞吐中位数。应用层聚合效率可按
+`聚合吞吐 /（rmnet 单网卡吞吐 + usb 单网卡吞吐）× 100%` 计算。板端可同时运行
+`sar -n DEV 1`，或读取 `/sys/class/net/接口名/statistics/tx_bytes`，用于确认数据确实经过
+指定网卡；最终有效吞吐以客户端 `throughput_mbps` 为准。
 
 强制背压测试（4 lane、64 KiB 发送队列、非阻塞 flag=1）：
 
 ```bash
-./netins_udp_stream_client SERVER_IP 18460 8388608 4 7 \
+./netins_udp_stream_client SERVER_IP 18460 8388608 7 \
   65536 8388608 1 60000 60000
 ```
 
@@ -268,9 +293,9 @@ python3 tests/stream_api_acceptance.py \
 
 - 真实依赖下两种架构完整编译、链接成功，ABI 检查为 28 个公开函数；
 - 快速与 `--full` 回环验收全部 PASS；
-- 主板到云服务器 1/4/8 lane 的字节、摘要、逐 lane 总和正确；
+- 主板到云服务器固定 4 lane 的字节、摘要、逐 lane 总和正确；
 - 背压用例看到 `EAGAIN` 和部分写，RSS 不随总传输字节无限增长；
-- lane 不匹配、断网或服务端提前结束时不能误报成功；
+- 断网或服务端提前结束时不能误报成功；
 - 原文件 API GET/POST 回归通过；
 - 关闭流和连接后无崩溃、死锁和残留测试进程。
 
