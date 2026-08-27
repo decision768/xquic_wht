@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MINI_STREAM_PROTOCOL_VERSION 1U
+#define MINI_STREAM_PROTOCOL_VERSION 2U
 #define MINI_STREAM_LANE_HEADER_SIZE 40U
 #define MINI_STREAM_FRAME_HEADER_SIZE 24U
 #define MINI_STREAM_RECEIPT_SIZE 48U
@@ -20,7 +20,9 @@ typedef enum mini_stream_receipt_status_e {
     MINI_STREAM_RECEIPT_PROTOCOL_ERROR = 1,
     MINI_STREAM_RECEIPT_LENGTH_ERROR = 2,
     MINI_STREAM_RECEIPT_DIGEST_ERROR = 3,
-    MINI_STREAM_RECEIPT_RESOURCE_ERROR = 4
+    MINI_STREAM_RECEIPT_RESOURCE_ERROR = 4,
+    /* A cumulative sender credit carried on lane 0 before the final receipt. */
+    MINI_STREAM_RECEIPT_CREDIT = 5
 } mini_stream_receipt_status_t;
 
 typedef struct mini_stream_lane_header_s {

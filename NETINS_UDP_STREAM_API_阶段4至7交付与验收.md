@@ -17,6 +17,9 @@
 API v1 仍明确不包含跨 QUIC 连接断点续传、自动重连、双向应用数据流，以及同一连接内同时
 运行文件任务和数据流。这些不是阶段 4～7 的遗漏，而是当前冻结的版本边界。
 
+本次可靠背压握手把内部 stream wire protocol 升级为 v2。客户端与服务端必须使用本分支
+同一版本构建；旧的 v1 stream demo 与 v2 不互通，但公开 C API 版本和 28 个 ABI 符号不变。
+
 ## 2. 运行结构
 
 ```text
@@ -25,6 +28,7 @@ API v1 仍明确不包含跨 QUIC 连接断点续传、自动重连、双向应�
         ▼
 有界发送队列（按 payload 字节背压）
         │ 每条 DATA record 最大 64 KiB
+        │ 等待接收端 stream_accept 后的累计 CREDIT
         ▼
 轮询分流到固定 lane 0 ... lane 3
         │ QUIC 保证每条 lane 内可靠有序
@@ -114,14 +118,17 @@ netins_udp_stream_close(stream);
 
 - `send_queue_size` 限制待提交的 payload 字节；默认 8 MiB，最小 64 KiB；
 - `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB；
-- 客户端 lane 早于服务端 `netins_udp_stream_accept()` 到达时，服务端会先在每连接总计
-  8 MiB 的有界临时区中接收，随后由共享 I/O 线程绑定并回放；应用仍应在连接 accept 后
-  尽快调用 stream accept，超过临时上限会以 `ENOBUFS` 结束该逻辑流；
+- 客户端只在 4 条 lane 上先发送各 40 字节握手头；收到服务端
+  `netins_udp_stream_accept()` 完成后发出的首个累计 CREDIT 前，不发送 payload 或 FIN。
+  因而 accept 前临时区每条 lane 最多只保存一个握手头，不再用固定 8 MiB 缓存数据；
+- 接收端初始授予 `receive_queue_size`，每次 `on_data()` 返回后按已交付字节推进累计 CREDIT。
+  发送端只会把已获得额度内的 payload 提交给 XQUIC，所以慢回调和多 lane 乱序会形成可恢复
+  背压，而不会把正常队列满升级成永久 `ENOBUFS`；
 - 每个 DATA record 额外有 24 字节线上头和一个本地队列节点；
 - 应用传入 Buffer 不计入 SDK 队列，`write()` 只复制 accepted 的字节；
 - `on_data()` 在独立 delivery worker 上执行且不持有 XQUIC/stream 锁；内存只在回调期间
-  有效，业务要异步处理时必须自行复制；回调长期慢于网络会耗尽有界接收队列并返回
-  `ENOBUFS`，不会无限增长内存或卡住 QUIC 事件线程；
+  有效，业务要异步处理时必须自行复制；回调长期慢于网络会通过 CREDIT 停止发送端继续
+  提交，不会无限增长内存或卡住 QUIC 事件线程；
 - 多 lane 可能增加乱序占用。固定 4 lane 的生产配置不建议使用只有 64 KiB 的接收队列；
 - pipe 唤醒已合并：一批 record 在 I/O 线程处理前只保留一个待处理唤醒，不再逐 record 写管道。
 

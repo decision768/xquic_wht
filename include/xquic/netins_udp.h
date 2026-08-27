@@ -443,7 +443,11 @@ NETINS_UDP_PUBLIC int netins_udp_cleanup(void);
  * new() creates a client or server handle. The caller owns every returned
  * handle and releases it exactly once with close(). Options are copied and
  * may only be changed while the handle is in NEW state, except LOGGER,
- * which may be replaced on a live handle.
+ * which may be replaced on a live handle.  On return from a live LOGGER
+ * replacement, that handle's background worker no longer uses the previous
+ * callback/user_data.  An ACCEPTED handle has an independent logger and never
+ * replaces the listener's shared server-worker logger.  As with every API
+ * call, LOGGER replacement must not be made reentrantly from its callback.
  */
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int role);
 NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *handle,
@@ -491,8 +495,10 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * received data to on_data in increasing logical-offset order.
  * on_data runs on a bounded delivery worker, outside the XQUIC event thread
  * and outside the stream mutex.  Its memory is valid only during the
- * callback.  A slow callback consumes receive_queue_size and may eventually
- * fail the stream with ENOBUFS; it must not close or wait on the same stream.
+ * callback.  The receiver advertises cumulative credit only after on_data
+ * returns, so a slow callback backpressures the opener at receive_queue_size
+ * instead of growing memory or failing a compliant peer with ENOBUFS.  The
+ * callback must not close or wait on the same stream.
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;

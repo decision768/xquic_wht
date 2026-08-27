@@ -56,6 +56,22 @@ main(void)
     assert(receipt_decoded.digest == receipt.digest);
     assert(receipt_decoded.detail == receipt.detail);
 
+    mini_stream_receipt_t credit = {
+        .status = MINI_STREAM_RECEIPT_CREDIT,
+        .session_id = lane.session_id,
+        .total_bytes = 8U * 1024U * 1024U,
+        .digest = 0,
+        .detail = 8U * 1024U * 1024U,
+    };
+    mini_stream_receipt_encode(&credit, receipt_wire);
+    assert(mini_stream_receipt_decode(receipt_wire,
+        &receipt_decoded) == 0);
+    assert(receipt_decoded.status == MINI_STREAM_RECEIPT_CREDIT);
+    assert(receipt_decoded.session_id == credit.session_id);
+    assert(receipt_decoded.total_bytes == credit.total_bytes);
+    assert(receipt_decoded.digest == 0);
+    assert(receipt_decoded.detail == credit.detail);
+
     const char sample[] = "stream-api-protocol";
     uint64_t digest = mini_stream_digest_init();
     digest = mini_stream_digest_update(digest, sample, 7);

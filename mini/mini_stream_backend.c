@@ -25,6 +25,7 @@ struct mini_stream_send_chunk_s {
     size_t payload_length;
     size_t wire_length;
     size_t wire_sent;
+    int credit_reserved;
     unsigned char wire[];
 };
 
@@ -59,6 +60,8 @@ struct mini_stream_lane_s {
     unsigned char receipt[MINI_STREAM_RECEIPT_SIZE];
     size_t receipt_bytes;
     size_t receipt_sent;
+    uint32_t receipt_status;
+    uint64_t receipt_credit_limit;
     int receipt_valid;
     int reverse_fin_submitted;
     int reverse_fin_acked;
@@ -80,6 +83,8 @@ struct mini_backend_stream_s {
     mini_backend_logger_fn logger;
     void *logger_user_data;
     int logger_minimum_level;
+    uint64_t logger_generation;
+    uint64_t logger_active_generation;
     void **connection_state_slot;
     pthread_mutex_t *engine_lock;
     void *owner;
@@ -107,6 +112,10 @@ struct mini_backend_stream_s {
     uint64_t next_send_offset;
     uint64_t accepted_bytes;
     uint64_t peer_received_bytes;
+    uint64_t send_credit_limit;
+    uint64_t send_credit_reserved;
+    uint64_t receive_credit_sent;
+    int peer_credit_received;
     uint64_t digest;
     uint64_t start_time_us;
     uint64_t completed_time_us;
@@ -169,13 +178,21 @@ static void
 mini_stream_worker_log_scope_enter(mini_backend_stream_t *stream)
 {
     mini_backend_config_t log_config;
+    uint64_t generation;
     memset(&log_config, 0, sizeof(log_config));
     pthread_mutex_lock(&stream->lock);
     log_config.logger = stream->logger;
     log_config.logger_user_data = stream->logger_user_data;
     log_config.logger_minimum_level = stream->logger_minimum_level;
+    generation = stream->logger_generation;
     pthread_mutex_unlock(&stream->lock);
     mini_backend_log_scope_enter(&log_config);
+    /* Reaching this point means the preceding worker log scope has already
+     * been left, so callers may release the prior callback user_data. */
+    pthread_mutex_lock(&stream->lock);
+    stream->logger_active_generation = generation;
+    pthread_cond_broadcast(&stream->state_cond);
+    pthread_mutex_unlock(&stream->lock);
 }
 
 static void
@@ -328,6 +345,19 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
 
     while (lane->send_head != NULL) {
         mini_stream_send_chunk_t *chunk = lane->send_head;
+        if (!stream->peer_credit_received) {
+            return 0;
+        }
+        if (!chunk->credit_reserved) {
+            if (stream->send_credit_reserved > stream->send_credit_limit
+                || chunk->payload_length > stream->send_credit_limit
+                    - stream->send_credit_reserved)
+            {
+                return 0;
+            }
+            stream->send_credit_reserved += chunk->payload_length;
+            chunk->credit_reserved = 1;
+        }
         ret = mini_stream_send_bytes(lane, chunk->wire, chunk->wire_length,
             &chunk->wire_sent);
         if (ret <= 0 || chunk->wire_sent < chunk->wire_length) {
@@ -349,6 +379,12 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
     }
 
     if (!stream->finish_requested) {
+        return 0;
+    }
+    /* The first CREDIT doubles as the server's stream_accept readiness
+     * acknowledgement.  Do not put payload or FIN behind a lane header until
+     * the receiver has attached all four lanes. */
+    if (!stream->peer_credit_received) {
         return 0;
     }
     if (!lane->protocol_fin_sent) {
@@ -374,6 +410,21 @@ mini_stream_logical_lane(mini_backend_stream_t *stream, uint32_t lane_index)
         }
     }
     return NULL;
+}
+
+static int
+mini_stream_all_forward_headers_locked(mini_backend_stream_t *stream)
+{
+    uint32_t i;
+    if (stream->allocated_lanes != stream->lane_count) {
+        return 0;
+    }
+    for (i = 0; i < stream->lane_count; i++) {
+        if (!stream->lanes[i].lane_header_parsed) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int
@@ -411,18 +462,82 @@ mini_stream_build_receipt_locked(mini_backend_stream_t *stream,
         .status = status,
         .session_id = stream->session_id,
         .total_bytes = total_bytes,
-        .digest = stream->digest,
+        .digest = status == MINI_STREAM_RECEIPT_CREDIT
+            ? 0 : stream->digest,
         .detail = detail,
     };
     if (lane0 != NULL && lane0->receipt_bytes == 0) {
         mini_stream_receipt_encode(&receipt, lane0->receipt);
         lane0->receipt_bytes = MINI_STREAM_RECEIPT_SIZE;
+        lane0->receipt_status = status;
+    }
+}
+
+static int
+mini_stream_pump_accept_credit_locked(mini_backend_stream_t *stream)
+{
+    if (!mini_stream_all_forward_headers_locked(stream)) {
+        return 0;
+    }
+    mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
+    if (lane0 == NULL) {
+        return mini_stream_fail_locked(stream, EPROTO);
+    }
+
+    uint64_t total_bytes = 0;
+    int finished = mini_stream_all_forward_finished_locked(stream,
+        &total_bytes);
+    if (finished < 0) {
+        return -1;
+    }
+
+    for (;;) {
+        if (lane0->receipt_bytes == 0) {
+            if (finished) {
+                return 0;
+            }
+            uint64_t target = stream->accepted_bytes > UINT64_MAX
+                    - stream->receive_queue_limit
+                ? UINT64_MAX
+                : stream->accepted_bytes + stream->receive_queue_limit;
+            if (target <= stream->receive_credit_sent) {
+                return 0;
+            }
+            mini_stream_build_receipt_locked(stream,
+                MINI_STREAM_RECEIPT_CREDIT, target,
+                stream->receive_queue_limit);
+            lane0->receipt_credit_limit = target;
+        }
+        if (lane0->receipt_status != MINI_STREAM_RECEIPT_CREDIT) {
+            return 0;
+        }
+        int ret = mini_stream_send_bytes(lane0, lane0->receipt,
+            lane0->receipt_bytes, &lane0->receipt_sent);
+        if (ret < 0) {
+            return mini_stream_fail_locked(stream, EIO);
+        }
+        if (lane0->receipt_sent < lane0->receipt_bytes) {
+            return 0;
+        }
+        stream->receive_credit_sent = lane0->receipt_credit_limit;
+        lane0->receipt_bytes = 0;
+        lane0->receipt_sent = 0;
+        lane0->receipt_status = 0;
+        lane0->receipt_credit_limit = 0;
+        if (finished) {
+            return 0;
+        }
+        /* Coalesce any delivery progress made while the preceding cumulative
+         * CREDIT record was being submitted. */
     }
 }
 
 static int
 mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
 {
+    if (mini_stream_pump_accept_credit_locked(stream) < 0) {
+        return -1;
+    }
     uint64_t total_bytes = 0;
     int ready = mini_stream_all_forward_finished_locked(stream, &total_bytes);
     if (ready <= 0) {
@@ -707,6 +822,8 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->logger = config->logger;
     stream->logger_user_data = config->logger_user_data;
     stream->logger_minimum_level = config->logger_minimum_level;
+    stream->logger_generation = 1;
+    stream->logger_active_generation = stream->external_event_driver ? 1 : 0;
     stream->connection_state_slot = connection_state_slot;
     stream->engine_lock = engine_lock;
     stream->owner = owner;
@@ -1094,7 +1211,21 @@ mini_backend_stream_set_logger(mini_backend_stream_t *stream,
     stream->logger = logger;
     stream->logger_user_data = user_data;
     stream->logger_minimum_level = minimum_level;
+    uint64_t target_generation = ++stream->logger_generation;
+    if (stream->external_event_driver) {
+        /* The shared server worker owns its own listener logger scope. */
+        stream->logger_active_generation = target_generation;
+    }
     mini_stream_wake(stream);
+    if (!stream->external_event_driver && stream->worker_started
+        && !pthread_equal(pthread_self(), stream->worker))
+    {
+        while (!stream->io_stopped
+            && stream->logger_active_generation < target_generation)
+        {
+            (void)pthread_cond_wait(&stream->state_cond, &stream->lock);
+        }
+    }
     pthread_mutex_unlock(&stream->lock);
 }
 
@@ -1359,10 +1490,14 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
     size_t payload_length = lane->incoming_frame.payload_length;
     size_t buffered = stream->reorder.buffered_bytes
         + stream->delivery_queue_bytes;
+    /* A protocol-v2 opener cannot reach this guard: it reserves payload only
+     * within the receiver's cumulative CREDIT window, and new credit is
+     * issued only after on_data returns.  Keep the check as protection from a
+     * non-conforming peer instead of treating normal backpressure as fatal. */
     if (buffered > stream->receive_queue_limit
         || payload_length > stream->receive_queue_limit - buffered)
     {
-        return mini_stream_fail_locked(stream, ENOBUFS);
+        return mini_stream_fail_locked(stream, EPROTO);
     }
     int error_code = 0;
     mini_stream_reorder_chunk_t *chunk = mini_stream_reorder_allocate(
@@ -1459,28 +1594,58 @@ mini_stream_receive_receipt_locked(mini_backend_stream_t *stream,
     if (lane->lane_index != 0 && data_len != 0) {
         return mini_stream_fail_locked(stream, EPROTO);
     }
-    if (lane->lane_index == 0 && data_len != 0) {
-        if (data_len > MINI_STREAM_RECEIPT_SIZE - lane->receipt_bytes) {
+    size_t offset = 0;
+    while (lane->lane_index == 0 && offset < data_len) {
+        if (lane->receipt_valid) {
             return mini_stream_fail_locked(stream, EPROTO);
         }
-        memcpy(lane->receipt + lane->receipt_bytes, data, data_len);
-        lane->receipt_bytes += data_len;
+        size_t count = MINI_STREAM_RECEIPT_SIZE - lane->receipt_bytes;
+        if (count > data_len - offset) {
+            count = data_len - offset;
+        }
+        memcpy(lane->receipt + lane->receipt_bytes, data + offset, count);
+        lane->receipt_bytes += count;
+        offset += count;
+        if (lane->receipt_bytes != MINI_STREAM_RECEIPT_SIZE) {
+            continue;
+        }
+        mini_stream_receipt_t receipt;
+        if (mini_stream_receipt_decode(lane->receipt, &receipt) != 0
+            || receipt.session_id != stream->session_id)
+        {
+            return mini_stream_fail_locked(stream, EPROTO);
+        }
+        lane->receipt_bytes = 0;
+        if (receipt.status == MINI_STREAM_RECEIPT_CREDIT) {
+            if (receipt.digest != 0
+                || receipt.detail < MINI_STREAM_MAX_FRAME_PAYLOAD
+                || receipt.total_bytes < receipt.detail
+                || (stream->peer_credit_received
+                    && receipt.total_bytes < stream->send_credit_limit)
+                || receipt.total_bytes < stream->send_credit_reserved)
+            {
+                return mini_stream_fail_locked(stream, EPROTO);
+            }
+            stream->peer_credit_received = 1;
+            stream->send_credit_limit = receipt.total_bytes;
+            continue;
+        }
+        if (receipt.status != MINI_STREAM_RECEIPT_OK
+            || receipt.total_bytes != stream->accepted_bytes
+            || receipt.digest != stream->digest)
+        {
+            return mini_stream_fail_locked(stream, EPROTO);
+        }
+        lane->receipt_valid = 1;
+        stream->peer_received_bytes = receipt.total_bytes;
     }
     if (fin) {
         lane->transport_fin_received = 1;
         if (lane->lane_index == 0) {
-            mini_stream_receipt_t receipt;
-            if (lane->receipt_bytes != MINI_STREAM_RECEIPT_SIZE
-                || mini_stream_receipt_decode(lane->receipt, &receipt) != 0
-                || receipt.status != MINI_STREAM_RECEIPT_OK
-                || receipt.session_id != stream->session_id
-                || receipt.total_bytes != stream->accepted_bytes
-                || receipt.digest != stream->digest)
+            if (lane->receipt_bytes != 0 || !lane->receipt_valid)
             {
                 return mini_stream_fail_locked(stream, EPROTO);
             }
-            lane->receipt_valid = 1;
-            stream->peer_received_bytes = receipt.total_bytes;
         }
     }
     uint32_t i;

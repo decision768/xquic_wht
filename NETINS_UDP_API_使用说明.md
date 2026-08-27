@@ -294,7 +294,10 @@ API 内置证书；需要用文件覆盖时，在 `listen()` 前填写证书和�
 | `minimum_level` | `DEBUG/INFO/WARN/ERROR` | 只回调不低于该等级的日志 |
 
 通过 `NETINS_UDP_OPT_LOGGER` 设置。它是唯一允许在活动 handle 上替换的选项；回调执行期间
-不能重新调用当前 handle，`message` 只在本次回调期间有效。
+不能重新调用当前 handle，`message` 只在本次回调期间有效。活动 handle 的替换调用返回后，
+该 handle 的后台 worker 已经切换完成，旧 callback/`user_data` 可以释放。ACCEPTED handle 的
+logger 只属于该连接及其活动流，不会覆盖 listener 共享 I/O worker 的 logger；如需修改共享
+worker 的 logger，必须在 SERVER listener handle 上设置。
 
 #### `netins_udp_zlog_config_t`：zlog 配置（输入）
 
@@ -566,6 +569,8 @@ netins_udp_set_opt(handle, NETINS_UDP_OPT_LOGGER, &logger, sizeof(logger));
 - `message` 只在本次回调期间有效，如需长期保存必须复制；
 - 不能从回调中重入同一个 handle；
 - 数据流客户端和服务端后台 I/O worker 也使用当前 logger，回调可能在后台线程执行；
+- 活动 handle 上替换 logger 返回后，旧回调不会再被该 handle 的后台 worker 使用；
+- ACCEPTED handle 的 logger 与 SERVER listener 的共享 worker logger 相互隔离；
 - callback 为 `NULL` 时，API 及数据流后台 worker 驱动期间的 mini stdout 被抑制；
 - `DEBUG=0`、`INFO=1`、`WARN=2`、`ERROR=3`。
 

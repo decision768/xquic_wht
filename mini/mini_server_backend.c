@@ -13,13 +13,13 @@
 
 #include "mini_server.h"
 #include "mini_stream_backend.h"
+#include "mini_stream_protocol.h"
 
 #if !defined(XQC_SYS_WINDOWS)
 #include <unistd.h>
 #endif
 
 #define MINI_SERVER_PENDING_BS_MAGIC 0x4e535042U
-#define MINI_SERVER_PENDING_STREAM_LIMIT (8U * 1024U * 1024U)
 
 typedef struct mini_backend_server_pending_bs_s {
     uint32_t magic;
@@ -50,6 +50,8 @@ struct mini_backend_server_s {
     mini_backend_logger_fn logger;
     void *logger_user_data;
     int logger_minimum_level;
+    uint64_t logger_generation;
+    uint64_t logger_active_generation;
     pthread_mutex_t lock;
     pthread_mutex_t engine_lock;
     pthread_cond_t state_cond;
@@ -270,13 +272,19 @@ static void
 mini_backend_server_worker_log_scope_enter(mini_backend_server_t *server)
 {
     mini_backend_config_t log_config;
+    uint64_t generation;
     memset(&log_config, 0, sizeof(log_config));
     pthread_mutex_lock(&server->lock);
     log_config.logger = server->logger;
     log_config.logger_user_data = server->logger_user_data;
     log_config.logger_minimum_level = server->logger_minimum_level;
+    generation = server->logger_generation;
     pthread_mutex_unlock(&server->lock);
     mini_backend_log_scope_enter(&log_config);
+    pthread_mutex_lock(&server->lock);
+    server->logger_active_generation = generation;
+    pthread_cond_broadcast(&server->state_cond);
+    pthread_mutex_unlock(&server->lock);
 }
 
 static void *
@@ -535,6 +543,7 @@ mini_backend_server_create(const mini_backend_config_t *config,
         config != NULL ? config->logger_user_data : NULL;
     server->logger_minimum_level =
         config != NULL ? config->logger_minimum_level : 0;
+    server->logger_generation = 1;
     server->references = 1;
     xqc_mini_svr_init_args(args);
     if (config == NULL || config->load_config_file) {
@@ -651,8 +660,18 @@ mini_backend_server_set_logger(mini_backend_server_t *server,
     server->logger = logger;
     server->logger_user_data = user_data;
     server->logger_minimum_level = minimum_level;
-    pthread_mutex_unlock(&server->lock);
+    uint64_t target_generation = ++server->logger_generation;
     mini_backend_server_wake(server);
+    if (server->io_worker_running
+        && !pthread_equal(pthread_self(), server->io_worker))
+    {
+        while (server->io_worker_running
+            && server->logger_active_generation < target_generation)
+        {
+            (void)pthread_cond_wait(&server->state_cond, &server->lock);
+        }
+    }
+    pthread_mutex_unlock(&server->lock);
 }
 
 static void
@@ -1448,33 +1467,26 @@ mini_backend_server_stream_bs_read(mini_backend_server_t *server,
         pthread_mutex_lock(&server->lock);
         if (pending->connection != connection
             || connection->stream_api_pending_error != 0
-            || data_len > MINI_SERVER_PENDING_STREAM_LIMIT
-                - connection->stream_api_pending_bytes)
+            || pending->data_len > MINI_STREAM_LANE_HEADER_SIZE
+            || data_len > MINI_STREAM_LANE_HEADER_SIZE - pending->data_len
+            || fin)
         {
             if (connection->stream_api_pending_error == 0) {
-                connection->stream_api_pending_error = ENOBUFS;
+                connection->stream_api_pending_error = EPROTO;
             }
             pthread_mutex_unlock(&server->lock);
             return XQC_ERROR;
         }
         size_t required = pending->data_len + data_len;
         if (required > pending->data_capacity) {
-            size_t capacity = pending->data_capacity != 0
-                ? pending->data_capacity : 4096;
-            while (capacity < required) {
-                size_t next = capacity * 2;
-                capacity = next > MINI_SERVER_PENDING_STREAM_LIMIT
-                    || next < capacity
-                    ? MINI_SERVER_PENDING_STREAM_LIMIT : next;
-            }
-            unsigned char *resized = realloc(pending->data, capacity);
+            unsigned char *resized = realloc(pending->data, required);
             if (resized == NULL) {
                 connection->stream_api_pending_error = ENOMEM;
                 pthread_mutex_unlock(&server->lock);
                 return XQC_ERROR;
             }
             pending->data = resized;
-            pending->data_capacity = capacity;
+            pending->data_capacity = required;
         }
         if (data_len != 0) {
             memcpy(pending->data + pending->data_len, data, data_len);

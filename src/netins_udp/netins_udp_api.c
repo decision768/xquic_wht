@@ -680,7 +680,9 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         handle->backend_config.logger_user_data = logger->user_data;
         handle->backend_config.logger_minimum_level =
             logger->minimum_level;
-        if (handle->server_backend != NULL) {
+        if (handle->role == NETINS_UDP_ROLE_SERVER
+            && handle->server_backend != NULL)
+        {
             mini_backend_server_set_logger(handle->server_backend,
                 logger->callback, logger->user_data,
                 logger->minimum_level);

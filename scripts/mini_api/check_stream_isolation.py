@@ -115,6 +115,36 @@ def main() -> int:
             r"stream_api_pending_head.*?xqc_h3_ext_bytestream_set_user_data",
         ),
         (
+            "pre-accept buffering is limited to one lane header",
+            "server_backend",
+            r"mini_backend_server_stream_bs_read\s*\(.*?"
+            r"data_len\s*>\s*MINI_STREAM_LANE_HEADER_SIZE\s*-\s*"
+            r"pending->data_len.*?\|\|\s*fin",
+        ),
+        (
+            "opener waits for receiver credit before payload and FIN",
+            "stream_backend",
+            r"mini_stream_pump_open_lane_locked\s*\(.*?"
+            r"!stream->peer_credit_received.*?credit_reserved.*?"
+            r"!stream->peer_credit_received.*?protocol_fin_sent",
+        ),
+        (
+            "credit records are distinct from final digest receipts",
+            "stream_backend",
+            r"\.digest\s*=\s*status\s*==\s*"
+            r"MINI_STREAM_RECEIPT_CREDIT\s*\?\s*0\s*:\s*stream->digest"
+            r".*?receipt.status\s*==\s*MINI_STREAM_RECEIPT_CREDIT.*?"
+            r"receipt.digest\s*!=\s*0",
+        ),
+        (
+            "receiver replenishes cumulative credit after delivery",
+            "stream_backend",
+            r"mini_stream_pump_accept_credit_locked\s*\(.*?"
+            r"stream->accepted_bytes\s*\+\s*stream->receive_queue_limit"
+            r".*?mini_stream_delivery_worker\s*\(.*?callback\(.*?"
+            r"stream->accepted_bytes\s*=.*?mini_stream_wake\(stream\)",
+        ),
+        (
             "pending Bytestream cleanup does not touch a stream after close",
             "server_backend",
             r"xqc_h3_ext_bytestream_close\(pending->bs\).*?"
@@ -174,6 +204,29 @@ def main() -> int:
             r"mini_backend_server_worker_log_scope_enter\(server\).*?"
             r"event_base_loop\(server->ctx\.eb,\s*EVLOOP_ONCE\).*?"
             r"mini_backend_log_scope_leave\(\)",
+        ),
+        (
+            "live stream logger replacement waits for worker adoption",
+            "stream_backend",
+            r"mini_backend_stream_set_logger\s*\(.*?"
+            r"target_generation\s*=\s*\+\+stream->logger_generation.*?"
+            r"logger_active_generation\s*<\s*target_generation.*?"
+            r"pthread_cond_wait",
+        ),
+        (
+            "live server logger replacement waits for worker adoption",
+            "server_backend",
+            r"mini_backend_server_set_logger\s*\(.*?"
+            r"target_generation\s*=\s*\+\+server->logger_generation.*?"
+            r"logger_active_generation\s*<\s*target_generation.*?"
+            r"pthread_cond_wait",
+        ),
+        (
+            "accepted logger cannot replace the listener worker logger",
+            "api",
+            r"case\s+NETINS_UDP_OPT_LOGGER\s*:.*?"
+            r"handle->role\s*==\s*NETINS_UDP_ROLE_SERVER.*?"
+            r"mini_backend_server_set_logger",
         ),
         (
             "server accept timeout reuses one bounded elapsed value",
