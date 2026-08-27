@@ -680,6 +680,19 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
         handle->backend_config.logger_user_data = logger->user_data;
         handle->backend_config.logger_minimum_level =
             logger->minimum_level;
+        if (handle->server_backend != NULL) {
+            mini_backend_server_set_logger(handle->server_backend,
+                logger->callback, logger->user_data,
+                logger->minimum_level);
+        }
+        if (handle->active_stream != NULL
+            && handle->active_stream->backend_stream != NULL)
+        {
+            mini_backend_stream_set_logger(
+                handle->active_stream->backend_stream,
+                logger->callback, logger->user_data,
+                logger->minimum_level);
+        }
         break;
     }
     case NETINS_UDP_OPT_ZLOG: {
@@ -1098,6 +1111,11 @@ netins_udp_stream_configure(netins_udp_t *connection,
         ? config->send_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     backend_config->receive_queue_size = config->receive_queue_size != 0
         ? config->receive_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    backend_config->logger = connection->backend_config.logger;
+    backend_config->logger_user_data =
+        connection->backend_config.logger_user_data;
+    backend_config->logger_minimum_level =
+        connection->backend_config.logger_minimum_level;
     return 0;
 }
 
@@ -1341,9 +1359,6 @@ netins_udp_get_backend_snapshot(netins_udp_t *handle,
     mini_backend_snapshot_t *snapshot)
 {
     memset(snapshot, 0, sizeof(*snapshot));
-    if (handle->active_stream != NULL) {
-        return EBUSY;
-    }
     if (handle->role == NETINS_UDP_ROLE_CLIENT
         && handle->client_backend != NULL)
     {
@@ -1545,21 +1560,23 @@ netins_udp_get_state(netins_udp_t *handle)
         errno = EINVAL;
         return NETINS_UDP_STATE_ERROR;
     }
-    /* The stream worker exclusively owns the event base while active. */
-    if (handle->active_stream != NULL) {
-        return handle->state;
-    }
     int poll_error = 0;
     mini_backend_log_scope_enter(&handle->backend_config);
     if (handle->role == NETINS_UDP_ROLE_CLIENT
         && handle->client_backend != NULL)
     {
-        poll_error = mini_backend_client_poll(handle->client_backend);
+        /* The stream worker drives the event base while active.  Backend
+         * state queries are separately serialized with that worker. */
+        if (handle->active_stream == NULL) {
+            poll_error = mini_backend_client_poll(handle->client_backend);
+        }
     } else if ((handle->role == NETINS_UDP_ROLE_SERVER
             || handle->role == NETINS_UDP_ROLE_ACCEPTED)
         && handle->server_backend != NULL)
     {
-        poll_error = mini_backend_server_poll(handle->server_backend);
+        if (handle->active_stream == NULL) {
+            poll_error = mini_backend_server_poll(handle->server_backend);
+        }
         if (poll_error == 0) {
             poll_error =
                 mini_backend_server_last_error(handle->server_backend);

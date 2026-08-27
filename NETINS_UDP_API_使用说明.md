@@ -158,7 +158,7 @@ lane 参数，也不允许调用方自行选择不同数量；只读快照中的
 
 | 接口 | 返回值/输出 | 说明 |
 |---|---|---|
-| `int netins_udp_get_state(netins_udp_t *h)` | `netins_udp_state_t` | 返回状态枚举；调用时会非阻塞泵一次内部事件 |
+| `int netins_udp_get_state(netins_udp_t *h)` | `netins_udp_state_t` | 返回状态枚举；无活动数据流时非阻塞泵一次内部事件，活动流期间读取后台 worker 发布的连接状态 |
 | `int netins_udp_is_multipath(netins_udp_t *h)` | `1`/`0`/`-1` | 只有多路径模式开启且活动路径大于 1 才返回 1 |
 | `int netins_udp_get_path_count(netins_udp_t *h, uint32_t *count)` | `0/-1` | 获取当前路径总数 |
 | `int netins_udp_get_path_statis(netins_udp_t *h, size_t index, netins_udp_path_statis_t *out)` | `0/-1` | 获取指定路径统计 |
@@ -167,6 +167,8 @@ lane 参数，也不允许调用方自行选择不同数量；只读快照中的
 
 `get_state()` 不是普通的 `0/-1` 状态码函数。正常情况下它直接返回
 `NETINS_UDP_STATE_NEW` 至 `NETINS_UDP_STATE_ERROR` 中的一个值。
+连接和路径查询可以在数据流活动期间调用；它们与后台 XQUIC engine 驱动串行化，不会再次
+进入同一个 event base，可用于观察网卡移除、剩余活动路径和恢复后的路径重新加入。
 
 ### 3.6 错误详情
 
@@ -563,7 +565,8 @@ netins_udp_set_opt(handle, NETINS_UDP_OPT_LOGGER, &logger, sizeof(logger));
 
 - `message` 只在本次回调期间有效，如需长期保存必须复制；
 - 不能从回调中重入同一个 handle；
-- callback 为 `NULL` 时，API 驱动期间的 mini stdout 被抑制；
+- 数据流客户端和服务端后台 I/O worker 也使用当前 logger，回调可能在后台线程执行；
+- callback 为 `NULL` 时，API 及数据流后台 worker 驱动期间的 mini stdout 被抑制；
 - `DEBUG=0`、`INFO=1`、`WARN=2`、`ERROR=3`。
 
 内置 zlog 默认关闭，不调用 `NETINS_UDP_OPT_ZLOG` 时不会执行 `zlog_init()`，也不会创建

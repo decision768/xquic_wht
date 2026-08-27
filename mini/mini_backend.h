@@ -120,6 +120,9 @@ typedef struct mini_backend_stream_config_s {
     size_t receive_queue_size;
     mini_backend_stream_data_fn on_data;
     void *user_data;
+    mini_backend_logger_fn logger;
+    void *logger_user_data;
+    int logger_minimum_level;
     /* The server owns one shared XQUIC/libevent driver for all connections. */
     int external_event_driver;
 } mini_backend_stream_config_t;
@@ -195,6 +198,8 @@ int mini_backend_server_listen(mini_backend_server_t *server,
 int mini_backend_server_run(mini_backend_server_t *server);
 int mini_backend_server_poll(mini_backend_server_t *server);
 int mini_backend_server_last_error(mini_backend_server_t *server);
+void mini_backend_server_set_logger(mini_backend_server_t *server,
+    mini_backend_logger_fn logger, void *user_data, int minimum_level);
 int mini_backend_server_accept(mini_backend_server_t *server,
     uint32_t timeout_ms, mini_backend_server_connection_t **out_connection);
 void mini_backend_server_retain(mini_backend_server_t *server);
@@ -248,6 +253,8 @@ int mini_backend_stream_reset(mini_backend_stream_t *stream,
     uint64_t error_code);
 int mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
     mini_backend_stream_snapshot_t *snapshot);
+void mini_backend_stream_set_logger(mini_backend_stream_t *stream,
+    mini_backend_logger_fn logger, void *user_data, int minimum_level);
 void mini_backend_stream_destroy(mini_backend_stream_t *stream);
 
 #endif

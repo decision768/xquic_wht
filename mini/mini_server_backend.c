@@ -47,6 +47,9 @@ struct mini_backend_server_s {
     int api_mode;
     unsigned int references;
     int listen_started;
+    mini_backend_logger_fn logger;
+    void *logger_user_data;
+    int logger_minimum_level;
     pthread_mutex_t lock;
     pthread_mutex_t engine_lock;
     pthread_cond_t state_cond;
@@ -263,12 +266,26 @@ mini_backend_server_io_wakeup(evutil_socket_t fd, short events, void *arg)
     }
 }
 
+static void
+mini_backend_server_worker_log_scope_enter(mini_backend_server_t *server)
+{
+    mini_backend_config_t log_config;
+    memset(&log_config, 0, sizeof(log_config));
+    pthread_mutex_lock(&server->lock);
+    log_config.logger = server->logger;
+    log_config.logger_user_data = server->logger_user_data;
+    log_config.logger_minimum_level = server->logger_minimum_level;
+    pthread_mutex_unlock(&server->lock);
+    mini_backend_log_scope_enter(&log_config);
+}
+
 static void *
 mini_backend_server_io_worker(void *arg)
 {
     mini_backend_server_t *server = arg;
     int worker_error = 0;
     for (;;) {
+        mini_backend_server_worker_log_scope_enter(server);
         pthread_mutex_lock(&server->engine_lock);
         int ret = event_base_loop(server->ctx.eb, EVLOOP_ONCE);
         if (ret >= 0) {
@@ -300,6 +317,7 @@ mini_backend_server_io_worker(void *arg)
         pthread_cond_broadcast(&server->state_cond);
         pthread_mutex_unlock(&server->lock);
         pthread_mutex_unlock(&server->engine_lock);
+        mini_backend_log_scope_leave();
         if (stop || ret < 0) {
             worker_error = ret < 0 ? EIO : 0;
             break;
@@ -512,6 +530,11 @@ mini_backend_server_create(const mini_backend_config_t *config,
 
     server->args = args;
     server->api_mode = config != NULL && config->api_mode;
+    server->logger = config != NULL ? config->logger : NULL;
+    server->logger_user_data =
+        config != NULL ? config->logger_user_data : NULL;
+    server->logger_minimum_level =
+        config != NULL ? config->logger_minimum_level : 0;
     server->references = 1;
     xqc_mini_svr_init_args(args);
     if (config == NULL || config->load_config_file) {
@@ -617,6 +640,21 @@ mini_backend_server_last_error(mini_backend_server_t *server)
     return error_code;
 }
 
+void
+mini_backend_server_set_logger(mini_backend_server_t *server,
+    mini_backend_logger_fn logger, void *user_data, int minimum_level)
+{
+    if (server == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&server->lock);
+    server->logger = logger;
+    server->logger_user_data = user_data;
+    server->logger_minimum_level = minimum_level;
+    pthread_mutex_unlock(&server->lock);
+    mini_backend_server_wake(server);
+}
+
 static void
 mini_backend_server_remove_connection(mini_backend_server_t *server,
     xqc_mini_svr_user_conn_t *connection)
@@ -643,12 +681,16 @@ int
 mini_backend_server_accept(mini_backend_server_t *server,
     uint32_t timeout_ms, mini_backend_server_connection_t **out_connection)
 {
-    if (server == NULL || out_connection == NULL || server->listener == NULL
-        || !server->listener->accepting)
-    {
+    if (server == NULL || out_connection == NULL || server->listener == NULL) {
         return EINVAL;
     }
     *out_connection = NULL;
+    pthread_mutex_lock(&server->lock);
+    int accepting = server->listener->accepting;
+    pthread_mutex_unlock(&server->lock);
+    if (!accepting) {
+        return EINVAL;
+    }
     xqc_usec_t start = xqc_now();
     xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
     struct event *timeout_event = NULL;
@@ -694,7 +736,8 @@ mini_backend_server_accept(mini_backend_server_t *server,
             pthread_mutex_unlock(&server->lock);
             break;
         }
-        if (timeout_ms > 0 && xqc_now() - start >= timeout_us) {
+        xqc_usec_t elapsed = timeout_ms > 0 ? xqc_now() - start : 0;
+        if (timeout_ms > 0 && elapsed >= timeout_us) {
             result = ETIMEDOUT;
             pthread_mutex_unlock(&server->lock);
             break;
@@ -704,7 +747,7 @@ mini_backend_server_accept(mini_backend_server_t *server,
                 result = pthread_cond_wait(&server->state_cond,
                     &server->lock);
             } else {
-                uint64_t remaining_us = timeout_us - (xqc_now() - start);
+                uint64_t remaining_us = timeout_us - elapsed;
                 struct timespec deadline;
                 if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
                     result = errno != 0 ? errno : EIO;

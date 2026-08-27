@@ -189,11 +189,13 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     {
         xqc_mini_stream_poc_client_on_connection_close(user_conn);
     }
+    int h3_error = xqc_h3_conn_get_errno(conn);
+    int connection_error = h3_error == H3_NO_ERROR ? 0 : h3_error;
     if (user_conn->stream_api_state != NULL) {
         mini_stream_backend_on_connection_close(
-            user_conn->stream_api_state, xqc_h3_conn_get_errno(conn));
+            user_conn->stream_api_state, connection_error);
     }
-    user_conn->last_error_code = xqc_h3_conn_get_errno(conn);
+    user_conn->last_error_code = connection_error;
     user_conn->h3_conn = NULL;
     user_conn->connection_closed = 1;
     if (user_conn->transfer_active) {

@@ -77,6 +77,9 @@ struct mini_backend_stream_s {
     size_t receive_queue_limit;
     mini_backend_stream_data_fn on_data;
     void *user_data;
+    mini_backend_logger_fn logger;
+    void *logger_user_data;
+    int logger_minimum_level;
     void **connection_state_slot;
     pthread_mutex_t *engine_lock;
     void *owner;
@@ -160,6 +163,19 @@ static int
 mini_stream_valid(const mini_backend_stream_t *stream)
 {
     return stream != NULL && stream->magic == MINI_STREAM_MAGIC;
+}
+
+static void
+mini_stream_worker_log_scope_enter(mini_backend_stream_t *stream)
+{
+    mini_backend_config_t log_config;
+    memset(&log_config, 0, sizeof(log_config));
+    pthread_mutex_lock(&stream->lock);
+    log_config.logger = stream->logger;
+    log_config.logger_user_data = stream->logger_user_data;
+    log_config.logger_minimum_level = stream->logger_minimum_level;
+    pthread_mutex_unlock(&stream->lock);
+    mini_backend_log_scope_enter(&log_config);
 }
 
 static void
@@ -517,6 +533,7 @@ static void *
 mini_stream_worker(void *arg)
 {
     mini_backend_stream_t *stream = arg;
+    mini_stream_worker_log_scope_enter(stream);
     mini_stream_engine_acquire(stream);
     pthread_mutex_lock(&stream->lock);
     if (stream->role == MINI_STREAM_ENDPOINT_OPEN) {
@@ -534,6 +551,7 @@ mini_stream_worker(void *arg)
     }
     pthread_mutex_unlock(&stream->lock);
     mini_stream_engine_release(stream);
+    mini_backend_log_scope_leave();
 
     for (;;) {
         pthread_mutex_lock(&stream->lock);
@@ -542,6 +560,7 @@ mini_stream_worker(void *arg)
         if (stop) {
             break;
         }
+        mini_stream_worker_log_scope_enter(stream);
         mini_stream_engine_acquire(stream);
         int ret = event_base_loop(stream->event_base, EVLOOP_ONCE);
         if (ret < 0) {
@@ -549,6 +568,7 @@ mini_stream_worker(void *arg)
             (void)mini_stream_fail_locked(stream, EIO);
             pthread_mutex_unlock(&stream->lock);
             mini_stream_engine_release(stream);
+            mini_backend_log_scope_leave();
             break;
         }
         pthread_mutex_lock(&stream->lock);
@@ -556,10 +576,12 @@ mini_stream_worker(void *arg)
         stop = stream->stop_requested;
         pthread_mutex_unlock(&stream->lock);
         mini_stream_engine_release(stream);
+        mini_backend_log_scope_leave();
         if (stop) {
             break;
         }
     }
+    mini_stream_worker_log_scope_enter(stream);
     mini_stream_engine_acquire(stream);
     pthread_mutex_lock(&stream->lock);
     (void)mini_stream_process_locked(stream);
@@ -567,6 +589,7 @@ mini_stream_worker(void *arg)
     mini_stream_signal_locked(stream);
     pthread_mutex_unlock(&stream->lock);
     mini_stream_engine_release(stream);
+    mini_backend_log_scope_leave();
     return NULL;
 }
 
@@ -681,6 +704,9 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->external_event_driver = config->external_event_driver != 0;
     stream->on_data = config->on_data;
     stream->user_data = config->user_data;
+    stream->logger = config->logger;
+    stream->logger_user_data = config->logger_user_data;
+    stream->logger_minimum_level = config->logger_minimum_level;
     stream->connection_state_slot = connection_state_slot;
     stream->engine_lock = engine_lock;
     stream->owner = owner;
@@ -1055,6 +1081,21 @@ mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
     snapshot->app_error_code = stream->app_error_code;
     pthread_mutex_unlock(&stream->lock);
     return 0;
+}
+
+void
+mini_backend_stream_set_logger(mini_backend_stream_t *stream,
+    mini_backend_logger_fn logger, void *user_data, int minimum_level)
+{
+    if (!mini_stream_valid(stream)) {
+        return;
+    }
+    pthread_mutex_lock(&stream->lock);
+    stream->logger = logger;
+    stream->logger_user_data = user_data;
+    stream->logger_minimum_level = minimum_level;
+    mini_stream_wake(stream);
+    pthread_mutex_unlock(&stream->lock);
 }
 
 static void

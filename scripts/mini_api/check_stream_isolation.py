@@ -21,6 +21,7 @@ def main() -> int:
         "client": root / "mini/mini_client.c",
         "server": root / "mini/mini_server.c",
         "client_backend": root / "mini/mini_client_backend.c",
+        "client_cb": root / "mini/mini_client_cb.c",
         "server_backend": root / "mini/mini_server_backend.c",
         "stream_backend": root / "mini/mini_stream_backend.c",
         "api": root / "src/netins_udp/netins_udp_api.c",
@@ -137,11 +138,49 @@ def main() -> int:
             r"xqc_conn_get_stats",
         ),
         (
+            "connection queries remain live while the stream worker drives I/O",
+            "api",
+            r"netins_udp_get_state\s*\(.*?"
+            r"handle->active_stream\s*==\s*NULL\s*\)\s*\{\s*"
+            r"poll_error\s*=\s*mini_backend_client_poll.*?"
+            r"mini_backend_client_is_closed",
+        ),
+        (
+            "client normalizes H3 no-error before notifying stream state",
+            "client_cb",
+            r"connection_error\s*=\s*h3_error\s*==\s*H3_NO_ERROR\s*"
+            r"\?\s*0\s*:\s*h3_error\s*;.*?"
+            r"mini_stream_backend_on_connection_close\(.*?connection_error",
+        ),
+        (
             "internal stream worker serializes event-base entry",
             "stream_backend",
             r"mini_stream_worker\s*\(.*?mini_stream_engine_acquire\(stream\)"
             r".*?event_base_loop\(stream->event_base,\s*EVLOOP_ONCE\).*?"
             r"mini_stream_engine_release\(stream\)",
+        ),
+        (
+            "client stream worker installs a background logger scope",
+            "stream_backend",
+            r"mini_stream_worker\s*\(.*?"
+            r"mini_stream_worker_log_scope_enter\(stream\).*?"
+            r"event_base_loop\(stream->event_base,\s*EVLOOP_ONCE\).*?"
+            r"mini_backend_log_scope_leave\(\)",
+        ),
+        (
+            "server stream worker installs a background logger scope",
+            "server_backend",
+            r"mini_backend_server_io_worker\s*\(.*?"
+            r"mini_backend_server_worker_log_scope_enter\(server\).*?"
+            r"event_base_loop\(server->ctx\.eb,\s*EVLOOP_ONCE\).*?"
+            r"mini_backend_log_scope_leave\(\)",
+        ),
+        (
+            "server accept timeout reuses one bounded elapsed value",
+            "server_backend",
+            r"mini_backend_server_accept\s*\(.*?"
+            r"xqc_usec_t\s+elapsed\s*=.*?elapsed\s*>=\s*timeout_us.*?"
+            r"remaining_us\s*=\s*timeout_us\s*-\s*elapsed",
         ),
         (
             "server worker exit stops every external stream driver",
