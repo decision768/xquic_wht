@@ -4,11 +4,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MINI_STREAM_PROTOCOL_VERSION 2U
+#define MINI_STREAM_PROTOCOL_VERSION 3U
 #define MINI_STREAM_LANE_HEADER_SIZE 40U
 #define MINI_STREAM_FRAME_HEADER_SIZE 24U
 #define MINI_STREAM_RECEIPT_SIZE 48U
 #define MINI_STREAM_MAX_FRAME_PAYLOAD (64U * 1024U)
+/* Bound per-record allocator/list overhead even when the application writes
+ * one byte at a time.  Payload and record CREDIT are enforced independently. */
+#define MINI_STREAM_RECORD_MEMORY_CHARGE 256U
 
 typedef enum mini_stream_frame_type_e {
     MINI_STREAM_FRAME_DATA = 1,

@@ -920,16 +920,34 @@ netins_udp_accept(netins_udp_t *server)
     accepted->tls_certificate_fd = -1;
     accepted->tls_private_key_fd = -1;
     accepted->backend_config = server->backend_config;
-    accepted->logger = server->logger;
-    accepted->logger_user_data = server->logger_user_data;
-    accepted->logger_minimum_level = server->logger_minimum_level;
+    if (server->backend_config.stream_mode) {
+        /* The stream listener's callback user_data belongs to the listener.
+         * Stream-mode accepted handles start with an independent empty logger
+         * so listener close never leaves a copied callback pointer behind. */
+        accepted->backend_config.logger = NULL;
+        accepted->backend_config.logger_user_data = NULL;
+        accepted->backend_config.logger_minimum_level = NETINS_UDP_LOG_DEBUG;
+        accepted->logger = NULL;
+        accepted->logger_user_data = NULL;
+        accepted->logger_minimum_level = NETINS_UDP_LOG_DEBUG;
+    } else {
+        /* Preserve the established file-API logger inheritance contract. */
+        accepted->logger = server->logger;
+        accepted->logger_user_data = server->logger_user_data;
+        accepted->logger_minimum_level = server->logger_minimum_level;
+    }
     accepted->server_backend = server->server_backend;
     accepted->server_connection = connection;
     mini_backend_server_retain(accepted->server_backend);
 
     netins_udp_clear_error(server);
-    netins_udp_log(accepted, NETINS_UDP_LOG_INFO,
-        "accepted Mini connection");
+    if (server->backend_config.stream_mode) {
+        netins_udp_log(server, NETINS_UDP_LOG_INFO,
+            "accepted Mini stream connection");
+    } else {
+        netins_udp_log(accepted, NETINS_UDP_LOG_INFO,
+            "accepted Mini connection");
+    }
     return accepted;
 }
 
@@ -1335,6 +1353,7 @@ netins_udp_stream_get_snapshot(netins_udp_stream_t *stream,
     snapshot->state = backend_snapshot.state;
     snapshot->lane_count = backend_snapshot.lane_count;
     snapshot->flags = backend_snapshot.flags;
+    snapshot->preaccept_lane_count = backend_snapshot.preaccept_lane_count;
     snapshot->accepted_bytes = backend_snapshot.accepted_bytes;
     snapshot->peer_received_bytes = backend_snapshot.peer_received_bytes;
     snapshot->send_queue_bytes = backend_snapshot.send_queue_bytes;
@@ -1740,6 +1759,13 @@ netins_udp_close(netins_udp_t *handle)
         mini_backend_client_destroy(handle->client_backend);
         handle->client_backend = NULL;
     } else if (handle->role == NETINS_UDP_ROLE_SERVER) {
+        if (handle->backend_config.stream_mode) {
+            /* Stream-mode accepted connections retain the shared server
+             * worker.  Make it adopt an empty logger before close() returns
+             * so it cannot call listener-owned callback state afterwards. */
+            mini_backend_server_set_logger(handle->server_backend,
+                NULL, NULL, NETINS_UDP_LOG_ERROR);
+        }
         mini_backend_server_release(handle->server_backend);
         handle->server_backend = NULL;
     } else if (handle->role == NETINS_UDP_ROLE_ACCEPTED) {

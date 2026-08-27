@@ -125,6 +125,8 @@ typedef struct mini_backend_stream_config_s {
     int logger_minimum_level;
     /* The server owns one shared XQUIC/libevent driver for all connections. */
     int external_event_driver;
+    /* Complete lane headers buffered before server stream_accept began. */
+    uint32_t preaccept_lane_count;
 } mini_backend_stream_config_t;
 
 typedef struct mini_backend_stream_result_s {
@@ -147,6 +149,7 @@ typedef struct mini_backend_stream_snapshot_s {
     int state;
     uint32_t lane_count;
     uint32_t flags;
+    uint32_t preaccept_lane_count;
     uint64_t accepted_bytes;
     uint64_t peer_received_bytes;
     uint64_t send_queue_bytes;

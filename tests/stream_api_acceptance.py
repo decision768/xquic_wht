@@ -36,6 +36,8 @@ class TransferCase:
     accept_delay_ms: int = 0
     require_receiver_credit: bool = False
     require_delayed_accept: bool = False
+    write_chunk_size: int = 0
+    require_tiny_writes: bool = False
 
 
 def executable(bin_dir: Path, name: str) -> Path:
@@ -141,6 +143,7 @@ def run_pair(
     flags: int,
     callback_delay_ms: int,
     accept_delay_ms: int,
+    write_chunk_size: int,
     timeout_s: float,
 ) -> tuple[int, str, int, str]:
     api_timeout_ms = max(3000, int(timeout_s * 1000))
@@ -189,6 +192,10 @@ def run_pair(
                 str(api_timeout_ms), str(api_timeout_ms),
                 "--scheduler", "adaptive",
             ]
+            if write_chunk_size:
+                client_command.extend([
+                    "--write-chunk-size", str(write_chunk_size),
+                ])
             try:
                 client_result = subprocess.run(
                     client_command,
@@ -298,16 +305,48 @@ def run_server_abort(
                 if server.poll() is not None:
                     break
                 time.sleep(0.05)
+            if "[stream_api_ready]" not in read_text(server_log_path):
+                stop_process(server)
+                return (
+                    server.returncode or 1,
+                    read_text(server_log_path),
+                    1,
+                    "client not started: server did not become ready",
+                )
             client = subprocess.Popen([
                 str(client_binary), host, str(port), str(4 << 30), "101",
-                "65536", str(8 * 1024 * 1024), "0", "5000", "10000",
+                "65536", str(8 * 1024 * 1024), "0", "0", "0",
                 "--scheduler", "adaptive",
             ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            time.sleep(0.5)
+            progress_deadline = time.monotonic() + min(15.0, timeout_s)
+            while time.monotonic() < progress_deadline:
+                if "[stream_api_progress] role=server" in read_text(
+                        server_log_path):
+                    break
+                if client.poll() is not None or server.poll() is not None:
+                    break
+                time.sleep(0.05)
+            established = (
+                "[stream_api_progress] role=server"
+                in read_text(server_log_path)
+            )
+            if not established:
+                stop_process(client)
+                client_output, _ = client.communicate()
+                stop_process(server)
+                return (
+                    server.returncode or 1,
+                    read_text(server_log_path),
+                    client.returncode or 1,
+                    client_output
+                    + "\nclient did not establish an in-progress stream",
+                )
             stop_process(server)
             server_rc = server.returncode or 1
             try:
-                client_output, _ = client.communicate(timeout=15)
+                client_output, _ = client.communicate(
+                    timeout=max(15.0, timeout_s)
+                )
                 client_rc = client.returncode
             except subprocess.TimeoutExpired:
                 stop_process(client)
@@ -384,6 +423,21 @@ def validate_success(
         if ("[stream_api_accept_delay]" not in server_output
                 or expected_delay not in server_output):
             raise ValueError("server did not exercise delayed stream_accept")
+        snapshot = snapshot_fields(server_output, "server")
+        if integer(snapshot, "preaccept_lanes") != FIXED_LANES:
+            raise ValueError(
+                "all four complete lane headers were not buffered before "
+                "stream_accept"
+            )
+    if case.require_tiny_writes:
+        if case.write_chunk_size != 1:
+            raise ValueError("tiny-write case must use one-byte API writes")
+        client_snapshot = snapshot_fields(client_output, "client")
+        server_snapshot = snapshot_fields(server_output, "server")
+        if integer(client_snapshot, "records_enqueued") != case.size:
+            raise ValueError("one-byte writes were not framed independently")
+        if integer(server_snapshot, "records_delivered") != case.size:
+            raise ValueError("receiver did not deliver every one-byte record")
 
 
 def print_failure(server_output: str, client_output: str) -> None:
@@ -516,6 +570,11 @@ def main() -> int:
         TransferCase("below-record", 65535, 3),
         TransferCase("one-record", 65536, 4),
         TransferCase("over-record", 65537, 5),
+        TransferCase(
+            "repeated-one-byte-writes", 1024, 11,
+            send_queue=65536, receive_queue=65536,
+            write_chunk_size=1, require_tiny_writes=True,
+        ),
         TransferCase("multi-lane", 8 * 1024 * 1024, 6),
         TransferCase(
             "nonblocking-send-queue-backpressure", 8 * 1024 * 1024, 7,
@@ -546,7 +605,7 @@ def main() -> int:
             server_binary, client_binary, args.listen_ip, args.host, port,
             case.size, case.seed, case.send_queue, case.receive_queue,
             case.flags, case.callback_delay_ms, case.accept_delay_ms,
-            args.timeout,
+            case.write_chunk_size, args.timeout,
         )
         try:
             validate_success(
@@ -588,10 +647,16 @@ def main() -> int:
             server_binary, client_binary, args.listen_ip, args.host,
             abort_port, args.timeout,
         )
+        abort_snapshot = snapshot_fields(client_output, "client")
+        abort_last_error = abort_snapshot.get("last_error", "")
         abort_ok = (
             server_rc != 0 and client_rc != 0
+            and client_rc != 124
+            and "[stream_api_ready]" in server_output
+            and "[stream_api_progress] role=server" in server_output
             and "success=1" not in client_output
-            and "last_error=" in client_output
+            and abort_last_error.isdigit()
+            and int(abort_last_error) != 0
         )
         if abort_ok:
             print("[PASS] server interruption rejected with observable error")

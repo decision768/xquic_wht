@@ -21,8 +21,10 @@ typedef struct mini_stream_lane_s mini_stream_lane_t;
 
 struct mini_stream_send_chunk_s {
     mini_stream_send_chunk_t *next;
+    mini_stream_send_chunk_t *credit_next;
     uint64_t offset;
     size_t payload_length;
+    size_t queue_charge;
     size_t wire_length;
     size_t wire_sent;
     int credit_reserved;
@@ -62,6 +64,7 @@ struct mini_stream_lane_s {
     size_t receipt_sent;
     uint32_t receipt_status;
     uint64_t receipt_credit_limit;
+    uint64_t receipt_record_credit_limit;
     int receipt_valid;
     int reverse_fin_submitted;
     int reverse_fin_acked;
@@ -106,20 +109,29 @@ struct mini_backend_stream_s {
     int wake_pending;
 
     mini_stream_lane_t lanes[MINI_BACKEND_STREAM_LANE_COUNT];
+    mini_stream_send_chunk_t *credit_head;
+    mini_stream_send_chunk_t *credit_tail;
     uint32_t allocated_lanes;
     uint32_t next_send_lane;
+    uint32_t preaccept_lane_count;
     uint64_t session_id;
     uint64_t next_send_offset;
     uint64_t accepted_bytes;
     uint64_t peer_received_bytes;
     uint64_t send_credit_limit;
     uint64_t send_credit_reserved;
+    uint64_t send_record_credit_limit;
+    uint64_t send_records_reserved;
     uint64_t receive_credit_sent;
+    uint64_t receive_record_credit_sent;
+    uint64_t receive_record_capacity;
+    uint64_t receive_records_buffered;
     int peer_credit_received;
     uint64_t digest;
     uint64_t start_time_us;
     uint64_t completed_time_us;
     size_t send_queue_bytes;
+    size_t send_queue_charge;
     size_t send_queue_high_water;
     size_t reorder_high_water;
     uint64_t records_enqueued;
@@ -328,6 +340,44 @@ mini_stream_finish_lane(mini_stream_lane_t *lane)
 }
 
 static int
+mini_stream_reserve_send_credit_locked(mini_backend_stream_t *stream)
+{
+    if (!stream->peer_credit_received) {
+        return 0;
+    }
+
+    for (;;) {
+        mini_stream_send_chunk_t *next = stream->credit_head;
+        if (next == NULL) {
+            return 0;
+        }
+
+        /* CREDIT is cumulative across all lanes.  Reserve it in logical
+         * offset order so a later record can never consume the only space
+         * needed to deliver an earlier record on another lane. */
+        if (next->offset != stream->send_credit_reserved) {
+            return -1;
+        }
+        if (stream->send_credit_reserved > stream->send_credit_limit
+            || next->payload_length > stream->send_credit_limit
+                - stream->send_credit_reserved
+            || stream->send_records_reserved
+                >= stream->send_record_credit_limit)
+        {
+            return 0;
+        }
+        stream->send_credit_reserved += next->payload_length;
+        stream->send_records_reserved++;
+        next->credit_reserved = 1;
+        stream->credit_head = next->credit_next;
+        if (stream->credit_head == NULL) {
+            stream->credit_tail = NULL;
+        }
+        next->credit_next = NULL;
+    }
+}
+
+static int
 mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
     mini_stream_lane_t *lane)
 {
@@ -345,18 +395,8 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
 
     while (lane->send_head != NULL) {
         mini_stream_send_chunk_t *chunk = lane->send_head;
-        if (!stream->peer_credit_received) {
+        if (!stream->peer_credit_received || !chunk->credit_reserved) {
             return 0;
-        }
-        if (!chunk->credit_reserved) {
-            if (stream->send_credit_reserved > stream->send_credit_limit
-                || chunk->payload_length > stream->send_credit_limit
-                    - stream->send_credit_reserved)
-            {
-                return 0;
-            }
-            stream->send_credit_reserved += chunk->payload_length;
-            chunk->credit_reserved = 1;
         }
         ret = mini_stream_send_bytes(lane, chunk->wire, chunk->wire_length,
             &chunk->wire_sent);
@@ -371,6 +411,7 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
         stream->lane_payload_sent[lane->lane_index] +=
             chunk->payload_length;
         stream->send_queue_bytes -= chunk->payload_length;
+        stream->send_queue_charge -= chunk->queue_charge;
         free(chunk);
         pthread_cond_broadcast(&stream->send_space_cond);
         if (stream->send_queue_bytes == 0) {
@@ -455,7 +496,8 @@ mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
 
 static void
 mini_stream_build_receipt_locked(mini_backend_stream_t *stream,
-    uint32_t status, uint64_t total_bytes, uint64_t detail)
+    uint32_t status, uint64_t total_bytes, uint64_t detail,
+    uint64_t record_credit)
 {
     mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
     mini_stream_receipt_t receipt = {
@@ -463,7 +505,7 @@ mini_stream_build_receipt_locked(mini_backend_stream_t *stream,
         .session_id = stream->session_id,
         .total_bytes = total_bytes,
         .digest = status == MINI_STREAM_RECEIPT_CREDIT
-            ? 0 : stream->digest,
+            ? record_credit : stream->digest,
         .detail = detail,
     };
     if (lane0 != NULL && lane0->receipt_bytes == 0) {
@@ -500,13 +542,21 @@ mini_stream_pump_accept_credit_locked(mini_backend_stream_t *stream)
                     - stream->receive_queue_limit
                 ? UINT64_MAX
                 : stream->accepted_bytes + stream->receive_queue_limit;
-            if (target <= stream->receive_credit_sent) {
+            uint64_t record_target = stream->records_delivered > UINT64_MAX
+                    - stream->receive_record_capacity
+                ? UINT64_MAX
+                : stream->records_delivered
+                    + stream->receive_record_capacity;
+            if (target <= stream->receive_credit_sent
+                && record_target <= stream->receive_record_credit_sent)
+            {
                 return 0;
             }
             mini_stream_build_receipt_locked(stream,
                 MINI_STREAM_RECEIPT_CREDIT, target,
-                stream->receive_queue_limit);
+                stream->receive_queue_limit, record_target);
             lane0->receipt_credit_limit = target;
+            lane0->receipt_record_credit_limit = record_target;
         }
         if (lane0->receipt_status != MINI_STREAM_RECEIPT_CREDIT) {
             return 0;
@@ -520,10 +570,13 @@ mini_stream_pump_accept_credit_locked(mini_backend_stream_t *stream)
             return 0;
         }
         stream->receive_credit_sent = lane0->receipt_credit_limit;
+        stream->receive_record_credit_sent =
+            lane0->receipt_record_credit_limit;
         lane0->receipt_bytes = 0;
         lane0->receipt_sent = 0;
         lane0->receipt_status = 0;
         lane0->receipt_credit_limit = 0;
+        lane0->receipt_record_credit_limit = 0;
         if (finished) {
             return 0;
         }
@@ -558,7 +611,7 @@ mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
     }
 
     mini_stream_build_receipt_locked(stream, MINI_STREAM_RECEIPT_OK,
-        total_bytes, UINT64_MAX);
+        total_bytes, UINT64_MAX, 0);
     uint32_t i;
     for (i = 0; i < stream->lane_count; i++) {
         mini_stream_lane_t *lane = &stream->lanes[i];
@@ -631,6 +684,9 @@ mini_stream_process_locked(mini_backend_stream_t *stream)
 
     if (stream->role == MINI_STREAM_ENDPOINT_OPEN) {
         uint32_t i;
+        if (mini_stream_reserve_send_credit_locked(stream) < 0) {
+            return mini_stream_fail_locked(stream, EIO);
+        }
         for (i = 0; i < stream->lane_count; i++) {
             if (mini_stream_pump_open_lane_locked(stream,
                     &stream->lanes[i]) < 0)
@@ -768,6 +824,8 @@ mini_stream_make_send_chunk(uint64_t offset, const unsigned char *data,
     memset(chunk, 0, sizeof(*chunk));
     chunk->offset = offset;
     chunk->payload_length = data_len;
+    chunk->queue_charge = data_len < MINI_STREAM_RECORD_MEMORY_CHARGE
+        ? MINI_STREAM_RECORD_MEMORY_CHARGE : data_len;
     chunk->wire_length = wire_length;
     mini_stream_frame_header_t header = {
         .type = MINI_STREAM_FRAME_DATA,
@@ -794,6 +852,9 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
         || (role != MINI_STREAM_ENDPOINT_OPEN
             && role != MINI_STREAM_ENDPOINT_ACCEPT)
         || (config->flags & ~MINI_STREAM_ALLOWED_FLAGS) != 0
+        || config->preaccept_lane_count > MINI_BACKEND_STREAM_LANE_COUNT
+        || (role == MINI_STREAM_ENDPOINT_OPEN
+            && config->preaccept_lane_count != 0)
         || config->send_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
         || config->receive_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
         || (role == MINI_STREAM_ENDPOINT_ACCEPT && config->on_data == NULL))
@@ -814,8 +875,14 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->role = role;
     stream->flags = config->flags;
     stream->lane_count = MINI_BACKEND_STREAM_LANE_COUNT;
+    stream->preaccept_lane_count = config->preaccept_lane_count;
     stream->send_queue_limit = config->send_queue_size;
     stream->receive_queue_limit = config->receive_queue_size;
+    stream->receive_record_capacity = stream->receive_queue_limit
+        / MINI_STREAM_RECORD_MEMORY_CHARGE;
+    if (stream->receive_record_capacity == 0) {
+        stream->receive_record_capacity = 1;
+    }
     stream->external_event_driver = config->external_event_driver != 0;
     stream->on_data = config->on_data;
     stream->user_data = config->user_data;
@@ -991,8 +1058,8 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
             break;
         }
         size_t available = stream->send_queue_limit
-            - stream->send_queue_bytes;
-        if (available == 0) {
+            - stream->send_queue_charge;
+        if (available < MINI_STREAM_RECORD_MEMORY_CHARGE) {
             if ((stream->flags & 1U) != 0) {
                 result = EAGAIN;
                 break;
@@ -1033,7 +1100,14 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
             lane->send_tail->next = chunk;
         }
         lane->send_tail = chunk;
+        if (stream->credit_tail == NULL) {
+            stream->credit_head = chunk;
+        } else {
+            stream->credit_tail->credit_next = chunk;
+        }
+        stream->credit_tail = chunk;
         stream->send_queue_bytes += count;
+        stream->send_queue_charge += chunk->queue_charge;
         if (stream->send_queue_bytes > stream->send_queue_high_water) {
             stream->send_queue_high_water = stream->send_queue_bytes;
         }
@@ -1183,6 +1257,7 @@ mini_backend_stream_get_snapshot(mini_backend_stream_t *stream,
     }
     snapshot->lane_count = stream->lane_count;
     snapshot->flags = stream->flags;
+    snapshot->preaccept_lane_count = stream->preaccept_lane_count;
     snapshot->accepted_bytes = stream->accepted_bytes;
     snapshot->peer_received_bytes = stream->peer_received_bytes;
     snapshot->send_queue_bytes = stream->send_queue_bytes;
@@ -1254,6 +1329,8 @@ mini_stream_free_queues(mini_backend_stream_t *stream)
             lane->incoming_chunk);
         lane->incoming_chunk = NULL;
     }
+    stream->credit_head = NULL;
+    stream->credit_tail = NULL;
     mini_stream_reorder_release(&stream->reorder);
     mini_stream_reorder_chunk_t *delivery = stream->delivery_head;
     while (delivery != NULL) {
@@ -1398,6 +1475,9 @@ mini_stream_delivery_worker(void *arg)
         stream->accepted_bytes = chunk->offset + chunk->length;
         stream->records_delivered++;
         stream->delivery_queue_bytes -= chunk->length;
+        if (stream->receive_records_buffered != 0) {
+            stream->receive_records_buffered--;
+        }
         free(chunk);
         mini_stream_signal_locked(stream);
         mini_stream_wake(stream);
@@ -1499,12 +1579,17 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
     size_t payload_length = lane->incoming_frame.payload_length;
     size_t buffered = stream->reorder.buffered_bytes
         + stream->delivery_queue_bytes;
-    /* A protocol-v2 opener cannot reach this guard: it reserves payload only
-     * within the receiver's cumulative CREDIT window, and new credit is
-     * issued only after on_data returns.  Keep the check as protection from a
-     * non-conforming peer instead of treating normal backpressure as fatal. */
+    /* A protocol-v3 opener cannot reach these guards: it reserves payload and
+     * record CREDIT independently, and new credit is issued only after
+     * on_data returns.  Keep the checks as protection from a non-conforming
+     * peer instead of treating normal backpressure as fatal. */
     if (buffered > stream->receive_queue_limit
         || payload_length > stream->receive_queue_limit - buffered)
+    {
+        return mini_stream_fail_locked(stream, EPROTO);
+    }
+    if (stream->receive_records_buffered
+        >= stream->receive_record_capacity)
     {
         return mini_stream_fail_locked(stream, EPROTO);
     }
@@ -1522,6 +1607,7 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
         stream->reorder_high_water = buffered;
     }
     lane->incoming_chunk = chunk;
+    stream->receive_records_buffered++;
     return 0;
 }
 
@@ -1626,17 +1712,21 @@ mini_stream_receive_receipt_locked(mini_backend_stream_t *stream,
         }
         lane->receipt_bytes = 0;
         if (receipt.status == MINI_STREAM_RECEIPT_CREDIT) {
-            if (receipt.digest != 0
+            if (receipt.digest == 0
                 || receipt.detail < MINI_STREAM_MAX_FRAME_PAYLOAD
                 || receipt.total_bytes < receipt.detail
                 || (stream->peer_credit_received
                     && receipt.total_bytes < stream->send_credit_limit)
-                || receipt.total_bytes < stream->send_credit_reserved)
+                || receipt.total_bytes < stream->send_credit_reserved
+                || (stream->peer_credit_received
+                    && receipt.digest < stream->send_record_credit_limit)
+                || receipt.digest < stream->send_records_reserved)
             {
                 return mini_stream_fail_locked(stream, EPROTO);
             }
             stream->peer_credit_received = 1;
             stream->send_credit_limit = receipt.total_bytes;
+            stream->send_record_credit_limit = receipt.digest;
             continue;
         }
         if (receipt.status != MINI_STREAM_RECEIPT_OK

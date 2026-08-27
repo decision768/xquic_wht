@@ -5,6 +5,9 @@
 客户端和服务端命令均不再接受 lane 数参数。公开定义以
 [`include/xquic/netins_udp.h`](include/xquic/netins_udp.h) 为准。
 
+6.4 将数据流内部线协议升级为 version 3，以同时携带 payload CREDIT 和 record CREDIT；
+数据流两端必须使用相同的 6.4 版本。文件 API 的 H3 请求/响应协议不受影响。
+
 ## 1. 本轮交付范围
 
 | 阶段 | 已完成内容 |
@@ -117,14 +120,18 @@ netins_udp_stream_close(stream);
 
 ## 5. 性能和内存边界
 
-- `send_queue_size` 限制待提交的 payload 字节；默认 8 MiB，最小 64 KiB；
-- `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB；
+- `send_queue_size` 是待提交 payload 的队列预算；默认 8 MiB，最小 64 KiB。每个 record
+  至少按 256 字节内部额度计费，避免连续 1 字节 `write()` 产生数百万个队列节点；
+- `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB。接收端
+  同时按 `receive_queue_size / 256` 限制未交付 record 数；
 - 客户端只在 4 条 lane 上先发送各 40 字节握手头；收到服务端
   `netins_udp_stream_accept()` 完成后发出的首个累计 CREDIT 前，不发送 payload 或 FIN。
   因而 accept 前临时区每条 lane 最多只保存一个握手头，不再用固定 8 MiB 缓存数据；
-- 接收端初始授予 `receive_queue_size`，每次 `on_data()` 返回后按已交付字节推进累计 CREDIT。
-  发送端只会把已获得额度内的 payload 提交给 XQUIC，所以慢回调和多 lane 乱序会形成可恢复
-  背压，而不会把正常队列满升级成永久 `ENOBUFS`；
+- 接收端初始授予 payload 和 record 两类累计 CREDIT，每次 `on_data()` 返回后按已交付字节
+  及 record 数同步推进。发送端按跨 lane 的全局逻辑 offset 顺序同时占用两类 CREDIT，
+  再由已获得额度的各 lane 独立向
+  XQUIC 提交。这样小接收窗口不会被某条 lane 的高 offset record 抢占并形成永久等待，同时
+  仍保留多 lane 并行提交；
 - 每个 DATA record 额外有 24 字节线上头和一个本地队列节点；
 - 应用传入 Buffer 不计入 SDK 队列，`write()` 只复制 accepted 的字节；
 - `on_data()` 在独立 delivery worker 上执行且不持有 XQUIC/stream 锁；内存只在回调期间
@@ -153,6 +160,7 @@ netins_udp_stream_get_snapshot(stream, &snapshot);
 | `reorder_bytes/capacity/high_water` | 跨 lane 乱序数据与待回调数据的合计接收内存压力 |
 | `records_enqueued/submitted` | 发送记录是否全部交给 XQUIC |
 | `records_received/delivered` | 收到的记录是否全部按序交付 |
+| `preaccept_lane_count` | 仅接收端有意义；调用 `stream_accept()` 开始时已完整缓存的 lane header 数量 |
 | `lane_payload_sent[i]` | 发送端第 i 条 lane 实际承载量 |
 | `lane_payload_received[i]` | 接收端第 i 条 lane 实际承载量 |
 
@@ -212,13 +220,15 @@ python3 tests/stream_api_acceptance.py \
 2. 普通文件连接仍走 `xqc_h3_connect()`，流连接才走 H3 Extended；
 3. 协议、重排和公开结构体初始化器单测；
 4. 0、1、65535、65536、65537 字节边界；
-5. 固定 4 lane、逐 lane 统计总和和足量数据下的 lane 利用；
-6. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
-7. 64 KiB 接收队列、20 ms 慢回调和 2 MiB 数据强制累计 CREDIT 反复推进，并检查接收高水位；
-8. 非空流与空流各延迟 500 ms 调用 `stream_accept()`，验证 payload/FIN 等待初始 CREDIT；
-9. 两个 accepted connection 并发传输；
-10. 服务端在大流传输中被终止时客户端必须失败且报告可观测错误；
-11. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
+5. 连续 1024 次 1 字节 `write()`，验证小 record 内存计费和累计 record CREDIT；
+6. 固定 4 lane、逐 lane 统计总和和足量数据下的 lane 利用；
+7. 64 KiB 非阻塞发送队列产生的部分写和 `EAGAIN`；
+8. 64 KiB 接收队列、20 ms 慢回调和 2 MiB 数据强制累计 CREDIT 反复推进，并检查接收高水位；
+9. 非空流与空流各延迟 500 ms 调用 `stream_accept()`，并要求 `preaccept_lanes=4`，确定四个
+   完整 lane header 都在 accept 前到达，再验证 payload/FIN 等待初始 CREDIT；
+10. 两个 accepted connection 并发传输；
+11. 服务端确实收到大流 payload 后被终止，客户端必须失败并报告非零 transport/protocol 错误；
+12. 接收端 `finish()` 后立即 close 不得破坏发送端完成回执。
 
 脚本会自己生成确定性字节模式，不创建输入文件，也不把完整测试数据放入内存。
 
@@ -305,8 +315,9 @@ scheduler 不变，分别运行：
 ```
 
 等待期间客户端只能发送四个 40 字节 lane header；payload 和 FIN 必须等初始 CREDIT。自动
-验收还会执行一个 0 字节延迟 accept 用例，覆盖“只有 FIN”的边界。两个 delay 参数默认均为
-0，只用于正确性验收，吞吐性能测试不得启用。
+验收要求服务端快照输出 `preaccept_lanes=4`，因此不会只因“等待过 500 ms 且最终成功”而误判
+为覆盖了 accept 前暂存路径；还会执行一个 0 字节延迟 accept 用例，覆盖“只有 FIN”的边界。
+两个 delay 参数默认均为 0，只用于正确性验收，吞吐性能测试不得启用。
 
 ## 10. 文件 API 回归
 

@@ -24,6 +24,9 @@ def main() -> int:
         "client_cb": root / "mini/mini_client_cb.c",
         "server_backend": root / "mini/mini_server_backend.c",
         "stream_backend": root / "mini/mini_stream_backend.c",
+        "stream_protocol": root / "mini/mini_stream_protocol.h",
+        "stream_server_demo": root / "demo/netins_udp_stream_server.c",
+        "stream_acceptance": root / "tests/stream_api_acceptance.py",
         "api": root / "src/netins_udp/netins_udp_api.c",
         "public_header": root / "include/xquic/netins_udp.h",
     }
@@ -137,16 +140,43 @@ def main() -> int:
             "opener waits for receiver credit before payload and FIN",
             "stream_backend",
             r"mini_stream_pump_open_lane_locked\s*\(.*?"
-            r"!stream->peer_credit_received.*?credit_reserved.*?"
+            r"!stream->peer_credit_received\s*\|\|\s*"
+            r"!chunk->credit_reserved.*?"
             r"!stream->peer_credit_received.*?protocol_fin_sent",
         ),
         (
-            "credit records are distinct from final digest receipts",
+            "sender reserves cumulative credit in global enqueue order",
+            "stream_backend",
+            r"mini_stream_reserve_send_credit_locked\s*\(.*?"
+            r"next\s*=\s*stream->credit_head.*?"
+            r"next->offset\s*!=\s*stream->send_credit_reserved.*?"
+            r"stream->send_credit_reserved\s*\+=\s*"
+            r"next->payload_length.*?next->credit_reserved\s*=\s*1.*?"
+            r"stream->credit_head\s*=\s*next->credit_next",
+        ),
+        (
+            "new records join the global credit queue in write order",
+            "stream_backend",
+            r"mini_backend_stream_write\s*\(.*?"
+            r"stream->credit_tail->credit_next\s*=\s*chunk.*?"
+            r"stream->credit_tail\s*=\s*chunk",
+        ),
+        (
+            "global credit is reserved before per-lane submission",
+            "stream_backend",
+            r"mini_stream_process_locked\s*\(.*?"
+            r"mini_stream_reserve_send_credit_locked\(stream\).*?"
+            r"mini_stream_pump_open_lane_locked",
+        ),
+        (
+            "credit records carry record limits, not final payload digests",
             "stream_backend",
             r"\.digest\s*=\s*status\s*==\s*"
-            r"MINI_STREAM_RECEIPT_CREDIT\s*\?\s*0\s*:\s*stream->digest"
+            r"MINI_STREAM_RECEIPT_CREDIT\s*\?\s*record_credit\s*:\s*"
+            r"stream->digest"
             r".*?receipt.status\s*==\s*MINI_STREAM_RECEIPT_CREDIT.*?"
-            r"receipt.digest\s*!=\s*0",
+            r"receipt.digest\s*==\s*0.*?"
+            r"stream->send_record_credit_limit\s*=\s*receipt.digest",
         ),
         (
             "receiver replenishes cumulative credit after delivery",
@@ -155,6 +185,28 @@ def main() -> int:
             r"stream->accepted_bytes\s*\+\s*stream->receive_queue_limit"
             r".*?mini_stream_delivery_worker\s*\(.*?callback\(.*?"
             r"stream->accepted_bytes\s*=.*?mini_stream_wake\(stream\)",
+        ),
+        (
+            "tiny writes consume a minimum local queue charge",
+            "stream_backend",
+            r"chunk->queue_charge\s*=\s*data_len\s*<\s*"
+            r"MINI_STREAM_RECORD_MEMORY_CHARGE.*?"
+            r"stream->send_queue_limit\s*-\s*stream->send_queue_charge.*?"
+            r"stream->send_queue_charge\s*\+=\s*chunk->queue_charge",
+        ),
+        (
+            "receiver enforces cumulative record credit",
+            "stream_backend",
+            r"record_target\s*=\s*stream->records_delivered.*?"
+            r"receive_record_capacity\s*=\s*stream->receive_queue_limit.*?"
+            r"stream->receive_records_buffered\s*"
+            r">=\s*stream->receive_record_capacity",
+        ),
+        (
+            "stream wire protocol carries independent record credit",
+            "stream_protocol",
+            r"MINI_STREAM_PROTOCOL_VERSION\s+3U.*?"
+            r"MINI_STREAM_RECORD_MEMORY_CHARGE\s+256U",
         ),
         (
             "public stream write initializes accepted before backend errors",
@@ -180,6 +232,22 @@ def main() -> int:
             r"xqc_h3_ext_bytestream_close\(pending->bs\).*?"
             r"mini_backend_server_pending_free\(pending->connection,\s*"
             r"pending,\s*0\s*\)",
+        ),
+        (
+            "server records only complete headers present before accept",
+            "server_backend",
+            r"mini_backend_server_stream_accept\s*\(.*?"
+            r"pending->data_len\s*==\s*MINI_STREAM_LANE_HEADER_SIZE.*?"
+            r"preaccept_lane_count\+\+.*?"
+            r"stream_config\.preaccept_lane_count\s*=\s*"
+            r"preaccept_lane_count",
+        ),
+        (
+            "delayed-accept acceptance requires all four preaccept headers",
+            "stream_acceptance",
+            r"case\.require_delayed_accept.*?"
+            r"integer\(snapshot,\s*\"preaccept_lanes\"\)\s*"
+            r"!=\s*FIXED_LANES",
         ),
         (
             "client state polling yields to the active stream worker",
@@ -259,6 +327,32 @@ def main() -> int:
             r"mini_backend_server_set_logger",
         ),
         (
+            "stream accepted handles do not retain listener logger user data",
+            "api",
+            r"accepted->backend_config\s*=\s*server->backend_config.*?"
+            r"if\s*\(server->backend_config\.stream_mode\).*?"
+            r"accepted->backend_config\.logger\s*=\s*NULL.*?"
+            r"accepted->backend_config\.logger_user_data\s*=\s*NULL.*?"
+            r"accepted->logger\s*=\s*NULL.*?"
+            r"accepted->logger_user_data\s*=\s*NULL",
+        ),
+        (
+            "file accepted handles retain their logger inheritance",
+            "api",
+            r"else\s*\{\s*/\*\s*Preserve the established file-API.*?"
+            r"accepted->logger\s*=\s*server->logger.*?"
+            r"accepted->logger_user_data\s*=\s*server->logger_user_data",
+        ),
+        (
+            "listener close detaches its logger from a retained server worker",
+            "api",
+            r"handle->role\s*==\s*NETINS_UDP_ROLE_SERVER.*?"
+            r"if\s*\(handle->backend_config\.stream_mode\).*?"
+            r"mini_backend_server_set_logger\(handle->server_backend,\s*"
+            r"NULL,\s*NULL,\s*NETINS_UDP_LOG_ERROR\).*?"
+            r"mini_backend_server_release",
+        ),
+        (
             "server accept timeout reuses one bounded elapsed value",
             "server_backend",
             r"mini_backend_server_accept\s*\(.*?"
@@ -284,6 +378,18 @@ def main() -> int:
             r"mini_backend_server_on_connection_closed\s*\(.*?"
             r"pthread_mutex_lock\(&server->lock\);\s*"
             r"connection->last_error_code\s*=\s*error_code;",
+        ),
+        (
+            "fault acceptance waits for delivered stream progress",
+            "stream_acceptance",
+            r"stream_api_ready.*?stream_api_progress.*?"
+            r"if\s+not\s+established.*?stop_process\(server\)",
+        ),
+        (
+            "stream server emits the fault-test progress marker after data",
+            "stream_server_demo",
+            r"receiver->received\s*=\s*offset\s*\+\s*data_len.*?"
+            r"stream_api_progress.*?fflush\(stdout\)",
         ),
     )
 

@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 #define NETINS_UDP_API_VERSION 1U
-#define NETINS_UDP_API_RELEASE_VERSION "6.2"
+#define NETINS_UDP_API_RELEASE_VERSION "6.4"
 #define NETINS_UDP_MAX_PATHS 8U
 #define NETINS_UDP_MAX_INTERFACES 8U
 #define NETINS_UDP_INTERFACE_NAME_LEN 64U
@@ -372,6 +372,8 @@ typedef struct netins_udp_stream_config_s {
     /* Reserved; lane width is fixed by NETINS_UDP_STREAM_LANE_COUNT. */
     uint32_t reserved32;
     uint32_t flags;
+    /* Payload budget; tiny records also consume a bounded internal record
+     * charge so allocator/list overhead cannot exceed the configured scale. */
     size_t send_queue_size;
     size_t receive_queue_size;
     netins_udp_stream_data_cb on_data;
@@ -420,7 +422,8 @@ typedef struct netins_udp_stream_snapshot_s {
     uint64_t lane_payload_sent[NETINS_UDP_STREAM_LANE_COUNT];
     uint64_t lane_payload_received[NETINS_UDP_STREAM_LANE_COUNT];
     int last_error;
-    uint32_t reserved32;
+    /* Complete lane headers buffered before server stream_accept began. */
+    uint32_t preaccept_lane_count;
     uint64_t app_error_code;
     uint64_t reserved[6];
 } netins_udp_stream_snapshot_t;
@@ -445,9 +448,13 @@ NETINS_UDP_PUBLIC int netins_udp_cleanup(void);
  * may only be changed while the handle is in NEW state, except LOGGER,
  * which may be replaced on a live handle.  On return from a live LOGGER
  * replacement, that handle's background worker no longer uses the previous
- * callback/user_data.  An ACCEPTED handle has an independent logger and never
- * replaces the listener's shared server-worker logger.  As with every API
- * call, LOGGER replacement must not be made reentrantly from its callback.
+ * callback/user_data.  A stream-mode ACCEPTED handle starts with an empty
+ * independent logger; set LOGGER on that handle if API-level connection logs
+ * are required.  It never replaces the listener's shared server-worker
+ * logger.  Closing a stream listener waits until that worker has detached the
+ * listener callback/user_data.  File-mode logger inheritance is unchanged.
+ * As with every API call, LOGGER replacement must not be made reentrantly from
+ * its callback.
  */
 NETINS_UDP_PUBLIC netins_udp_t *netins_udp_new(int role);
 NETINS_UDP_PUBLIC int netins_udp_set_opt(netins_udp_t *handle,
@@ -489,16 +496,18 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * Data streams are unidirectional logical transfers in API version 1.  The
  * opener writes; the accepter receives through on_data.  Both sides call
  * finish(): the opener waits for a verified peer receipt, while the accepter
- * waits for peer FIN and receipt submission.  A logical stream may aggregate
+ * waits for peer FIN and for the receipt/reverse FINs to be QUIC-acknowledged.
+ * A logical stream may aggregate
  * exactly NETINS_UDP_STREAM_LANE_COUNT H3 Extended Bytestream lanes and
  * delivers
  * received data to on_data in increasing logical-offset order.
  * on_data runs on a bounded delivery worker, outside the XQUIC event thread
  * and outside the stream mutex.  Its memory is valid only during the
- * callback.  The receiver advertises cumulative credit only after on_data
- * returns, so a slow callback backpressures the opener at receive_queue_size
- * instead of growing memory or failing a compliant peer with ENOBUFS.  The
- * callback must not close or wait on the same stream.
+ * callback.  The receiver advertises cumulative payload and record credit
+ * only after on_data returns, so a slow callback backpressures the opener at
+ * receive_queue_size without allowing tiny records to grow allocator/list
+ * overhead without bound.  The callback must not close or wait on the same
+ * stream.
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;
@@ -531,8 +540,10 @@ NETINS_UDP_PUBLIC int netins_udp_stream_reset(
  * Queue byte counts are instantaneous; high-water and record/lane counters
  * are cumulative for the lifetime of the logical stream.  app_error_code is
  * the local value supplied to reset(); transport/protocol failures appear in
- * last_error.  Version 1 does not transmit the application reset code to the
- * peer and does not provide reconnect/resume across QUIC connections.
+ * last_error.  On an accepter, preaccept_lane_count reports complete lane
+ * headers already buffered when stream_accept() began; it is zero on an
+ * opener.  Version 1 does not transmit the application reset code to the peer
+ * and does not provide reconnect/resume across QUIC connections.
  */
 NETINS_UDP_PUBLIC int netins_udp_stream_get_snapshot(
     netins_udp_stream_t *stream, netins_udp_stream_snapshot_t *snapshot);

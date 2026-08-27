@@ -7,6 +7,8 @@
 int
 main(void)
 {
+    assert(MINI_STREAM_PROTOCOL_VERSION == 3U);
+    assert(MINI_STREAM_RECORD_MEMORY_CHARGE == 256U);
     unsigned char lane_wire[MINI_STREAM_LANE_HEADER_SIZE];
     mini_stream_lane_header_t lane = {
         .session_id = 0x0102030405060708ULL,
@@ -60,7 +62,8 @@ main(void)
         .status = MINI_STREAM_RECEIPT_CREDIT,
         .session_id = lane.session_id,
         .total_bytes = 8U * 1024U * 1024U,
-        .digest = 0,
+        .digest = (8U * 1024U * 1024U)
+            / MINI_STREAM_RECORD_MEMORY_CHARGE,
         .detail = 8U * 1024U * 1024U,
     };
     mini_stream_receipt_encode(&credit, receipt_wire);
@@ -69,7 +72,7 @@ main(void)
     assert(receipt_decoded.status == MINI_STREAM_RECEIPT_CREDIT);
     assert(receipt_decoded.session_id == credit.session_id);
     assert(receipt_decoded.total_bytes == credit.total_bytes);
-    assert(receipt_decoded.digest == 0);
+    assert(receipt_decoded.digest == credit.digest);
     assert(receipt_decoded.detail == credit.detail);
 
     const char sample[] = "stream-api-protocol";

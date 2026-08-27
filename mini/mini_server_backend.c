@@ -1555,6 +1555,7 @@ mini_backend_server_stream_accept(mini_backend_server_t *server,
     *out_stream = NULL;
 
     xqc_cid_t cid;
+    uint32_t preaccept_lane_count = 0;
     pthread_mutex_lock(&server->lock);
     int valid = connection->handshake_finished
         && !connection->connection_closed
@@ -1562,6 +1563,14 @@ mini_backend_server_stream_accept(mini_backend_server_t *server,
         && server->io_worker_started && server->io_worker_running;
     if (valid) {
         memcpy(&cid, &connection->cid, sizeof(cid));
+        mini_backend_server_pending_bs_t *pending =
+            connection->stream_api_pending_head;
+        while (pending != NULL) {
+            if (pending->data_len == MINI_STREAM_LANE_HEADER_SIZE) {
+                preaccept_lane_count++;
+            }
+            pending = pending->next;
+        }
     }
     pthread_mutex_unlock(&server->lock);
     if (!valid) {
@@ -1574,6 +1583,7 @@ mini_backend_server_stream_accept(mini_backend_server_t *server,
     }
     mini_backend_stream_config_t stream_config = *config;
     stream_config.external_event_driver = 1;
+    stream_config.preaccept_lane_count = preaccept_lane_count;
     mini_backend_stream_t *stream = NULL;
     int ret = mini_stream_backend_create(server->ctx.engine,
         &cid, server->ctx.eb, MINI_STREAM_ENDPOINT_ACCEPT,

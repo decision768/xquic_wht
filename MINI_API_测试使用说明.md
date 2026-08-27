@@ -468,7 +468,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 服务端开始执行 `listen()` 时会输出当前交付版本，例如：
 
 ```text
-[mini-api:1] Mini API server version=6.2
+[mini-api:1] Mini API server version=6.4
 ```
 
 服务端 scheduler 已在 Demo 内部固定为 `adaptive`，不提供 `--scheduler` 或

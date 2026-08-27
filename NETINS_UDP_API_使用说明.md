@@ -94,9 +94,12 @@ netins_udp_cleanup()
 
 ## 3. 全部公开 API
 
-当前 Mini API 交付版本为 `6.2`，可通过头文件中的
+当前 Mini API 交付版本为 `6.4`，可通过头文件中的
 `NETINS_UDP_API_RELEASE_VERSION` 获取该版本字符串。服务端调用 `listen()` 时还会通过 INFO
-日志输出 `Mini API server version=6.2`。
+日志输出 `Mini API server version=6.4`。
+
+6.4 的数据流内部线协议为 version 3，新增独立 record CREDIT；数据流客户端和服务端必须
+同时使用 6.4。该变化不进入原文件 API 的 H3 请求/响应协议，文件 API 流程保持不变。
 
 `NETINS_UDP_API_VERSION` 当前仍为 `1`，它是结构体初始化和 ABI 兼容检查使用的整数版本号，
 不是交付版本字符串。公开函数共 28 个。
@@ -143,7 +146,7 @@ netins_udp_cleanup()
 | `netins_udp_stream_accept()` | 在启用流模式的 ACCEPTED handle 上创建接收端 |
 | `netins_udp_stream_write()` | 复制调用方 Buffer；`*accepted` 先清零，支持阻塞、超时、非阻塞和部分 accepted；累计 offset 溢出返回 `EOVERFLOW` |
 | `netins_udp_stream_flush()` | 等待本地队列提交给 XQUIC，不等于对端已经收到 |
-| `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN 并提交回执 |
+| `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN，并等待回执及反向 FIN 被 QUIC ACK |
 | `netins_udp_stream_reset()` | 取消本地逻辑流；API v1 不把应用错误码传给对端 |
 | `netins_udp_stream_get_snapshot()` | 查询队列、重排、记录数和逐 lane 字节统计 |
 | `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |
@@ -297,9 +300,12 @@ API 内置证书；需要用文件覆盖时，在 `listen()` 前填写证书和�
 
 通过 `NETINS_UDP_OPT_LOGGER` 设置。它是唯一允许在活动 handle 上替换的选项；回调执行期间
 不能重新调用当前 handle，`message` 只在本次回调期间有效。活动 handle 的替换调用返回后，
-该 handle 的后台 worker 已经切换完成，旧 callback/`user_data` 可以释放。ACCEPTED handle 的
-logger 只属于该连接及其活动流，不会覆盖 listener 共享 I/O worker 的 logger；如需修改共享
-worker 的 logger，必须在 SERVER listener handle 上设置。
+该 handle 的后台 worker 已经切换完成，旧 callback/`user_data` 可以释放。stream mode 的
+ACCEPTED handle 使用独立日志配置且初始为空；需要 API 层连接日志时应在 ACCEPTED handle
+上单独设置。它不会覆盖 listener 共享 I/O worker 的 logger；如需修改共享 worker 的 logger，
+必须在 SERVER listener handle 上设置。关闭 stream listener 返回前，共享 worker 会停止使用
+listener 的 callback/`user_data`，此后可以释放对应日志上下文。文件 API 的 accepted logger
+继承行为保持不变。
 
 #### `netins_udp_zlog_config_t`：zlog 配置（输入）
 
@@ -412,6 +418,18 @@ netins_udp_serve(connection, &serve);
 
 `NETINS_UDP_OPT_SCHEDULER`、`NETINS_UDP_OPT_CONGESTION_CONTROL`、各类 timeout 和 socket
 buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
+
+#### `netins_udp_stream_snapshot_t`：数据流快照（输出）
+
+`send_queue_bytes`、`reorder_bytes` 及其 high-water 字段统计 payload；配置的 queue size
+同时作为内部内存预算。为避免大量小写入放大节点开销，每个 record 至少消耗 256 字节
+内部额度，接收端还通过独立的累计 record CREDIT 限制未交付记录数。因此小 record 场景的
+瞬时 payload 高水位可能明显低于配置容量，这是预期的内存保护行为。
+
+除队列高水位、record 计数和逐 lane 字节统计外，`preaccept_lane_count` 仅在接收端有意义：
+它记录调用 `netins_udp_stream_accept()` 开始时，服务端已经完整缓存的 40 字节 lane header
+数量。正常业务无需依赖该字段；延迟 accept 验收必须看到固定值 4，才能证明测试确实覆盖了
+“Bytestream 先到、逻辑流后 accept”的暂存路径。发送端该字段为 0。
 
 ### 5.2 `netins_udp_set_opt()` 选项
 
@@ -1198,12 +1216,15 @@ build/mini/netins_udp_stream_server
 netins_udp_stream_client HOST PORT BYTES SEED
   [SEND_QUEUE_BYTES [RECEIVE_QUEUE_BYTES [FLAGS
   [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]]]
-  [--interface NAME]... [--scheduler NAME]
+  [--interface NAME]... [--scheduler NAME] [--write-chunk-size N]
 ```
 
 `--interface` 可以重复 1～8 次并映射到 `NETINS_UDP_OPT_INTERFACES`。只传一个接口用于测
 单网卡；传入 `--interface rmnet_data0 --interface usb0` 用于双路径聚合。未传接口时保留
 底层默认选路，但性能验收必须显式指定，避免受默认路由影响。
+
+`--write-chunk-size` 仅用于验收调用侧的小块写入，默认 256 KiB；正式性能测试保持默认值。
+自动验收使用 `--write-chunk-size 1` 连续调用 1024 次，覆盖小 record 内存保护和 record CREDIT。
 
 数据流接收端命令格式：
 
@@ -1215,7 +1236,8 @@ netins_udp_stream_server LISTEN_IP PORT EXPECTED_BYTES SEED
 
 两个 delay 参数仅用于验收：前者让每次 `on_data()` 返回前等待 N ms，以验证接收端累计
 CREDIT 背压；后者在连接 accept 后、`netins_udp_stream_accept()` 前等待 N ms，以验证 accept 前
-只有四个 lane header。二者默认均为 0，性能测试不得启用。
+只有四个 lane header。延迟 accept 用例还必须在服务端快照看到 `preaccept_lanes=4`；只有延迟
+日志和最终传输成功不足以判定该路径已被覆盖。二者默认均为 0，性能测试不得启用。
 
 客户端和服务端内部都固定为 4 lane。`BYTES` 和 `EXPECTED_BYTES` 应一致；接收端传 0 时
 不校验预期总长度，但仍校验数据模式、最终回执和逐 lane 统计。

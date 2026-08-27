@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stddef.h>
+#include <string.h>
 
 #include <xquic/netins_udp.h>
 
@@ -20,6 +21,7 @@ _Static_assert(offsetof(netins_udp_stream_config_t, flags)
 int
 main(void)
 {
+    assert(strcmp(NETINS_UDP_API_RELEASE_VERSION, "6.4") == 0);
     netins_udp_stream_config_t config =
         NETINS_UDP_STREAM_CONFIG_INITIALIZER;
     netins_udp_stream_result_t result =
@@ -36,6 +38,7 @@ main(void)
     assert(result.api_version == NETINS_UDP_API_VERSION);
     assert(snapshot.struct_size == sizeof(snapshot));
     assert(snapshot.api_version == NETINS_UDP_API_VERSION);
+    assert(snapshot.preaccept_lane_count == 0);
     assert(sizeof(snapshot.lane_payload_sent) / sizeof(uint64_t)
         == NETINS_UDP_STREAM_LANE_COUNT);
     assert(sizeof(snapshot.lane_payload_received) / sizeof(uint64_t)

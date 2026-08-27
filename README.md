@@ -73,4 +73,4 @@ sh scripts/mini_api/package_delivery.sh BUILD_DIR OUTPUT_DIR
 - 单路径和双路径 RX 预算使用独立配置分支；
 - 未传日志和调度参数时使用上述固定策略，速率汇总格式保持不变。
 
-当前 Mini API 交付版本为 `6.2`，项目版本也可见 `VERSION`。
+当前 Mini API 交付版本为 `6.4`，项目版本也可见 `VERSION`。

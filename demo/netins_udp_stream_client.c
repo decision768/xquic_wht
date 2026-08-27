@@ -17,6 +17,7 @@ typedef struct stream_demo_options_s {
     uint64_t total_bytes;
     size_t send_queue_size;
     size_t receive_queue_size;
+    size_t write_chunk_size;
     uint32_t seed;
     uint32_t flags;
     uint32_t write_timeout_ms;
@@ -33,13 +34,14 @@ stream_demo_usage(const char *program)
         "usage: %s HOST PORT BYTES SEED"
         " [SEND_QUEUE_BYTES [RECEIVE_QUEUE_BYTES [FLAGS"
         " [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]]]"
-        " [--interface NAME]... [--scheduler NAME]\n"
+        " [--interface NAME]... [--scheduler NAME] [--write-chunk-size N]\n"
         "  lanes are fixed at %u; --interface may be repeated up to %u times\n"
+        "  --write-chunk-size is test-only and defaults to %u bytes\n"
         "  scheduler: default|minrtt|backup|balanced|rap|act|bandwidth|"
         "fastprobe|fastprobe5|fastprobe10|fastprobe20|fastonly|adaptive"
         " (default adaptive)\n",
         program, NETINS_UDP_STREAM_DEMO_LANE_COUNT,
-        NETINS_UDP_MAX_INTERFACES);
+        NETINS_UDP_MAX_INTERFACES, STREAM_DEMO_CHUNK);
 }
 
 static int
@@ -118,6 +120,7 @@ stream_demo_parse_args(int argc, char **argv, stream_demo_options_t *options)
     options->host = argv[1];
     options->send_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     options->receive_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    options->write_chunk_size = STREAM_DEMO_CHUNK;
     options->write_timeout_ms = 60000;
     options->finish_timeout_ms = 60000;
     options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
@@ -154,6 +157,16 @@ stream_demo_parse_args(int argc, char **argv, stream_demo_options_t *options)
             {
                 return -1;
             }
+            continue;
+        }
+        if (strcmp(argv[i], "--write-chunk-size") == 0) {
+            if (++i >= argc
+                || stream_demo_parse_u64(argv[i], SIZE_MAX, &number) != 0
+                || number == 0)
+            {
+                return -1;
+            }
+            options->write_chunk_size = (size_t)number;
             continue;
         }
         if (strncmp(argv[i], "--", 2) == 0
@@ -313,7 +326,7 @@ main(int argc, char **argv)
         perror("open data stream");
         goto cleanup;
     }
-    buffer = malloc(STREAM_DEMO_CHUNK);
+    buffer = malloc(options.write_chunk_size);
     if (buffer == NULL) {
         perror("allocate stream buffer");
         goto cleanup;
@@ -323,8 +336,9 @@ main(int argc, char **argv)
     uint64_t eagain_count = 0;
     uint64_t partial_count = 0;
     while (offset < options.total_bytes) {
-        size_t count = options.total_bytes - offset < STREAM_DEMO_CHUNK
-            ? (size_t)(options.total_bytes - offset) : STREAM_DEMO_CHUNK;
+        size_t count = options.total_bytes - offset < options.write_chunk_size
+            ? (size_t)(options.total_bytes - offset)
+            : options.write_chunk_size;
         stream_demo_fill(buffer, count, offset, options.seed);
         size_t consumed = 0;
         while (consumed < count) {

@@ -12,8 +12,10 @@
 typedef struct stream_demo_receiver_s {
     uint32_t seed;
     uint32_t callback_delay_ms;
+    size_t client_index;
     uint64_t received;
     uint64_t first_bad_offset;
+    int progress_reported;
     int mismatch;
 } stream_demo_receiver_t;
 
@@ -164,10 +166,12 @@ stream_demo_print_snapshot(netins_udp_stream_t *stream)
            " reorder_high_water=%" PRIu64
            " records_received=%" PRIu64
            " records_delivered=%" PRIu64
+           " preaccept_lanes=%u"
            " last_error=%d app_error=%" PRIu64 "\n",
         snapshot.state, snapshot.lane_count, snapshot.accepted_bytes,
         snapshot.reorder_bytes, snapshot.reorder_high_water,
         snapshot.records_received, snapshot.records_delivered,
+        snapshot.preaccept_lane_count,
         snapshot.last_error, snapshot.app_error_code);
     uint32_t i;
     for (i = 0; i < snapshot.lane_count; i++) {
@@ -199,6 +203,13 @@ stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
         }
     }
     receiver->received = offset + data_len;
+    if (!receiver->progress_reported && data_len != 0) {
+        receiver->progress_reported = 1;
+        printf("[stream_api_progress] role=server client=%zu"
+               " received=%" PRIu64 "\n",
+            receiver->client_index, receiver->received);
+        fflush(stdout);
+    }
     stream_demo_sleep_ms(receiver->callback_delay_ms);
 }
 
@@ -259,6 +270,7 @@ main(int argc, char **argv)
         }
         receivers[i].seed = options.seed;
         receivers[i].callback_delay_ms = options.callback_delay_ms;
+        receivers[i].client_index = i;
         receivers[i].first_bad_offset = UINT64_MAX;
         netins_udp_stream_config_t config =
             NETINS_UDP_STREAM_CONFIG_INITIALIZER;

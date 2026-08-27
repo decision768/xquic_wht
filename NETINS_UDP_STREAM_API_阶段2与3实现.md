@@ -83,7 +83,8 @@ netins_udp_stream_close(stream);
   `stream_api_state`，因此可以同时推进多条连接；
 - 应用 `write()` 只复制数据到有界队列，不直接从应用线程调用 XQUIC；
 - pipe event 唤醒 IO 线程，没有固定间隔 sleep；
-- 队列满时，阻塞模式等待空间，非阻塞模式返回 `EAGAIN`；超时可能已经接收部分数据，
+- 队列同时按 payload 和 record 内存额度限制；每个小 record 至少按 256 字节计费。队列满时，
+  阻塞模式等待空间，非阻塞模式返回 `EAGAIN`；超时可能已经接收部分数据，
   调用方必须读取 `accepted`；
 - `flush()` 只证明本地队列已经交给 XQUIC；`finish()` 才等待对端长度和摘要回执；
 - `on_data()` 在每条接收流的有界 delivery worker 执行，不持有 stream mutex，也不会阻塞
@@ -111,7 +112,8 @@ netins_udp_stream_close(stream);
 
 接收端拒绝重复 lane、session 不一致、DATA offset 重叠、越界帧、不同 lane 最终长度不一致
 以及超过 `receive_queue_size` 的乱序缓存。全部数据连续交付后，lane 0 返回 48 字节统一
-回执，包含状态、session、总字节数和摘要。
+回执，包含状态、session、总字节数和摘要。内部协议版本 3 的 CREDIT 回执还携带累计
+record 额度，与累计 payload 额度共同限制在途接收内存。
 
 ## 5. 构建与基础测试
 
