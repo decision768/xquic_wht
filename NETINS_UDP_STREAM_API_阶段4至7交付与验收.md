@@ -26,7 +26,7 @@ API v1 仍明确不包含跨 QUIC 连接断点续传、自动重连、双向应�
 有界发送队列（按 payload 字节背压）
         │ 每条 DATA record 最大 64 KiB
         ▼
-轮询分流到 lane 0 ... lane N-1
+轮询分流到固定 lane 0 ... lane 3
         │ QUIC 保证每条 lane 内可靠有序
         ▼
 接收端有界跨-lane重排（按逻辑 offset）
@@ -56,7 +56,6 @@ netins_udp_connect(client, server_ip, port);
 
 ```c
 netins_udp_stream_config_t cfg = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-cfg.lane_count = 4;
 cfg.send_queue_size = 8 * 1024 * 1024;
 cfg.receive_queue_size = 8 * 1024 * 1024;
 
@@ -115,6 +114,9 @@ netins_udp_stream_close(stream);
 
 - `send_queue_size` 限制待提交的 payload 字节；默认 8 MiB，最小 64 KiB；
 - `receive_queue_size` 限制尚未连续交付的接收 payload；默认 8 MiB，最小 64 KiB；
+- 客户端 lane 早于服务端 `netins_udp_stream_accept()` 到达时，服务端会先在每连接总计
+  8 MiB 的有界临时区中接收，随后由共享 I/O 线程绑定并回放；应用仍应在连接 accept 后
+  尽快调用 stream accept，超过临时上限会以 `ENOBUFS` 结束该逻辑流；
 - 每个 DATA record 额外有 24 字节线上头和一个本地队列节点；
 - 应用传入 Buffer 不计入 SDK 队列，`write()` 只复制 accepted 的字节；
 - `on_data()` 在独立 delivery worker 上执行且不持有 XQUIC/stream 锁；内存只在回调期间

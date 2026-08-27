@@ -28,7 +28,7 @@ extern "C" {
 #define NETINS_UDP_ERROR_MSG_LEN 256U
 #define NETINS_UDP_REMOTE_PATH_LEN 1024U
 #define NETINS_UDP_TLS_PEM_MAX_LEN (1024U * 1024U)
-#define NETINS_UDP_STREAM_MAX_LANES 8U
+#define NETINS_UDP_STREAM_LANE_COUNT 4U
 #define NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE (8U * 1024U * 1024U)
 
 typedef struct netins_udp_s netins_udp_t;
@@ -369,7 +369,8 @@ typedef void (*netins_udp_stream_data_cb)(
 typedef struct netins_udp_stream_config_s {
     uint32_t struct_size;
     uint32_t api_version;
-    uint32_t lane_count;
+    /* Reserved; lane width is fixed by NETINS_UDP_STREAM_LANE_COUNT. */
+    uint32_t reserved32;
     uint32_t flags;
     size_t send_queue_size;
     size_t receive_queue_size;
@@ -379,8 +380,8 @@ typedef struct netins_udp_stream_config_s {
 } netins_udp_stream_config_t;
 
 #define NETINS_UDP_STREAM_CONFIG_INITIALIZER \
-    { sizeof(netins_udp_stream_config_t), NETINS_UDP_API_VERSION, 1, \
-      NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
+    { sizeof(netins_udp_stream_config_t), NETINS_UDP_API_VERSION, \
+      0, NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
       NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, NULL, NULL, {0} }
 
 typedef struct netins_udp_stream_result_s {
@@ -416,8 +417,8 @@ typedef struct netins_udp_stream_snapshot_s {
     uint64_t records_submitted;
     uint64_t records_received;
     uint64_t records_delivered;
-    uint64_t lane_payload_sent[NETINS_UDP_STREAM_MAX_LANES];
-    uint64_t lane_payload_received[NETINS_UDP_STREAM_MAX_LANES];
+    uint64_t lane_payload_sent[NETINS_UDP_STREAM_LANE_COUNT];
+    uint64_t lane_payload_received[NETINS_UDP_STREAM_LANE_COUNT];
     int last_error;
     uint32_t reserved32;
     uint64_t app_error_code;
@@ -485,7 +486,8 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * opener writes; the accepter receives through on_data.  Both sides call
  * finish(): the opener waits for a verified peer receipt, while the accepter
  * waits for peer FIN and receipt submission.  A logical stream may aggregate
- * 1..NETINS_UDP_STREAM_MAX_LANES H3 Extended Bytestream lanes and delivers
+ * exactly NETINS_UDP_STREAM_LANE_COUNT H3 Extended Bytestream lanes and
+ * delivers
  * received data to on_data in increasing logical-offset order.
  * on_data runs on a bounded delivery worker, outside the XQUIC event thread
  * and outside the stream mutex.  Its memory is valid only during the

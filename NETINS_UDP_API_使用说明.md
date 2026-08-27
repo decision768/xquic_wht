@@ -149,9 +149,9 @@ netins_udp_cleanup()
 | `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |
 
 两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`。本交付版本的
-stream client/server 封装固定使用 4 lane，不提供命令行 lane 参数，也不允许两端自行选择
-不同数量。公开结构体中的 `lane_count` 为兼容既有 ABI 保留，交付集成代码统一填写 4。一个
-连接只能有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收方法见
+数据流公共 API 和 stream client/server 都固定使用 4 lane，不提供 `lane_count` 字段或命令行
+lane 参数，也不允许调用方自行选择不同数量；只读快照中的 `lane_count` 恒为 4。一个连接只能
+有一个活动逻辑流，且不得与文件传输混用。完整调用示例、背压语义与验收方法见
 [`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
 
 ### 3.5 状态和统计

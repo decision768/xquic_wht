@@ -157,6 +157,8 @@ typedef struct xqc_mini_svr_ctx_s {
     zlog_category_t    *zlog_cat;
 } xqc_mini_svr_ctx_t;
 
+struct mini_backend_server_pending_bs_s;
+
 
 typedef struct xqc_mini_svr_user_conn_s {
     struct xqc_mini_svr_user_conn_s *listener_conn;
@@ -216,6 +218,10 @@ typedef struct xqc_mini_svr_user_conn_s {
     /* Stream POC state is per accepted connection; results live on listener. */
     void                   *stream_poc_state;
     void                   *stream_api_state;
+    struct mini_backend_server_pending_bs_s *stream_api_pending_head;
+    struct mini_backend_server_pending_bs_s *stream_api_pending_tail;
+    size_t                  stream_api_pending_bytes;
+    int                     stream_api_pending_error;
     int                     stream_poc_completed;
     int                     stream_poc_result;
     uint64_t                stream_poc_total_bytes;

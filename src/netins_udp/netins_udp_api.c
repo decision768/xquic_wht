@@ -1037,6 +1037,7 @@ netins_udp_serve(netins_udp_t *connection,
                 NETINS_UDP_CLOSE_TIMEOUT, ETIMEDOUT, ret,
                 "Mini serve loop timed out");
         } else if (mini_backend_server_connection_is_closed(
+                connection->server_backend,
                 connection->server_connection))
         {
             connection->state = NETINS_UDP_STATE_ERROR;
@@ -1086,15 +1087,12 @@ netins_udp_stream_configure(netins_udp_t *connection,
 {
     if (config == NULL || config->struct_size < sizeof(*config)
         || config->api_version != NETINS_UDP_API_VERSION
-        || config->lane_count == 0
-        || config->lane_count > NETINS_UDP_STREAM_MAX_LANES
         || (config->flags & ~NETINS_UDP_STREAM_FLAG_NONBLOCK) != 0)
     {
         return netins_udp_set_error(connection, EINVAL,
             "invalid stream configuration");
     }
     memset(backend_config, 0, sizeof(*backend_config));
-    backend_config->lane_count = config->lane_count;
     backend_config->flags = config->flags;
     backend_config->send_queue_size = config->send_queue_size != 0
         ? config->send_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
@@ -1604,9 +1602,11 @@ netins_udp_get_state(netins_udp_t *handle)
     } else if (handle->role == NETINS_UDP_ROLE_ACCEPTED
         && handle->server_connection != NULL
         && mini_backend_server_connection_is_closed(
+            handle->server_backend,
             handle->server_connection))
     {
         int backend_error = mini_backend_server_connection_last_error(
+            handle->server_backend,
             handle->server_connection);
         if (backend_error != 0) {
             handle->state = NETINS_UDP_STATE_ERROR;

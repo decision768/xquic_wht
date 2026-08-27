@@ -130,7 +130,6 @@ main(int argc, char **argv)
         receivers[i].first_bad_offset = UINT64_MAX;
         netins_udp_stream_config_t config =
             NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-        config.lane_count = NETINS_UDP_STREAM_DEMO_LANE_COUNT;
         config.receive_queue_size = receive_queue_size;
         config.on_data = stream_demo_on_data;
         config.user_data = &receivers[i];

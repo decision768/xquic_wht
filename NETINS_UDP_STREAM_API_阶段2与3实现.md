@@ -18,7 +18,7 @@
 - lane 之间允许乱序，接收端通过有界重排缓存只向应用交付连续数据；
 - 每个 lane 都提交相同最终长度的 FIN record；
 - lane 0 返回统一完成回执，其余 lane 关闭反向发送方向；
-- `lane_count=1` 使用完全相同的协议和 API，自动退化为单 Bytestream。
+- 阶段 2 曾用 `lane_count=1` 验证相同协议的单 Bytestream 退化路径；当前交付公共 API 已固定为 4 lane。
 
 阶段 2 的独立提交为 `82d13c24`。阶段 3 不改变原文件 API 的公开函数和普通 `h3`
 连接行为。
@@ -39,7 +39,6 @@ netins_udp_set_opt(handle, NETINS_UDP_OPT_STREAM_MODE,
 netins_udp_connect(client, server_ip, port);
 
 netins_udp_stream_config_t cfg = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-cfg.lane_count = 4;
 
 netins_udp_stream_t *stream = NULL;
 netins_udp_stream_open(client, &cfg, &stream);
@@ -62,7 +61,6 @@ netins_udp_stream_close(stream);
 netins_udp_t *connection = netins_udp_accept(server);
 
 netins_udp_stream_config_t cfg = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-cfg.lane_count = 4;
 cfg.on_data = on_stream_data;
 cfg.user_data = app_context;
 

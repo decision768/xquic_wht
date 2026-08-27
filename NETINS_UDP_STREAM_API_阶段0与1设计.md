@@ -59,7 +59,7 @@ typedef void (*netins_udp_stream_data_cb)(
 typedef struct netins_udp_stream_config_s {
     uint32_t struct_size;
     uint32_t api_version;
-    uint32_t lane_count;          /* 第一版必须为 1 */
+    uint32_t lane_count;          /* 阶段 0/1 历史草案；当前公共 API 已移除 */
     uint32_t flags;
     size_t send_queue_size;
     size_t receive_queue_size;
@@ -132,7 +132,7 @@ void netins_udp_stream_close(netins_udp_stream_t *stream);
   和总长度，为阶段 3 的多 lane 重排保留兼容格式；
 - 一个连接同时只允许一个逻辑数据流，且不能和文件任务混用。
 
-阶段 3 已解除阶段 2 的单 lane 编译门，允许 `lane_count=1..8`。DATA record 按逻辑
+阶段 3 曾解除阶段 2 的单 lane 编译门并允许 `lane_count=1..8`；当前交付公共 API 已收敛为固定 4 lane。DATA record 按逻辑
 offset 在各 lane 间轮询分流，接收端使用有界乱序缓存连续交付；详细实现和测试方法见
 `NETINS_UDP_STREAM_API_阶段2与3实现.md`。
 

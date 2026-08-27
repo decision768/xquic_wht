@@ -1944,9 +1944,9 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             xqc_mini_stream_poc_server_on_connection_close(user_conn);
         }
         int h3_error = xqc_h3_conn_get_errno(h3_conn);
-        if (user_conn->stream_api_state != NULL) {
-            mini_stream_backend_on_connection_close(
-                user_conn->stream_api_state, h3_error);
+        if (user_conn->api_backend != NULL) {
+            mini_backend_server_on_stream_connection_closed(
+                user_conn->api_backend, user_conn, h3_error);
         }
         user_conn->last_error_code =
             h3_error == H3_NO_ERROR ? 0 : h3_error;

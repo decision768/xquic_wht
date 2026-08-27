@@ -23,6 +23,8 @@ int mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
 
 void mini_stream_backend_on_connection_close(
     mini_backend_stream_t *stream, int error_code);
+void mini_stream_backend_external_driver_stopped(
+    mini_backend_stream_t *stream, int error_code);
 
 /* Drive completion checks from a shared server event-loop thread. */
 int mini_stream_backend_drive(mini_backend_stream_t *stream);
@@ -30,13 +32,31 @@ int mini_stream_backend_drive(mini_backend_stream_t *stream);
 int mini_stream_backend_active_bs_create(
     xqc_h3_ext_bytestream_t *bs, void *bs_user_data);
 int mini_stream_backend_passive_bs_create(mini_backend_stream_t *stream,
-    xqc_h3_ext_bytestream_t *bs);
+    xqc_h3_ext_bytestream_t *bs, void **out_bs_user_data);
 int mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
     void *bs_user_data);
 int mini_stream_backend_bs_read(xqc_h3_ext_bytestream_t *bs,
     const void *data, size_t data_len, uint8_t fin, void *bs_user_data);
 int mini_stream_backend_bs_write(xqc_h3_ext_bytestream_t *bs,
     void *bs_user_data);
+
+int mini_backend_server_stream_bs_create(
+    mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs);
+int mini_backend_server_stream_bs_close(
+    mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, void *bs_user_data);
+int mini_backend_server_stream_bs_read(
+    mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, const void *data, size_t data_len,
+    uint8_t fin, void *bs_user_data);
+int mini_backend_server_stream_bs_write(
+    mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, void *bs_user_data);
 
 int mini_stream_backend_client_bs_create_notify(
     xqc_h3_ext_bytestream_t *bs, void *bs_user_data);

@@ -15,8 +15,6 @@
 #define MINI_STREAM_MAGIC 0x4e535452U
 #define MINI_STREAM_LANE_MAGIC 0x4e534c4eU
 #define MINI_STREAM_ALLOWED_FLAGS 1U
-/* One logical stream may aggregate up to eight independent Bytestreams. */
-#define MINI_STREAM_ENABLED_MAX_LANES 8U
 
 typedef struct mini_stream_send_chunk_s mini_stream_send_chunk_t;
 typedef struct mini_stream_lane_s mini_stream_lane_t;
@@ -98,7 +96,7 @@ struct mini_backend_stream_s {
     struct event *wake_event;
     int wake_pending;
 
-    mini_stream_lane_t lanes[MINI_STREAM_ENABLED_MAX_LANES];
+    mini_stream_lane_t lanes[MINI_BACKEND_STREAM_LANE_COUNT];
     uint32_t allocated_lanes;
     uint32_t next_send_lane;
     uint64_t session_id;
@@ -115,8 +113,8 @@ struct mini_backend_stream_s {
     uint64_t records_submitted;
     uint64_t records_received;
     uint64_t records_delivered;
-    uint64_t lane_payload_sent[MINI_STREAM_ENABLED_MAX_LANES];
-    uint64_t lane_payload_received[MINI_STREAM_ENABLED_MAX_LANES];
+    uint64_t lane_payload_sent[MINI_BACKEND_STREAM_LANE_COUNT];
+    uint64_t lane_payload_received[MINI_BACKEND_STREAM_LANE_COUNT];
     mini_stream_reorder_t reorder;
     mini_stream_reorder_chunk_t *delivery_head;
     mini_stream_reorder_chunk_t *delivery_tail;
@@ -629,12 +627,10 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     mini_backend_stream_t **out_stream)
 {
     if (engine == NULL || cid == NULL || event_base == NULL || config == NULL
-        || connection_state_slot == NULL || *connection_state_slot != NULL
+        || (connection_state_slot != NULL && *connection_state_slot != NULL)
         || out_stream == NULL
         || (role != MINI_STREAM_ENDPOINT_OPEN
             && role != MINI_STREAM_ENDPOINT_ACCEPT)
-        || config->lane_count == 0
-        || config->lane_count > MINI_STREAM_ENABLED_MAX_LANES
         || (config->flags & ~MINI_STREAM_ALLOWED_FLAGS) != 0
         || config->send_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
         || config->receive_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
@@ -655,7 +651,7 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     stream->event_base = event_base;
     stream->role = role;
     stream->flags = config->flags;
-    stream->lane_count = config->lane_count;
+    stream->lane_count = MINI_BACKEND_STREAM_LANE_COUNT;
     stream->send_queue_limit = config->send_queue_size;
     stream->receive_queue_limit = config->receive_queue_size;
     stream->external_event_driver = config->external_event_driver != 0;
@@ -748,12 +744,16 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
         stream->delivery_worker_started = 1;
     }
 
-    *connection_state_slot = stream;
+    if (connection_state_slot != NULL) {
+        *connection_state_slot = stream;
+    }
     if (!stream->external_event_driver) {
         ret = pthread_create(&stream->worker, NULL,
             mini_stream_worker, stream);
         if (ret != 0) {
-            *connection_state_slot = NULL;
+            if (connection_state_slot != NULL) {
+                *connection_state_slot = NULL;
+            }
             goto fail;
         }
         stream->worker_started = 1;
@@ -1128,6 +1128,22 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
     pthread_mutex_unlock(&stream->lock);
 }
 
+void
+mini_stream_backend_external_driver_stopped(mini_backend_stream_t *stream,
+    int error_code)
+{
+    if (!mini_stream_valid(stream)) {
+        return;
+    }
+    pthread_mutex_lock(&stream->lock);
+    if (error_code != 0 && !stream->completed) {
+        (void)mini_stream_fail_locked(stream, error_code);
+    }
+    stream->io_stopped = 1;
+    mini_stream_signal_locked(stream);
+    pthread_mutex_unlock(&stream->lock);
+}
+
 static void *
 mini_stream_delivery_worker(void *arg)
 {
@@ -1416,7 +1432,7 @@ mini_stream_lane_from_user_data(void *user_data)
 
 int
 mini_stream_backend_passive_bs_create(mini_backend_stream_t *stream,
-    xqc_h3_ext_bytestream_t *bs)
+    xqc_h3_ext_bytestream_t *bs, void **out_bs_user_data)
 {
     if (!mini_stream_valid(stream) || bs == NULL
         || stream->role != MINI_STREAM_ENDPOINT_ACCEPT)
@@ -1441,6 +1457,9 @@ mini_stream_backend_passive_bs_create(mini_backend_stream_t *stream,
     lane->bs = bs;
     stream->allocated_lanes++;
     xqc_h3_ext_bytestream_set_user_data(bs, lane);
+    if (out_bs_user_data != NULL) {
+        *out_bs_user_data = lane;
+    }
     pthread_mutex_unlock(&stream->lock);
     return XQC_OK;
 }

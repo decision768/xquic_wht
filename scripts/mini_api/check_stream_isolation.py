@@ -24,6 +24,7 @@ def main() -> int:
         "server_backend": root / "mini/mini_server_backend.c",
         "stream_backend": root / "mini/mini_stream_backend.c",
         "api": root / "src/netins_udp/netins_udp_api.c",
+        "public_header": root / "include/xquic/netins_udp.h",
     }
     try:
         text = {
@@ -83,7 +84,7 @@ def main() -> int:
             "server stream ownership is per accepted connection",
             "server_backend",
             r"mini_backend_server_stream_accept\s*\(.*?"
-            r"connection->stream_api_state\s*!=\s*NULL.*?"
+            r"connection->stream_api_state\s*==\s*NULL.*?"
             r"external_event_driver\s*=\s*1",
         ),
         (
@@ -97,6 +98,33 @@ def main() -> int:
             "stream_backend",
             r"mini_stream_delivery_worker\s*\(.*?"
             r"pthread_mutex_unlock\(&stream->lock\).*?callback\(",
+        ),
+        (
+            "public stream configuration has one fixed four-lane width",
+            "public_header",
+            r"NETINS_UDP_STREAM_LANE_COUNT\s+4U.*?"
+            r"typedef\s+struct\s+netins_udp_stream_config_s\s*\{\s*"
+            r"uint32_t\s+struct_size;\s*uint32_t\s+api_version;\s*"
+            r".*?uint32_t\s+reserved32;\s*uint32_t\s+flags;",
+        ),
+        (
+            "server buffers Bytestreams that arrive before stream accept",
+            "server_backend",
+            r"mini_backend_server_stream_bs_create\s*\(.*?"
+            r"stream_api_pending_head.*?xqc_h3_ext_bytestream_set_user_data",
+        ),
+        (
+            "server worker exit stops every external stream driver",
+            "server_backend",
+            r"io_worker_running\s*=\s*0;.*?"
+            r"mini_stream_backend_external_driver_stopped",
+        ),
+        (
+            "server connection statistics are serialized with engine drive",
+            "server_backend",
+            r"pthread_mutex_lock\(&server->engine_lock\);.*?"
+            r"xqc_conn_get_stats.*?"
+            r"pthread_mutex_unlock\(&server->engine_lock\);",
         ),
     )
 

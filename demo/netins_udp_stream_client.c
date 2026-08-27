@@ -306,7 +306,6 @@ main(int argc, char **argv)
 
     netins_udp_stream_config_t config =
         NETINS_UDP_STREAM_CONFIG_INITIALIZER;
-    config.lane_count = NETINS_UDP_STREAM_DEMO_LANE_COUNT;
     config.flags = options.flags;
     config.send_queue_size = options.send_queue_size;
     config.receive_queue_size = options.receive_queue_size;

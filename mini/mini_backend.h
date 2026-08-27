@@ -11,6 +11,7 @@
 #define MINI_BACKEND_FILE_PATH_LEN 1024
 #define MINI_BACKEND_MAX_PATHS 8
 #define MINI_BACKEND_ADDRESS_LEN 128
+#define MINI_BACKEND_STREAM_LANE_COUNT 4U
 
 typedef struct mini_backend_client_s mini_backend_client_t;
 typedef struct mini_backend_server_s mini_backend_server_t;
@@ -114,7 +115,6 @@ typedef struct mini_backend_config_s {
 } mini_backend_config_t;
 
 typedef struct mini_backend_stream_config_s {
-    uint32_t lane_count;
     uint32_t flags;
     size_t send_queue_size;
     size_t receive_queue_size;
@@ -156,8 +156,8 @@ typedef struct mini_backend_stream_snapshot_s {
     uint64_t records_submitted;
     uint64_t records_received;
     uint64_t records_delivered;
-    uint64_t lane_payload_sent[8];
-    uint64_t lane_payload_received[8];
+    uint64_t lane_payload_sent[MINI_BACKEND_STREAM_LANE_COUNT];
+    uint64_t lane_payload_received[MINI_BACKEND_STREAM_LANE_COUNT];
     int last_error;
     uint64_t app_error_code;
 } mini_backend_stream_snapshot_t;
@@ -194,7 +194,7 @@ int mini_backend_server_listen(mini_backend_server_t *server,
     const char *host, uint16_t port);
 int mini_backend_server_run(mini_backend_server_t *server);
 int mini_backend_server_poll(mini_backend_server_t *server);
-int mini_backend_server_last_error(const mini_backend_server_t *server);
+int mini_backend_server_last_error(mini_backend_server_t *server);
 int mini_backend_server_accept(mini_backend_server_t *server,
     uint32_t timeout_ms, mini_backend_server_connection_t **out_connection);
 void mini_backend_server_retain(mini_backend_server_t *server);
@@ -209,13 +209,16 @@ int mini_backend_server_connection_serve(mini_backend_server_t *server,
 void mini_backend_server_connection_release(mini_backend_server_t *server,
     mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_is_connected(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_is_closed(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_last_error(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection);
 int mini_backend_server_connection_get_snapshot(
-    const mini_backend_server_t *server,
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection,
     mini_backend_snapshot_t *snapshot);
 int mini_backend_server_stream_accept(mini_backend_server_t *server,
@@ -230,6 +233,8 @@ void mini_backend_server_on_handshake_finished(void *backend,
     mini_backend_server_connection_t *connection);
 void mini_backend_server_on_connection_closed(void *backend,
     mini_backend_server_connection_t *connection);
+void mini_backend_server_on_stream_connection_closed(void *backend,
+    mini_backend_server_connection_t *connection, int error_code);
 
 int mini_backend_stream_write(mini_backend_stream_t *stream,
     const void *data, size_t data_len, uint32_t timeout_ms,

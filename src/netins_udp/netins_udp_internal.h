@@ -9,6 +9,10 @@
 #error "Public interface capacity exceeds Mini backend capacity"
 #endif
 
+#if NETINS_UDP_STREAM_LANE_COUNT != MINI_BACKEND_STREAM_LANE_COUNT
+#error "Public and Mini backend stream lane counts must match"
+#endif
+
 #define NETINS_UDP_HANDLE_MAGIC 0x4e554450U
 #define NETINS_UDP_STREAM_MAGIC 0x4e535452U
 

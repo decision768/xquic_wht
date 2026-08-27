@@ -18,8 +18,23 @@
 #include <unistd.h>
 #endif
 
+#define MINI_SERVER_PENDING_BS_MAGIC 0x4e535042U
+#define MINI_SERVER_PENDING_STREAM_LIMIT (8U * 1024U * 1024U)
+
+typedef struct mini_backend_server_pending_bs_s {
+    uint32_t magic;
+    xqc_mini_svr_user_conn_t *connection;
+    xqc_h3_ext_bytestream_t *bs;
+    unsigned char *data;
+    size_t data_len;
+    size_t data_capacity;
+    uint8_t fin;
+    struct mini_backend_server_pending_bs_s *next;
+} mini_backend_server_pending_bs_t;
+
 typedef struct mini_backend_server_stream_node_s {
     mini_backend_stream_t *stream;
+    xqc_mini_svr_user_conn_t *connection;
     unsigned int references;
     int removing;
     struct mini_backend_server_stream_node_s *next;
@@ -33,14 +48,145 @@ struct mini_backend_server_s {
     unsigned int references;
     int listen_started;
     pthread_mutex_t lock;
+    pthread_mutex_t engine_lock;
     pthread_cond_t state_cond;
     pthread_t io_worker;
     int io_worker_started;
+    int io_worker_running;
     int io_stop_requested;
     int wake_pipe[2];
     struct event *wake_event;
     mini_backend_server_stream_node_t *stream_head;
 };
+
+static mini_backend_server_stream_node_t *
+mini_backend_server_stream_retain_locked(mini_backend_server_t *server,
+    mini_backend_stream_t *stream)
+{
+    mini_backend_server_stream_node_t *node = server->stream_head;
+    while (node != NULL) {
+        if (node->stream == stream && !node->removing) {
+            node->references++;
+            return node;
+        }
+        node = node->next;
+    }
+    return NULL;
+}
+
+static void
+mini_backend_server_stream_release_locked(mini_backend_server_t *server,
+    mini_backend_server_stream_node_t *node)
+{
+    if (node != NULL && node->references != 0) {
+        node->references--;
+        pthread_cond_broadcast(&server->state_cond);
+    }
+}
+
+static void
+mini_backend_server_pending_free(xqc_mini_svr_user_conn_t *connection,
+    mini_backend_server_pending_bs_t *pending, int clear_user_data)
+{
+    if (pending == NULL) {
+        return;
+    }
+    if (connection != NULL) {
+        connection->stream_api_pending_bytes -= pending->data_len;
+    }
+    if (clear_user_data && pending->bs != NULL) {
+        xqc_h3_ext_bytestream_set_user_data(pending->bs, NULL);
+    }
+    pending->magic = 0;
+    free(pending->data);
+    free(pending);
+}
+
+static void
+mini_backend_server_pending_clear_locked(
+    xqc_mini_svr_user_conn_t *connection)
+{
+    mini_backend_server_pending_bs_t *pending =
+        connection->stream_api_pending_head;
+    connection->stream_api_pending_head = NULL;
+    connection->stream_api_pending_tail = NULL;
+    while (pending != NULL) {
+        mini_backend_server_pending_bs_t *next = pending->next;
+        mini_backend_server_pending_free(connection, pending, 1);
+        pending = next;
+    }
+    connection->stream_api_pending_bytes = 0;
+}
+
+static void
+mini_backend_server_drain_pending_streams(mini_backend_server_t *server)
+{
+    for (;;) {
+        mini_backend_server_pending_bs_t *pending = NULL;
+        mini_backend_server_stream_node_t *node = NULL;
+        int pending_error = 0;
+
+        pthread_mutex_lock(&server->lock);
+        if (server->listener != NULL) {
+            xqc_mini_svr_user_conn_t *connection =
+                server->listener->connection_head;
+            while (connection != NULL) {
+                if (connection->stream_api_state != NULL
+                    && connection->stream_api_pending_head != NULL)
+                {
+                    pending = connection->stream_api_pending_head;
+                    connection->stream_api_pending_head = pending->next;
+                    if (connection->stream_api_pending_head == NULL) {
+                        connection->stream_api_pending_tail = NULL;
+                    }
+                    pending->next = NULL;
+                    pending_error = connection->stream_api_pending_error;
+                    node = mini_backend_server_stream_retain_locked(server,
+                        connection->stream_api_state);
+                    break;
+                }
+                connection = connection->all_next;
+            }
+        }
+        pthread_mutex_unlock(&server->lock);
+
+        if (pending == NULL) {
+            break;
+        }
+
+        int ret = XQC_ERROR;
+        int attached = 0;
+        void *lane_user_data = NULL;
+        if (node != NULL && pending_error == 0) {
+            ret = mini_stream_backend_passive_bs_create(node->stream,
+                pending->bs, &lane_user_data);
+            attached = ret == XQC_OK;
+            if (ret == XQC_OK
+                && (pending->data_len != 0 || pending->fin))
+            {
+                ret = mini_stream_backend_bs_read(pending->bs,
+                    pending->data, pending->data_len, pending->fin,
+                    lane_user_data);
+            }
+        }
+        if (ret != XQC_OK) {
+            if (!attached) {
+                xqc_h3_ext_bytestream_set_user_data(pending->bs, NULL);
+            }
+            (void)xqc_h3_ext_bytestream_close(pending->bs);
+            if (node != NULL && pending_error == 0) {
+                mini_stream_backend_on_connection_close(node->stream,
+                    EPROTO);
+            }
+        }
+
+        pthread_mutex_lock(&server->lock);
+        mini_backend_server_pending_free(pending->connection, pending,
+            ret != XQC_OK && !attached);
+        mini_backend_server_stream_release_locked(server, node);
+        pthread_mutex_unlock(&server->lock);
+    }
+}
 
 static void
 mini_backend_server_timeout_wakeup(evutil_socket_t fd, short events, void *arg)
@@ -120,10 +266,16 @@ static void *
 mini_backend_server_io_worker(void *arg)
 {
     mini_backend_server_t *server = arg;
+    int worker_error = 0;
     for (;;) {
+        pthread_mutex_lock(&server->engine_lock);
         int ret = event_base_loop(server->ctx.eb, EVLOOP_ONCE);
+        if (ret >= 0) {
+            mini_backend_server_drain_pending_streams(server);
+        }
         pthread_mutex_lock(&server->lock);
-        mini_backend_server_stream_node_t *node = server->stream_head;
+        mini_backend_server_stream_node_t *node = ret >= 0
+            ? server->stream_head : NULL;
         while (node != NULL) {
             if (node->removing) {
                 node = node->next;
@@ -146,10 +298,31 @@ mini_backend_server_io_worker(void *arg)
         }
         pthread_cond_broadcast(&server->state_cond);
         pthread_mutex_unlock(&server->lock);
+        pthread_mutex_unlock(&server->engine_lock);
         if (stop || ret < 0) {
+            worker_error = ret < 0 ? EIO : 0;
             break;
         }
     }
+
+    pthread_mutex_lock(&server->lock);
+    server->io_worker_running = 0;
+    mini_backend_server_stream_node_t *node = server->stream_head;
+    while (node != NULL) {
+        if (node->removing) {
+            node = node->next;
+            continue;
+        }
+        node->references++;
+        mini_backend_stream_t *stream = node->stream;
+        pthread_mutex_unlock(&server->lock);
+        mini_stream_backend_external_driver_stopped(stream, worker_error);
+        pthread_mutex_lock(&server->lock);
+        mini_backend_server_stream_release_locked(server, node);
+        node = node->next;
+    }
+    pthread_cond_broadcast(&server->state_cond);
+    pthread_mutex_unlock(&server->lock);
     return NULL;
 }
 
@@ -172,9 +345,15 @@ mini_backend_server_start_io_worker(mini_backend_server_t *server)
     {
         return ENOMEM;
     }
+    pthread_mutex_lock(&server->lock);
+    server->io_worker_running = 1;
+    pthread_mutex_unlock(&server->lock);
     int ret = pthread_create(&server->io_worker, NULL,
         mini_backend_server_io_worker, server);
     if (ret != 0) {
+        pthread_mutex_lock(&server->lock);
+        server->io_worker_running = 0;
+        pthread_mutex_unlock(&server->lock);
         return ret;
     }
     server->io_worker_started = 1;
@@ -306,8 +485,16 @@ mini_backend_server_create(const mini_backend_config_t *config,
         free(server);
         return sync_ret;
     }
+    sync_ret = pthread_mutex_init(&server->engine_lock, NULL);
+    if (sync_ret != 0) {
+        pthread_mutex_destroy(&server->lock);
+        free(args);
+        free(server);
+        return sync_ret;
+    }
     sync_ret = pthread_cond_init(&server->state_cond, NULL);
     if (sync_ret != 0) {
+        pthread_mutex_destroy(&server->engine_lock);
         pthread_mutex_destroy(&server->lock);
         free(args);
         free(server);
@@ -315,6 +502,7 @@ mini_backend_server_create(const mini_backend_config_t *config,
     }
     if (evthread_use_pthreads() != 0) {
         pthread_cond_destroy(&server->state_cond);
+        pthread_mutex_destroy(&server->engine_lock);
         pthread_mutex_destroy(&server->lock);
         free(args);
         free(server);
@@ -337,6 +525,7 @@ mini_backend_server_create(const mini_backend_config_t *config,
     if (xqc_mini_svr_init_ctx(&server->ctx, args) != XQC_OK) {
         xqc_mini_svr_free_ctx(&server->ctx);
         pthread_cond_destroy(&server->state_cond);
+        pthread_mutex_destroy(&server->engine_lock);
         pthread_mutex_destroy(&server->lock);
         free(server);
         return EIO;
@@ -350,6 +539,7 @@ mini_backend_server_create(const mini_backend_config_t *config,
         }
         xqc_mini_svr_free_ctx(&server->ctx);
         pthread_cond_destroy(&server->state_cond);
+        pthread_mutex_destroy(&server->engine_lock);
         pthread_mutex_destroy(&server->lock);
         free(server);
         return EIO;
@@ -414,10 +604,16 @@ mini_backend_server_poll(mini_backend_server_t *server)
 }
 
 int
-mini_backend_server_last_error(const mini_backend_server_t *server)
+mini_backend_server_last_error(mini_backend_server_t *server)
 {
-    return server != NULL && server->listener != NULL
+    if (server == NULL) {
+        return 0;
+    }
+    pthread_mutex_lock(&server->lock);
+    int error_code = server->listener != NULL
         ? server->listener->last_error_code : 0;
+    pthread_mutex_unlock(&server->lock);
+    return error_code;
 }
 
 static void
@@ -611,17 +807,29 @@ mini_backend_server_connection_shutdown(mini_backend_server_t *server,
     if (server == NULL || connection == NULL) {
         return EINVAL;
     }
-    if (connection->connection_closed) {
+    pthread_mutex_lock(&server->lock);
+    int already_closed = connection->connection_closed;
+    int worker_started = server->io_worker_started;
+    int worker_running = server->io_worker_running;
+    int worker_error = server->listener != NULL
+        ? server->listener->last_error_code : 0;
+    pthread_mutex_unlock(&server->lock);
+    if (already_closed) {
         return 0;
     }
-    if (server->io_worker_started) {
+    if (worker_started && !worker_running) {
+        return worker_error != 0 ? worker_error : EIO;
+    }
+    if (worker_started) {
         xqc_usec_t start = xqc_now();
         xqc_usec_t timeout_us = (xqc_usec_t)timeout_ms * 1000;
         pthread_mutex_lock(&server->lock);
         connection->api_close_requested = 1;
         mini_backend_server_wake(server);
         int result = 0;
-        while (!connection->connection_closed && result == 0) {
+        while (!connection->connection_closed && server->io_worker_running
+            && result == 0)
+        {
             if (timeout_ms == 0) {
                 result = pthread_cond_wait(&server->state_cond,
                     &server->lock);
@@ -646,6 +854,13 @@ mini_backend_server_connection_shutdown(mini_backend_server_t *server,
             }
             result = pthread_cond_timedwait(&server->state_cond,
                 &server->lock, &deadline);
+        }
+        if (!connection->connection_closed && !server->io_worker_running
+            && result == 0)
+        {
+            result = server->listener != NULL
+                    && server->listener->last_error_code != 0
+                ? server->listener->last_error_code : EIO;
         }
         pthread_mutex_unlock(&server->lock);
         return result;
@@ -684,12 +899,19 @@ mini_backend_server_connection_serve(mini_backend_server_t *server,
     uint32_t timeout_ms)
 {
     if (server == NULL || connection == NULL || root_path == NULL
-        || root_path[0] == '\0' || connection->connection_closed
+        || root_path[0] == '\0'
         || strlen(root_path) >= sizeof(connection->serve_root_path))
     {
         return EINVAL;
     }
-    if (server->io_worker_started) {
+    pthread_mutex_lock(&server->lock);
+    int connection_closed = connection->connection_closed;
+    int worker_started = server->io_worker_started;
+    pthread_mutex_unlock(&server->lock);
+    if (connection_closed) {
+        return EINVAL;
+    }
+    if (worker_started) {
         return EOPNOTSUPP;
     }
 
@@ -865,6 +1087,7 @@ mini_backend_server_destroy(mini_backend_server_t *server)
     xqc_mini_svr_free_ctx(&server->ctx);
     server->args = NULL;
     pthread_cond_destroy(&server->state_cond);
+    pthread_mutex_destroy(&server->engine_lock);
     pthread_mutex_destroy(&server->lock);
     free(server);
 }
@@ -888,6 +1111,14 @@ mini_backend_server_stream_detach(void *owner,
                     &server->lock);
             }
             *cursor = node->next;
+            if (node->connection != NULL
+                && node->connection->stream_api_state == stream)
+            {
+                node->connection->stream_api_state = NULL;
+                if (node->connection->stream_api_pending_head == NULL) {
+                    node->connection->stream_api_pending_error = 0;
+                }
+            }
             free(node);
             break;
         }
@@ -952,6 +1183,7 @@ mini_backend_server_on_connection_closed(void *backend,
     connection->connection_closed = 1;
     connection->serve_cancelled = 1;
     connection->serve_configured = 0;
+    mini_backend_server_pending_clear_locked(connection);
     if (!connection->queued && !connection->delivered) {
         mini_backend_server_remove_connection(server, connection);
         release = 1;
@@ -963,6 +1195,277 @@ mini_backend_server_on_connection_closed(void *backend,
     }
 }
 
+void
+mini_backend_server_on_stream_connection_closed(void *backend,
+    mini_backend_server_connection_t *connection, int error_code)
+{
+    mini_backend_server_t *server = backend;
+    if (server == NULL || connection == NULL) {
+        return;
+    }
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_node_t *node =
+        mini_backend_server_stream_retain_locked(server,
+            connection->stream_api_state);
+    if (node == NULL && connection->stream_api_pending_head != NULL
+        && connection->stream_api_pending_error == 0)
+    {
+        connection->stream_api_pending_error = error_code != 0
+            ? error_code : ECONNRESET;
+    }
+    pthread_mutex_unlock(&server->lock);
+    if (node != NULL) {
+        mini_stream_backend_on_connection_close(node->stream, error_code);
+        pthread_mutex_lock(&server->lock);
+        mini_backend_server_stream_release_locked(server, node);
+        pthread_mutex_unlock(&server->lock);
+    }
+}
+
+static mini_backend_server_pending_bs_t *
+mini_backend_server_pending_from_user_data(void *user_data)
+{
+    mini_backend_server_pending_bs_t *pending = user_data;
+    return pending != NULL && pending->magic == MINI_SERVER_PENDING_BS_MAGIC
+        ? pending : NULL;
+}
+
+static int
+mini_backend_server_pending_unlink_locked(
+    xqc_mini_svr_user_conn_t *connection,
+    mini_backend_server_pending_bs_t *pending)
+{
+    mini_backend_server_pending_bs_t **cursor =
+        &connection->stream_api_pending_head;
+    while (*cursor != NULL) {
+        if (*cursor == pending) {
+            *cursor = pending->next;
+            if (connection->stream_api_pending_tail == pending) {
+                connection->stream_api_pending_tail = NULL;
+                mini_backend_server_pending_bs_t *tail =
+                    connection->stream_api_pending_head;
+                while (tail != NULL && tail->next != NULL) {
+                    tail = tail->next;
+                }
+                connection->stream_api_pending_tail = tail;
+            }
+            pending->next = NULL;
+            return 1;
+        }
+        cursor = &(*cursor)->next;
+    }
+    return 0;
+}
+
+int
+mini_backend_server_stream_bs_create(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs)
+{
+    if (server == NULL || connection == NULL || bs == NULL) {
+        return XQC_ERROR;
+    }
+
+    pthread_mutex_lock(&server->lock);
+    if (connection->connection_closed || !server->io_worker_running) {
+        pthread_mutex_unlock(&server->lock);
+        return XQC_ERROR;
+    }
+    mini_backend_server_stream_node_t *node =
+        mini_backend_server_stream_retain_locked(server,
+            connection->stream_api_state);
+    if (connection->stream_api_state != NULL && node == NULL) {
+        pthread_mutex_unlock(&server->lock);
+        return XQC_ERROR;
+    }
+    if (node == NULL) {
+        uint32_t pending_count = 0;
+        mini_backend_server_pending_bs_t *cursor =
+            connection->stream_api_pending_head;
+        while (cursor != NULL) {
+            pending_count++;
+            cursor = cursor->next;
+        }
+        if (pending_count >= MINI_BACKEND_STREAM_LANE_COUNT) {
+            connection->stream_api_pending_error = EPROTO;
+            pthread_mutex_unlock(&server->lock);
+            return XQC_ERROR;
+        }
+        mini_backend_server_pending_bs_t *pending =
+            calloc(1, sizeof(*pending));
+        if (pending == NULL) {
+            connection->stream_api_pending_error = ENOMEM;
+            pthread_mutex_unlock(&server->lock);
+            return XQC_ERROR;
+        }
+        pending->magic = MINI_SERVER_PENDING_BS_MAGIC;
+        pending->connection = connection;
+        pending->bs = bs;
+        if (connection->stream_api_pending_tail == NULL) {
+            connection->stream_api_pending_head = pending;
+        } else {
+            connection->stream_api_pending_tail->next = pending;
+        }
+        connection->stream_api_pending_tail = pending;
+        xqc_h3_ext_bytestream_set_user_data(bs, pending);
+        pthread_mutex_unlock(&server->lock);
+        return XQC_OK;
+    }
+    pthread_mutex_unlock(&server->lock);
+
+    int ret = mini_stream_backend_passive_bs_create(node->stream, bs, NULL);
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_release_locked(server, node);
+    pthread_mutex_unlock(&server->lock);
+    return ret;
+}
+
+int
+mini_backend_server_stream_bs_close(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, void *bs_user_data)
+{
+    if (server == NULL || connection == NULL) {
+        return XQC_OK;
+    }
+    mini_backend_server_pending_bs_t *pending =
+        mini_backend_server_pending_from_user_data(bs_user_data);
+    if (pending != NULL) {
+        pthread_mutex_lock(&server->lock);
+        mini_backend_server_stream_node_t *node = NULL;
+        if (pending->connection == connection
+            && mini_backend_server_pending_unlink_locked(connection, pending))
+        {
+            if (connection->stream_api_pending_error == 0) {
+                connection->stream_api_pending_error = ECONNRESET;
+            }
+            node = mini_backend_server_stream_retain_locked(server,
+                connection->stream_api_state);
+            mini_backend_server_pending_free(connection, pending, 0);
+        }
+        pthread_mutex_unlock(&server->lock);
+        if (node != NULL) {
+            mini_stream_backend_on_connection_close(node->stream, ECONNRESET);
+            pthread_mutex_lock(&server->lock);
+            mini_backend_server_stream_release_locked(server, node);
+            pthread_mutex_unlock(&server->lock);
+        }
+        return XQC_OK;
+    }
+
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_node_t *node =
+        mini_backend_server_stream_retain_locked(server,
+            connection->stream_api_state);
+    pthread_mutex_unlock(&server->lock);
+    if (node == NULL) {
+        return XQC_OK;
+    }
+    int ret = mini_stream_backend_bs_close(bs, bs_user_data);
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_release_locked(server, node);
+    pthread_mutex_unlock(&server->lock);
+    return ret;
+}
+
+int
+mini_backend_server_stream_bs_read(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, const void *data, size_t data_len,
+    uint8_t fin, void *bs_user_data)
+{
+    (void)bs;
+    if (server == NULL || connection == NULL
+        || (data == NULL && data_len != 0))
+    {
+        return XQC_ERROR;
+    }
+    mini_backend_server_pending_bs_t *pending =
+        mini_backend_server_pending_from_user_data(bs_user_data);
+    if (pending != NULL) {
+        pthread_mutex_lock(&server->lock);
+        if (pending->connection != connection
+            || connection->stream_api_pending_error != 0
+            || data_len > MINI_SERVER_PENDING_STREAM_LIMIT
+                - connection->stream_api_pending_bytes)
+        {
+            if (connection->stream_api_pending_error == 0) {
+                connection->stream_api_pending_error = ENOBUFS;
+            }
+            pthread_mutex_unlock(&server->lock);
+            return XQC_ERROR;
+        }
+        size_t required = pending->data_len + data_len;
+        if (required > pending->data_capacity) {
+            size_t capacity = pending->data_capacity != 0
+                ? pending->data_capacity : 4096;
+            while (capacity < required) {
+                size_t next = capacity * 2;
+                capacity = next > MINI_SERVER_PENDING_STREAM_LIMIT
+                    || next < capacity
+                    ? MINI_SERVER_PENDING_STREAM_LIMIT : next;
+            }
+            unsigned char *resized = realloc(pending->data, capacity);
+            if (resized == NULL) {
+                connection->stream_api_pending_error = ENOMEM;
+                pthread_mutex_unlock(&server->lock);
+                return XQC_ERROR;
+            }
+            pending->data = resized;
+            pending->data_capacity = capacity;
+        }
+        if (data_len != 0) {
+            memcpy(pending->data + pending->data_len, data, data_len);
+            pending->data_len += data_len;
+            connection->stream_api_pending_bytes += data_len;
+        }
+        pending->fin = pending->fin || fin;
+        pthread_mutex_unlock(&server->lock);
+        return XQC_OK;
+    }
+
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_node_t *node =
+        mini_backend_server_stream_retain_locked(server,
+            connection->stream_api_state);
+    pthread_mutex_unlock(&server->lock);
+    if (node == NULL) {
+        return XQC_ERROR;
+    }
+    int ret = mini_stream_backend_bs_read(bs, data, data_len, fin,
+        bs_user_data);
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_release_locked(server, node);
+    pthread_mutex_unlock(&server->lock);
+    return ret;
+}
+
+int
+mini_backend_server_stream_bs_write(mini_backend_server_t *server,
+    mini_backend_server_connection_t *connection,
+    xqc_h3_ext_bytestream_t *bs, void *bs_user_data)
+{
+    if (server == NULL || connection == NULL) {
+        return XQC_ERROR;
+    }
+    if (mini_backend_server_pending_from_user_data(bs_user_data) != NULL) {
+        return XQC_OK;
+    }
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_node_t *node =
+        mini_backend_server_stream_retain_locked(server,
+            connection->stream_api_state);
+    pthread_mutex_unlock(&server->lock);
+    if (node == NULL) {
+        return XQC_ERROR;
+    }
+    int ret = mini_stream_backend_bs_write(bs, bs_user_data);
+    pthread_mutex_lock(&server->lock);
+    mini_backend_server_stream_release_locked(server, node);
+    pthread_mutex_unlock(&server->lock);
+    return ret;
+}
+
 int
 mini_backend_server_stream_accept(mini_backend_server_t *server,
     mini_backend_server_connection_t *connection,
@@ -971,34 +1474,71 @@ mini_backend_server_stream_accept(mini_backend_server_t *server,
 {
     if (server == NULL || connection == NULL || config == NULL
         || out_stream == NULL || !server->api_mode
-        || !server->args->stream_api_enabled
-        || !connection->handshake_finished || connection->connection_closed
-        || connection->stream_api_state != NULL
-        || !server->io_worker_started)
+        || !server->args->stream_api_enabled)
     {
         return EINVAL;
     }
+    *out_stream = NULL;
+
+    xqc_cid_t cid;
+    pthread_mutex_lock(&server->lock);
+    int valid = connection->handshake_finished
+        && !connection->connection_closed
+        && connection->stream_api_state == NULL
+        && server->io_worker_started && server->io_worker_running;
+    if (valid) {
+        memcpy(&cid, &connection->cid, sizeof(cid));
+    }
+    pthread_mutex_unlock(&server->lock);
+    if (!valid) {
+        return EINVAL;
+    }
+
     mini_backend_server_stream_node_t *node = calloc(1, sizeof(*node));
     if (node == NULL) {
         return ENOMEM;
     }
     mini_backend_stream_config_t stream_config = *config;
     stream_config.external_event_driver = 1;
+    mini_backend_stream_t *stream = NULL;
     int ret = mini_stream_backend_create(server->ctx.engine,
-        &connection->cid, server->ctx.eb, MINI_STREAM_ENDPOINT_ACCEPT,
-        &stream_config, &connection->stream_api_state, server,
+        &cid, server->ctx.eb, MINI_STREAM_ENDPOINT_ACCEPT,
+        &stream_config, NULL, server,
         mini_backend_server_stream_detach, out_stream);
-    if (ret == 0) {
-        node->stream = *out_stream;
-        pthread_mutex_lock(&server->lock);
+    if (ret != 0) {
+        free(node);
+        return ret;
+    }
+
+    stream = *out_stream;
+    node->stream = stream;
+    node->connection = connection;
+    int pending_error = 0;
+    pthread_mutex_lock(&server->lock);
+    valid = connection->handshake_finished
+        && !connection->connection_closed
+        && connection->stream_api_state == NULL
+        && server->io_worker_started && server->io_worker_running;
+    if (valid) {
+        connection->stream_api_state = stream;
         node->next = server->stream_head;
         server->stream_head = node;
-        pthread_mutex_unlock(&server->lock);
-        mini_backend_server_wake(server);
-    } else {
-        free(node);
+        pending_error = connection->stream_api_pending_error;
     }
-    return ret;
+    pthread_mutex_unlock(&server->lock);
+
+    if (!valid) {
+        mini_stream_backend_external_driver_stopped(stream, EIO);
+        mini_backend_stream_destroy(stream);
+        *out_stream = NULL;
+        free(node);
+        return EIO;
+    }
+    if (pending_error != 0) {
+        mini_stream_backend_on_connection_close(stream, pending_error);
+    }
+    mini_backend_server_wake(server);
+    return 0;
 }
 
 void
@@ -1019,24 +1559,45 @@ mini_backend_server_release(mini_backend_server_t *server)
 
 int
 mini_backend_server_connection_is_connected(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection)
 {
-    return connection != NULL && connection->handshake_finished
+    if (server == NULL || connection == NULL) {
+        return 0;
+    }
+    pthread_mutex_lock(&server->lock);
+    int connected = connection->handshake_finished
         && !connection->connection_closed;
+    pthread_mutex_unlock(&server->lock);
+    return connected;
 }
 
 int
 mini_backend_server_connection_is_closed(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection)
 {
-    return connection == NULL || connection->connection_closed;
+    if (server == NULL || connection == NULL) {
+        return 1;
+    }
+    pthread_mutex_lock(&server->lock);
+    int closed = connection->connection_closed;
+    pthread_mutex_unlock(&server->lock);
+    return closed;
 }
 
 int
 mini_backend_server_connection_last_error(
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection)
 {
-    return connection != NULL ? connection->last_error_code : 0;
+    if (server == NULL || connection == NULL) {
+        return 0;
+    }
+    pthread_mutex_lock(&server->lock);
+    int error_code = connection->last_error_code;
+    pthread_mutex_unlock(&server->lock);
+    return error_code;
 }
 
 static void
@@ -1067,7 +1628,7 @@ mini_backend_server_format_address(const struct sockaddr *address,
 
 int
 mini_backend_server_connection_get_snapshot(
-    const mini_backend_server_t *server,
+    mini_backend_server_t *server,
     const mini_backend_server_connection_t *connection,
     mini_backend_snapshot_t *snapshot)
 {
@@ -1077,11 +1638,37 @@ mini_backend_server_connection_get_snapshot(
         return EINVAL;
     }
 
+    xqc_cid_t cid;
+    struct sockaddr_storage local_address;
+    struct sockaddr_storage peer_address;
+    socklen_t local_address_len = 0;
+    socklen_t peer_address_len = 0;
+    memset(&local_address, 0, sizeof(local_address));
+    memset(&peer_address, 0, sizeof(peer_address));
+
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->snapshot_time_us = xqc_now();
+    pthread_mutex_lock(&server->lock);
     snapshot->handshake_finished = connection->handshake_finished;
-    xqc_conn_stats_t stats = xqc_conn_get_stats(server->ctx.engine,
-        &connection->cid);
+    memcpy(&cid, &connection->cid, sizeof(cid));
+    if (connection->local_addr != NULL
+        && connection->local_addrlen <= sizeof(local_address))
+    {
+        local_address_len = connection->local_addrlen;
+        memcpy(&local_address, connection->local_addr, local_address_len);
+    }
+    if (connection->peer_addr != NULL
+        && connection->peer_addrlen <= sizeof(peer_address))
+    {
+        peer_address_len = connection->peer_addrlen;
+        memcpy(&peer_address, connection->peer_addr, peer_address_len);
+    }
+    pthread_mutex_unlock(&server->lock);
+
+    mini_backend_server_wake(server);
+    pthread_mutex_lock(&server->engine_lock);
+    xqc_conn_stats_t stats = xqc_conn_get_stats(server->ctx.engine, &cid);
+    pthread_mutex_unlock(&server->engine_lock);
     snapshot->multipath_mode = stats.enable_multipath;
     snapshot->multipath_state = stats.mp_state;
     snapshot->packets_sent = stats.send_count;
@@ -1119,12 +1706,12 @@ mini_backend_server_connection_get_snapshot(
             source->path_recv_effective_bytes;
         path->srtt_us = source->path_srtt;
         mini_backend_server_format_address(
-            (const struct sockaddr *)connection->local_addr,
-            connection->local_addrlen, path->local_address,
+            (const struct sockaddr *)&local_address,
+            local_address_len, path->local_address,
             sizeof(path->local_address));
         mini_backend_server_format_address(
-            (const struct sockaddr *)connection->peer_addr,
-            connection->peer_addrlen, path->peer_address,
+            (const struct sockaddr *)&peer_address,
+            peer_address_len, path->peer_address,
             sizeof(path->peer_address));
         if (path->path_state == 2) {
             snapshot->active_path_count++;
