@@ -494,6 +494,51 @@ mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
     return 1;
 }
 
+/* The accepting endpoint normally completes after QUIC acknowledges every
+ * reverse FIN.  A compliant opener can instead receive the verified receipt
+ * and immediately close the connection with H3_NO_ERROR.  In that ordering,
+ * CONNECTION_CLOSE may overtake a reverse-FIN ACK on another path.  Treat the
+ * peer's graceful close as the final acknowledgement only after the complete
+ * payload has reached the application and the receipt plus every reverse FIN
+ * have already been submitted to XQUIC. */
+static int
+mini_stream_accept_exchange_submitted_locked(mini_backend_stream_t *stream,
+    uint64_t *total_bytes)
+{
+    if (stream->role != MINI_STREAM_ENDPOINT_ACCEPT) {
+        return 0;
+    }
+
+    uint64_t total = 0;
+    int ready = mini_stream_all_forward_finished_locked(stream, &total);
+    if (ready <= 0) {
+        return ready;
+    }
+    if (mini_stream_reorder_has_pending(&stream->reorder)
+        || stream->reorder.next_offset != total
+        || stream->delivery_head != NULL
+        || stream->delivery_queue_bytes != 0
+        || stream->accepted_bytes != total)
+    {
+        return 0;
+    }
+
+    mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
+    if (lane0 == NULL || lane0->receipt_bytes != MINI_STREAM_RECEIPT_SIZE
+        || lane0->receipt_sent != lane0->receipt_bytes)
+    {
+        return 0;
+    }
+    uint32_t i;
+    for (i = 0; i < stream->lane_count; i++) {
+        if (!stream->lanes[i].reverse_fin_submitted) {
+            return 0;
+        }
+    }
+    *total_bytes = total;
+    return 1;
+}
+
 static void
 mini_stream_build_receipt_locked(mini_backend_stream_t *stream,
     uint32_t status, uint64_t total_bytes, uint64_t detail,
@@ -1404,7 +1449,18 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
     }
     pthread_mutex_lock(&stream->lock);
     stream->connection_closed = 1;
-    if (!stream->completed) {
+    uint64_t total_bytes = 0;
+    int graceful_completion = error_code == 0 && !stream->completed
+        && stream->error_code == 0
+        && mini_stream_accept_exchange_submitted_locked(stream,
+            &total_bytes) > 0;
+    if (graceful_completion) {
+        stream->peer_received_bytes = total_bytes;
+        stream->accepted_bytes = total_bytes;
+        stream->completed = 1;
+        stream->completed_time_us = mini_stream_now();
+        mini_stream_signal_locked(stream);
+    } else if (!stream->completed) {
         (void)mini_stream_fail_locked(stream,
             error_code != 0 ? error_code : ECONNRESET);
     }
@@ -1820,10 +1876,14 @@ mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
         lane->reverse_fin_acked = 1;
     }
     if (lane->stream->role == MINI_STREAM_ENDPOINT_ACCEPT) {
+        uint64_t total_bytes = 0;
+        int final_exchange_submitted = stats.stream_err == 0
+            && mini_stream_accept_exchange_submitted_locked(lane->stream,
+                &total_bytes) > 0;
         lane->graceful_closed = lane->protocol_fin_received
             && lane->transport_fin_received
             && lane->reverse_fin_submitted
-            && lane->reverse_fin_acked;
+            && (lane->reverse_fin_acked || final_exchange_submitted);
     } else {
         lane->graceful_closed = lane->protocol_fin_sent
             && lane->send_fin_submitted

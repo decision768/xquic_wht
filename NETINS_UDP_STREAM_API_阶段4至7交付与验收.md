@@ -108,7 +108,7 @@ netins_udp_stream_close(stream);
 |---|---|
 | `flush()` 成功 | 本地队列已提交给 XQUIC；不证明对端已收到 |
 | 发送端 `finish()` 成功 | 对端确认总长度和摘要一致，所有 lane 的反向 FIN 已完成 |
-| 接收端 `finish()` 成功 | 数据已交付应用，回执及反向 FIN 已被 QUIC ACK，可安全立即 close |
+| 接收端 `finish()` 成功 | 数据已交付应用，回执及反向 FIN 已被 QUIC ACK；或合规发送端在收到已提交的最终回执后以 `H3_NO_ERROR` 正常关闭 |
 | 本地 `reset(code)` | 未完成流进入 RESET；后续 write/flush/finish 返回取消错误 |
 | lane 数/session/offset/FIN 不一致 | 流进入 ERROR，通常为 `EPROTO` |
 | 连接或 lane 提前关闭 | 流进入 ERROR，通常为 `ECONNRESET` |

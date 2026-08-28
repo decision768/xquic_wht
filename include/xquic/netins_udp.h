@@ -497,6 +497,9 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * opener writes; the accepter receives through on_data.  Both sides call
  * finish(): the opener waits for a verified peer receipt, while the accepter
  * waits for peer FIN and for the receipt/reverse FINs to be QUIC-acknowledged.
+ * If a compliant opener closes the connection with H3_NO_ERROR immediately
+ * after receiving the verified receipt, that graceful close also completes
+ * the accepter after all receipt/reverse-FIN bytes have been submitted.
  * A logical stream may aggregate
  * exactly NETINS_UDP_STREAM_LANE_COUNT H3 Extended Bytestream lanes and
  * delivers
