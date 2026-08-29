@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define MINI_STREAM_PROTOCOL_VERSION 3U
+#define MINI_STREAM_PROTOCOL_VERSION 4U
 #define MINI_STREAM_LANE_HEADER_SIZE 40U
 #define MINI_STREAM_FRAME_HEADER_SIZE 24U
 #define MINI_STREAM_RECEIPT_SIZE 48U
@@ -18,6 +18,11 @@ typedef enum mini_stream_frame_type_e {
     MINI_STREAM_FRAME_FIN = 2
 } mini_stream_frame_type_t;
 
+typedef enum mini_stream_direction_e {
+    MINI_STREAM_DIRECTION_CLIENT_TO_SERVER = 1,
+    MINI_STREAM_DIRECTION_SERVER_TO_CLIENT = 2
+} mini_stream_direction_t;
+
 typedef enum mini_stream_receipt_status_e {
     MINI_STREAM_RECEIPT_OK = 0,
     MINI_STREAM_RECEIPT_PROTOCOL_ERROR = 1,
@@ -25,7 +30,9 @@ typedef enum mini_stream_receipt_status_e {
     MINI_STREAM_RECEIPT_DIGEST_ERROR = 3,
     MINI_STREAM_RECEIPT_RESOURCE_ERROR = 4,
     /* A cumulative sender credit carried on lane 0 before the final receipt. */
-    MINI_STREAM_RECEIPT_CREDIT = 5
+    MINI_STREAM_RECEIPT_CREDIT = 5,
+    /* The accepting sender has parsed and attached all logical lanes. */
+    MINI_STREAM_RECEIPT_READY = 6
 } mini_stream_receipt_status_t;
 
 typedef struct mini_stream_lane_header_s {
@@ -33,6 +40,7 @@ typedef struct mini_stream_lane_header_s {
     uint32_t lane_index;
     uint32_t lane_count;
     uint32_t max_frame_payload;
+    uint32_t direction;
 } mini_stream_lane_header_t;
 
 typedef struct mini_stream_frame_header_s {

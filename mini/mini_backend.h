@@ -115,6 +115,7 @@ typedef struct mini_backend_config_s {
 } mini_backend_config_t;
 
 typedef struct mini_backend_stream_config_s {
+    uint32_t direction;
     uint32_t flags;
     size_t send_queue_size;
     size_t receive_queue_size;

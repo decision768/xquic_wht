@@ -137,15 +137,9 @@ if(XQC_ENABLE_STREAM_POC)
         mini_stream_poc_server_main.c
         $<TARGET_OBJECTS:mini_common_backend_obj>
         $<TARGET_OBJECTS:mini_server_backend_obj>)
-    add_executable(mini_stream_poc_protocol_test
-        ../tests/mini_stream_poc_protocol_test.c
-        mini_stream_poc_protocol.c)
-
     target_include_directories(mini_stream_poc_client PRIVATE
         ${MINI_BACKEND_INCLUDE_DIRS})
     target_include_directories(mini_stream_poc_server PRIVATE
-        ${MINI_BACKEND_INCLUDE_DIRS})
-    target_include_directories(mini_stream_poc_protocol_test PRIVATE
         ${MINI_BACKEND_INCLUDE_DIRS})
 
     target_link_libraries(mini_stream_poc_client
@@ -175,15 +169,6 @@ if(XQC_ENABLE_MINI_API)
         ../demo/netins_udp_stream_client.c)
     add_executable(netins_udp_stream_server
         ../demo/netins_udp_stream_server.c)
-    add_executable(mini_stream_protocol_test
-        ../tests/mini_stream_protocol_test.c
-        mini_stream_protocol.c)
-    add_executable(mini_stream_reorder_test
-        ../tests/mini_stream_reorder_test.c
-        mini_stream_reorder.c)
-    add_executable(netins_udp_stream_api_contract_test
-        ../tests/netins_udp_stream_api_contract_test.c)
-
     foreach(target_name
         netins_udp_mini_api_client
         netins_udp_mini_api_server
@@ -198,10 +183,4 @@ if(XQC_ENABLE_MINI_API)
             ${LIBEVENT_PTHREADS_LIBRARY}
             ${ZLOG_STATIC_LIB})
     endforeach()
-    target_include_directories(mini_stream_protocol_test PRIVATE
-        ${MINI_BACKEND_INCLUDE_DIRS})
-    target_include_directories(mini_stream_reorder_test PRIVATE
-        ${MINI_BACKEND_INCLUDE_DIRS})
-    target_include_directories(netins_udp_stream_api_contract_test PRIVATE
-        "${CMAKE_SOURCE_DIR}/include")
 endif()

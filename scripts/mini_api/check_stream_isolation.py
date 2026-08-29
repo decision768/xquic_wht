@@ -25,6 +25,8 @@ def main() -> int:
         "server_backend": root / "mini/mini_server_backend.c",
         "stream_backend": root / "mini/mini_stream_backend.c",
         "stream_protocol": root / "mini/mini_stream_protocol.h",
+        "file_client_demo": root / "demo/netins_udp_mini_api_client.c",
+        "stream_client_demo": root / "demo/netins_udp_stream_client.c",
         "stream_server_demo": root / "demo/netins_udp_stream_server.c",
         "stream_acceptance": root / "tests/stream_api_acceptance.py",
         "api": root / "src/netins_udp/netins_udp_api.c",
@@ -121,7 +123,7 @@ def main() -> int:
             r"NETINS_UDP_STREAM_LANE_COUNT\s+4U.*?"
             r"typedef\s+struct\s+netins_udp_stream_config_s\s*\{\s*"
             r"uint32_t\s+struct_size;\s*uint32_t\s+api_version;\s*"
-            r".*?uint32_t\s+reserved32;\s*uint32_t\s+flags;",
+            r".*?uint32_t\s+direction;\s*uint32_t\s+flags;",
         ),
         (
             "server buffers Bytestreams that arrive before stream accept",
@@ -137,12 +139,20 @@ def main() -> int:
             r"pending->data_len.*?\|\|\s*fin",
         ),
         (
-            "opener waits for receiver credit before payload and FIN",
+            "sender waits for receiver credit before payload and FIN",
             "stream_backend",
-            r"mini_stream_pump_open_lane_locked\s*\(.*?"
+            r"mini_stream_pump_sender_lane_locked\s*\(.*?"
             r"!stream->peer_credit_received\s*\|\|\s*"
             r"!chunk->credit_reserved.*?"
             r"!stream->peer_credit_received.*?protocol_fin_sent",
+        ),
+        (
+            "opener finishes each lane header before payload",
+            "stream_backend",
+            r"mini_stream_pump_sender_lane_locked\s*\(.*?"
+            r"stream->role\s*==\s*MINI_STREAM_ENDPOINT_OPEN.*?"
+            r"lane->lane_header_sent\s*!=\s*"
+            r"MINI_STREAM_LANE_HEADER_SIZE",
         ),
         (
             "sender reserves cumulative credit in global enqueue order",
@@ -166,7 +176,7 @@ def main() -> int:
             "stream_backend",
             r"mini_stream_process_locked\s*\(.*?"
             r"mini_stream_reserve_send_credit_locked\(stream\).*?"
-            r"mini_stream_pump_open_lane_locked",
+            r"mini_stream_pump_sender_lane_locked",
         ),
         (
             "credit records carry record limits, not final payload digests",
@@ -181,7 +191,7 @@ def main() -> int:
         (
             "receiver replenishes cumulative credit after delivery",
             "stream_backend",
-            r"mini_stream_pump_accept_credit_locked\s*\(.*?"
+            r"mini_stream_pump_receiver_credit_locked\s*\(.*?"
             r"stream->accepted_bytes\s*\+\s*stream->receive_queue_limit"
             r".*?mini_stream_delivery_worker\s*\(.*?callback\(.*?"
             r"stream->accepted_bytes\s*=.*?mini_stream_wake\(stream\)",
@@ -205,7 +215,7 @@ def main() -> int:
         (
             "stream wire protocol carries independent record credit",
             "stream_protocol",
-            r"MINI_STREAM_PROTOCOL_VERSION\s+3U.*?"
+            r"MINI_STREAM_PROTOCOL_VERSION\s+4U.*?"
             r"MINI_STREAM_RECORD_MEMORY_CHARGE\s+256U",
         ),
         (
@@ -390,6 +400,41 @@ def main() -> int:
             "stream_server_demo",
             r"receiver->received\s*=\s*offset\s*\+\s*data_len.*?"
             r"stream_api_progress.*?fflush\(stdout\)",
+        ),
+        (
+            "stream client emits the GET fault-test progress marker after data",
+            "stream_client_demo",
+            r"receiver->received\s*=\s*offset\s*\+\s*data_len.*?"
+            r"stream_api_progress.*?direction=get.*?fflush\(stdout\)",
+        ),
+        (
+            "file demo defaults POST to balanced and normalizes GET adaptive",
+            "file_client_demo",
+            r"options->scheduler\s*=\s*NETINS_UDP_SCHEDULER_BALANCED.*?"
+            r"options->direction\s*==\s*NETINS_UDP_TRANSFER_GET.*?"
+            r"options->scheduler\s*=\s*NETINS_UDP_SCHEDULER_ADAPTIVE",
+        ),
+        (
+            "stream demo defaults POST to balanced and GET to adaptive",
+            "stream_client_demo",
+            r"options->direction\s*=\s*"
+            r"NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER.*?"
+            r"options->scheduler\s*=\s*NETINS_UDP_SCHEDULER_BALANCED.*?"
+            r"NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT.*?"
+            r"options->scheduler\s*=\s*NETINS_UDP_SCHEDULER_ADAPTIVE",
+        ),
+        (
+            "acceptance covers both half-duplex directions by default",
+            "stream_acceptance",
+            r"--direction.*?choices=\(\"both\",\s*\"post\",\s*\"get\"\)"
+            r".*?default=\"both\".*?directions\s*=\s*\(\"post\",\s*\"get\"\)"
+            r".*?case\.direction",
+        ),
+        (
+            "release acceptance refuses a single transfer direction",
+            "stream_acceptance",
+            r"args\.release\s+and\s+args\.direction\s*!=\s*\"both\".*?"
+            r"--release requires --direction both",
         ),
     )
 

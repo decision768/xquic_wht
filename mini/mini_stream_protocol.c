@@ -62,7 +62,7 @@ mini_stream_lane_header_encode(const mini_stream_lane_header_t *header,
     mini_stream_write_u32(out + 24, header->lane_index);
     mini_stream_write_u32(out + 28, header->lane_count);
     mini_stream_write_u32(out + 32, header->max_frame_payload);
-    mini_stream_write_u32(out + 36, 0);
+    mini_stream_write_u32(out + 36, header->direction);
 }
 
 int
@@ -75,7 +75,11 @@ mini_stream_lane_header_decode(
             sizeof(mini_stream_lane_magic)) != 0
         || mini_stream_read_u32(data + 8) != MINI_STREAM_PROTOCOL_VERSION
         || mini_stream_read_u32(data + 12) != MINI_STREAM_LANE_HEADER_SIZE
-        || mini_stream_read_u32(data + 36) != 0)
+        || mini_stream_read_u64(data + 16) == 0
+        || (mini_stream_read_u32(data + 36)
+                != MINI_STREAM_DIRECTION_CLIENT_TO_SERVER
+            && mini_stream_read_u32(data + 36)
+                != MINI_STREAM_DIRECTION_SERVER_TO_CLIENT))
     {
         return -1;
     }
@@ -83,6 +87,7 @@ mini_stream_lane_header_decode(
     header->lane_index = mini_stream_read_u32(data + 24);
     header->lane_count = mini_stream_read_u32(data + 28);
     header->max_frame_payload = mini_stream_read_u32(data + 32);
+    header->direction = mini_stream_read_u32(data + 36);
     return 0;
 }
 

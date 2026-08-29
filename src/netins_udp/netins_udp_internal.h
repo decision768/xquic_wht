@@ -56,6 +56,7 @@ struct netins_udp_stream_s {
     uint32_t magic;
     netins_udp_t *connection;
     mini_backend_stream_t *backend_stream;
+    uint32_t direction;
     uint32_t flags;
     netins_udp_stream_data_cb on_data;
     void *user_data;

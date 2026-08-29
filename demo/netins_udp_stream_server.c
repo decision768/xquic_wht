@@ -15,6 +15,8 @@ typedef struct stream_demo_receiver_s {
     size_t client_index;
     uint64_t received;
     uint64_t first_bad_offset;
+    uint64_t eagain_count;
+    uint64_t partial_count;
     int progress_reported;
     int mismatch;
 } stream_demo_receiver_t;
@@ -22,14 +24,21 @@ typedef struct stream_demo_receiver_s {
 typedef struct stream_demo_server_options_s {
     const char *listen_ip;
     uint64_t expected_bytes;
+    size_t send_queue_size;
     size_t receive_queue_size;
+    size_t write_chunk_size;
     size_t client_count;
     uint32_t seed;
+    uint32_t flags;
+    uint32_t write_timeout_ms;
     uint32_t finish_timeout_ms;
     uint32_t callback_delay_ms;
     uint32_t accept_delay_ms;
     uint16_t port;
+    uint32_t direction;
 } stream_demo_server_options_t;
+
+#define STREAM_DEMO_CHUNK (256U * 1024U)
 
 static void
 stream_demo_server_usage(const char *program)
@@ -37,8 +46,11 @@ stream_demo_server_usage(const char *program)
     fprintf(stderr,
         "usage: %s LISTEN_IP PORT EXPECTED_BYTES SEED"
         " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]"
+        " [--get|--post] [--send-queue-bytes N] [--write-chunk-size N]"
+        " [--write-timeout-ms N] [--flags N]"
         " [--callback-delay-ms N] [--accept-delay-ms N]\n"
-        "  lanes are fixed at %u; delay options are test-only and default to 0\n",
+        "  lanes are fixed at %u; direction defaults to POST (server receives)\n"
+        "  GET makes the server send with the fixed adaptive scheduler\n",
         program, NETINS_UDP_STREAM_DEMO_LANE_COUNT);
 }
 
@@ -72,9 +84,13 @@ stream_demo_parse_args(int argc, char **argv,
     }
     memset(options, 0, sizeof(*options));
     options->listen_ip = argv[1];
+    options->send_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     options->receive_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    options->write_chunk_size = STREAM_DEMO_CHUNK;
     options->client_count = 1;
+    options->write_timeout_ms = 60000;
     options->finish_timeout_ms = 60000;
+    options->direction = NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
     if (stream_demo_parse_u64(argv[2], UINT16_MAX, &number) != 0
         || number == 0)
     {
@@ -90,6 +106,50 @@ stream_demo_parse_args(int argc, char **argv,
     options->seed = (uint32_t)number;
 
     for (i = 5; i < argc; i++) {
+        if (strcmp(argv[i], "--get") == 0) {
+            options->direction =
+                NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT;
+            continue;
+        }
+        if (strcmp(argv[i], "--post") == 0) {
+            options->direction =
+                NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
+            continue;
+        }
+        if (strcmp(argv[i], "--send-queue-bytes") == 0
+            || strcmp(argv[i], "--write-chunk-size") == 0
+            || strcmp(argv[i], "--write-timeout-ms") == 0
+            || strcmp(argv[i], "--flags") == 0)
+        {
+            const char *option = argv[i];
+            if (++i >= argc
+                || stream_demo_parse_u64(argv[i], UINT64_MAX, &number) != 0)
+            {
+                return -1;
+            }
+            if (strcmp(option, "--send-queue-bytes") == 0) {
+                if (number > SIZE_MAX) {
+                    return -1;
+                }
+                options->send_queue_size = (size_t)number;
+            } else if (strcmp(option, "--write-chunk-size") == 0) {
+                if (number == 0 || number > SIZE_MAX) {
+                    return -1;
+                }
+                options->write_chunk_size = (size_t)number;
+            } else if (strcmp(option, "--write-timeout-ms") == 0) {
+                if (number > UINT32_MAX) {
+                    return -1;
+                }
+                options->write_timeout_ms = (uint32_t)number;
+            } else {
+                if (number > UINT32_MAX) {
+                    return -1;
+                }
+                options->flags = (uint32_t)number;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--callback-delay-ms") == 0
             || strcmp(argv[i], "--accept-delay-ms") == 0)
         {
@@ -139,6 +199,13 @@ stream_demo_parse_args(int argc, char **argv,
     return 0;
 }
 
+static const char *
+stream_demo_direction_name(uint32_t direction)
+{
+    return direction == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT
+        ? "get" : "post";
+}
+
 static void
 stream_demo_sleep_ms(uint32_t delay_ms)
 {
@@ -153,6 +220,59 @@ stream_demo_sleep_ms(uint32_t delay_ms)
 }
 
 static void
+stream_demo_fill(unsigned char *data, size_t data_len, uint64_t offset,
+    uint32_t seed)
+{
+    size_t i;
+    for (i = 0; i < data_len; i++) {
+        data[i] = (unsigned char)(seed + (offset + i) * 131U);
+    }
+}
+
+static int
+stream_demo_send(netins_udp_stream_t *stream,
+    const stream_demo_server_options_t *options,
+    stream_demo_receiver_t *state, unsigned char *buffer)
+{
+    uint64_t offset = 0;
+    while (offset < options->expected_bytes) {
+        size_t count = options->expected_bytes - offset
+                < options->write_chunk_size
+            ? (size_t)(options->expected_bytes - offset)
+            : options->write_chunk_size;
+        stream_demo_fill(buffer, count, offset, options->seed);
+        size_t consumed = 0;
+        while (consumed < count) {
+            size_t accepted = 0;
+            size_t requested = count - consumed;
+            int write_result = netins_udp_stream_write(stream,
+                buffer + consumed, requested, options->write_timeout_ms,
+                &accepted);
+            consumed += accepted;
+            offset += accepted;
+            if (accepted < requested) {
+                state->partial_count++;
+            }
+            if (write_result != 0 && errno == EAGAIN
+                && (options->flags & NETINS_UDP_STREAM_FLAG_NONBLOCK) != 0)
+            {
+                state->eagain_count++;
+                stream_demo_sleep_ms(1);
+                continue;
+            }
+            if (write_result != 0) {
+                return -1;
+            }
+            if (accepted == 0) {
+                errno = EIO;
+                return -1;
+            }
+        }
+    }
+    return 0;
+}
+
+static void
 stream_demo_print_snapshot(netins_udp_stream_t *stream)
 {
     netins_udp_stream_snapshot_t snapshot =
@@ -162,14 +282,21 @@ stream_demo_print_snapshot(netins_udp_stream_t *stream)
         return;
     }
     printf("[stream_api_snapshot] role=server state=%d lanes=%u"
-           " accepted=%" PRIu64 " reorder=%" PRIu64
+           " accepted=%" PRIu64 " peer_received=%" PRIu64
+           " send_queue=%" PRIu64 " send_high_water=%" PRIu64
+           " reorder=%" PRIu64
            " reorder_high_water=%" PRIu64
+           " records_enqueued=%" PRIu64
+           " records_submitted=%" PRIu64
            " records_received=%" PRIu64
            " records_delivered=%" PRIu64
            " preaccept_lanes=%u"
            " last_error=%d app_error=%" PRIu64 "\n",
         snapshot.state, snapshot.lane_count, snapshot.accepted_bytes,
-        snapshot.reorder_bytes, snapshot.reorder_high_water,
+        snapshot.peer_received_bytes, snapshot.send_queue_bytes,
+        snapshot.send_queue_high_water, snapshot.reorder_bytes,
+        snapshot.reorder_high_water, snapshot.records_enqueued,
+        snapshot.records_submitted,
         snapshot.records_received, snapshot.records_delivered,
         snapshot.preaccept_lane_count,
         snapshot.last_error, snapshot.app_error_code);
@@ -229,6 +356,7 @@ main(int argc, char **argv)
         sizeof(*streams));
     stream_demo_receiver_t *receivers =
         calloc(options.client_count, sizeof(*receivers));
+    unsigned char *buffer = NULL;
 
     if (connections == NULL || streams == NULL || receivers == NULL
         || netins_udp_init() != 0)
@@ -239,11 +367,24 @@ main(int argc, char **argv)
         free(connections);
         return 1;
     }
+    if (options.direction
+            == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT
+        && options.expected_bytes != 0)
+    {
+        buffer = malloc(options.write_chunk_size);
+        if (buffer == NULL) {
+            perror("allocate stream buffer");
+            goto cleanup;
+        }
+    }
     server = netins_udp_new(NETINS_UDP_ROLE_SERVER);
     int enabled = 1;
+    int scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     if (server == NULL
         || netins_udp_set_opt(server, NETINS_UDP_OPT_STREAM_MODE,
             &enabled, sizeof(enabled)) != 0
+        || netins_udp_set_opt(server, NETINS_UDP_OPT_SCHEDULER,
+            &scheduler, sizeof(scheduler)) != 0
         || netins_udp_listen(server, options.listen_ip, options.port) != 0)
     {
         perror("listen stream server");
@@ -251,9 +392,12 @@ main(int argc, char **argv)
     }
     printf("[stream_api_ready] listen=%s port=%u\n",
         options.listen_ip, (unsigned)options.port);
-    printf("[stream_api_config] role=server lanes=%u receive_queue=%zu"
+    printf("[stream_api_config] role=server direction=%s lanes=%u"
+           " scheduler=adaptive send_queue=%zu receive_queue=%zu"
            " callback_delay_ms=%u accept_delay_ms=%u\n",
-        NETINS_UDP_STREAM_DEMO_LANE_COUNT, options.receive_queue_size,
+        stream_demo_direction_name(options.direction),
+        NETINS_UDP_STREAM_DEMO_LANE_COUNT, options.send_queue_size,
+        options.receive_queue_size,
         options.callback_delay_ms, options.accept_delay_ms);
     fflush(stdout);
     for (size_t i = 0; i < options.client_count; i++) {
@@ -274,13 +418,29 @@ main(int argc, char **argv)
         receivers[i].first_bad_offset = UINT64_MAX;
         netins_udp_stream_config_t config =
             NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+        config.direction = options.direction;
+        config.flags = options.flags;
+        config.send_queue_size = options.send_queue_size;
         config.receive_queue_size = options.receive_queue_size;
-        config.on_data = stream_demo_on_data;
-        config.user_data = &receivers[i];
+        if (options.direction
+            == NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER)
+        {
+            config.on_data = stream_demo_on_data;
+            config.user_data = &receivers[i];
+        }
         if (netins_udp_stream_accept(connections[i], &config,
                 &streams[i]) != 0)
         {
             perror("accept data stream");
+            goto cleanup;
+        }
+        if (options.direction
+                == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT
+            && stream_demo_send(streams[i], &options, &receivers[i],
+                buffer) != 0)
+        {
+            perror("write data stream");
+            stream_demo_print_snapshot(streams[i]);
             goto cleanup;
         }
     }
@@ -298,17 +458,34 @@ main(int argc, char **argv)
             continue;
         }
         stream_demo_print_snapshot(streams[i]);
-        int success = !receivers[i].mismatch
-            && (options.expected_bytes == 0
-                || receivers[i].received == options.expected_bytes)
-            && stream_result.peer_received_bytes == receivers[i].received;
-        printf("[stream_api_result] role=server client=%zu success=%d"
-               " lanes=%u received=%" PRIu64 " peer_received=%" PRIu64
-               " first_bad_offset=%" PRIu64 " elapsed_us=%" PRIu64 "\n",
-            i, success, NETINS_UDP_STREAM_DEMO_LANE_COUNT,
-            receivers[i].received,
+        int success = stream_result.accepted_bytes == options.expected_bytes
+            && stream_result.peer_received_bytes == options.expected_bytes;
+        if (options.direction
+            == NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER)
+        {
+            success = success && !receivers[i].mismatch
+                && receivers[i].received == options.expected_bytes;
+        }
+        uint64_t received_bytes = receivers[i].received;
+        uint64_t throughput_bytes = options.direction
+                == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT
+            ? stream_result.peer_received_bytes : received_bytes;
+        double throughput_mbps = stream_result.elapsed_us == 0 ? 0.0
+            : (double)throughput_bytes * 8.0
+                / (double)stream_result.elapsed_us;
+        printf("[stream_api_result] role=server client=%zu direction=%s"
+               " success=%d lanes=%u accepted=%" PRIu64
+               " received=%" PRIu64 " peer_received=%" PRIu64
+               " first_bad_offset=%" PRIu64 " elapsed_us=%" PRIu64
+               " throughput_mbps=%.3f eagain=%" PRIu64
+               " partial=%" PRIu64 "\n",
+            i, stream_demo_direction_name(options.direction), success,
+            NETINS_UDP_STREAM_DEMO_LANE_COUNT,
+            stream_result.accepted_bytes, received_bytes,
             stream_result.peer_received_bytes,
-            receivers[i].first_bad_offset, stream_result.elapsed_us);
+            receivers[i].first_bad_offset, stream_result.elapsed_us,
+            throughput_mbps, receivers[i].eagain_count,
+            receivers[i].partial_count);
         if (!success) {
             all_success = 0;
         }
@@ -316,6 +493,7 @@ main(int argc, char **argv)
     result = all_success ? 0 : 1;
 
 cleanup:
+    free(buffer);
     for (size_t i = 0; i < options.client_count; i++) {
         netins_udp_stream_close(streams[i]);
         netins_udp_close(connections[i]);

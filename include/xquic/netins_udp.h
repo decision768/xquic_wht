@@ -17,7 +17,7 @@ extern "C" {
 #endif
 
 #define NETINS_UDP_API_VERSION 1U
-#define NETINS_UDP_API_RELEASE_VERSION "6.4"
+#define NETINS_UDP_API_RELEASE_VERSION "6.5"
 #define NETINS_UDP_MAX_PATHS 8U
 #define NETINS_UDP_MAX_INTERFACES 8U
 #define NETINS_UDP_INTERFACE_NAME_LEN 64U
@@ -346,6 +346,14 @@ typedef enum netins_udp_stream_flag_e {
     NETINS_UDP_STREAM_FLAG_NONBLOCK = 1U << 0
 } netins_udp_stream_flag_t;
 
+/* Direction of one half-duplex logical data stream.  A zero configuration
+ * value is accepted as a legacy alias for CLIENT_TO_SERVER, but is never
+ * transmitted on the wire. */
+typedef enum netins_udp_stream_direction_e {
+    NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER = 1,
+    NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT = 2
+} netins_udp_stream_direction_t;
+
 typedef enum netins_udp_stream_endpoint_e {
     NETINS_UDP_STREAM_ENDPOINT_OPEN = 1,
     NETINS_UDP_STREAM_ENDPOINT_ACCEPT = 2
@@ -369,8 +377,9 @@ typedef void (*netins_udp_stream_data_cb)(
 typedef struct netins_udp_stream_config_s {
     uint32_t struct_size;
     uint32_t api_version;
-    /* Reserved; lane width is fixed by NETINS_UDP_STREAM_LANE_COUNT. */
-    uint32_t reserved32;
+    /* One netins_udp_stream_direction_t value.  Kept uint32_t to preserve the
+     * ABI layout of the former reserved32 field. */
+    uint32_t direction;
     uint32_t flags;
     /* Payload budget; tiny records also consume a bounded internal record
      * charge so allocator/list overhead cannot exceed the configured scale. */
@@ -383,7 +392,8 @@ typedef struct netins_udp_stream_config_s {
 
 #define NETINS_UDP_STREAM_CONFIG_INITIALIZER \
     { sizeof(netins_udp_stream_config_t), NETINS_UDP_API_VERSION, \
-      0, NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
+      NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER, \
+      NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
       NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, NULL, NULL, {0} }
 
 typedef struct netins_udp_stream_result_s {
@@ -493,13 +503,14 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
     const netins_udp_serve_config_t *config);
 
 /*
- * Data streams are unidirectional logical transfers in API version 1.  The
- * opener writes; the accepter receives through on_data.  Both sides call
- * finish(): the opener waits for a verified peer receipt, while the accepter
+ * Data streams are half-duplex logical transfers in API version 1.  Direction
+ * selects either the client opener or the server accepter as sender.  The
+ * sender calls stream_write(); the receiver supplies on_data.  Both sides call
+ * finish(): the sender waits for a verified peer receipt, while the receiver
  * waits for peer FIN and for the receipt/reverse FINs to be QUIC-acknowledged.
- * If a compliant opener closes the connection with H3_NO_ERROR immediately
+ * If a compliant sender closes the connection with H3_NO_ERROR immediately
  * after receiving the verified receipt, that graceful close also completes
- * the accepter after all receipt/reverse-FIN bytes have been submitted.
+ * the receiver after all receipt/reverse-FIN bytes have been submitted.
  * A logical stream may aggregate
  * exactly NETINS_UDP_STREAM_LANE_COUNT H3 Extended Bytestream lanes and
  * delivers
@@ -507,7 +518,7 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * on_data runs on a bounded delivery worker, outside the XQUIC event thread
  * and outside the stream mutex.  Its memory is valid only during the
  * callback.  The receiver advertises cumulative payload and record credit
- * only after on_data returns, so a slow callback backpressures the opener at
+ * only after on_data returns, so a slow callback backpressures the sender at
  * receive_queue_size without allowing tiny records to grow allocator/list
  * overhead without bound.  The callback must not close or wait on the same
  * stream.

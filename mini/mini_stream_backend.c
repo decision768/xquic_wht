@@ -19,6 +19,11 @@
 typedef struct mini_stream_send_chunk_s mini_stream_send_chunk_t;
 typedef struct mini_stream_lane_s mini_stream_lane_t;
 
+typedef enum mini_stream_data_role_e {
+    MINI_STREAM_DATA_SENDER = 1,
+    MINI_STREAM_DATA_RECEIVER = 2
+} mini_stream_data_role_t;
+
 struct mini_stream_send_chunk_s {
     mini_stream_send_chunk_t *next;
     mini_stream_send_chunk_t *credit_next;
@@ -77,6 +82,8 @@ struct mini_backend_stream_s {
     xqc_cid_t cid;
     struct event_base *event_base;
     int role;
+    int data_role;
+    uint32_t direction;
     uint32_t flags;
     uint32_t lane_count;
     size_t send_queue_limit;
@@ -127,6 +134,11 @@ struct mini_backend_stream_s {
     uint64_t receive_record_capacity;
     uint64_t receive_records_buffered;
     int peer_credit_received;
+    unsigned char ready_record[MINI_STREAM_RECEIPT_SIZE];
+    size_t ready_record_bytes;
+    size_t ready_record_sent;
+    int ready_record_built;
+    int peer_ready_received;
     uint64_t digest;
     uint64_t start_time_us;
     uint64_t completed_time_us;
@@ -225,6 +237,7 @@ mini_stream_fail_locked(mini_backend_stream_t *stream, int error_code)
         stream->completed_time_us = mini_stream_now();
     }
     mini_stream_signal_locked(stream);
+    pthread_cond_broadcast(&stream->delivery_cond);
     return -1;
 }
 
@@ -378,19 +391,27 @@ mini_stream_reserve_send_credit_locked(mini_backend_stream_t *stream)
 }
 
 static int
-mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
+mini_stream_pump_open_lane_header_locked(mini_stream_lane_t *lane)
+{
+    if (lane->bs == NULL
+        || lane->lane_header_sent == MINI_STREAM_LANE_HEADER_SIZE)
+    {
+        return 0;
+    }
+    return mini_stream_send_bytes(lane, lane->lane_header,
+        MINI_STREAM_LANE_HEADER_SIZE, &lane->lane_header_sent);
+}
+
+static int
+mini_stream_pump_sender_lane_locked(mini_backend_stream_t *stream,
     mini_stream_lane_t *lane)
 {
     int ret;
-    if (lane->bs == NULL) {
+    if (lane->bs == NULL || !lane->lane_header_parsed
+        || (stream->role == MINI_STREAM_ENDPOINT_OPEN
+            && lane->lane_header_sent != MINI_STREAM_LANE_HEADER_SIZE))
+    {
         return 0;
-    }
-    if (lane->lane_header_sent < MINI_STREAM_LANE_HEADER_SIZE) {
-        ret = mini_stream_send_bytes(lane, lane->lane_header,
-            MINI_STREAM_LANE_HEADER_SIZE, &lane->lane_header_sent);
-        if (ret <= 0 || lane->lane_header_sent < MINI_STREAM_LANE_HEADER_SIZE) {
-            return ret;
-        }
     }
 
     while (lane->send_head != NULL) {
@@ -422,9 +443,8 @@ mini_stream_pump_open_lane_locked(mini_backend_stream_t *stream,
     if (!stream->finish_requested) {
         return 0;
     }
-    /* The first CREDIT doubles as the server's stream_accept readiness
-     * acknowledgement.  Do not put payload or FIN behind a lane header until
-     * the receiver has attached all four lanes. */
+    /* No sender may submit payload or FIN before the receiver grants initial
+     * payload and record CREDIT. */
     if (!stream->peer_credit_received) {
         return 0;
     }
@@ -469,6 +489,43 @@ mini_stream_all_forward_headers_locked(mini_backend_stream_t *stream)
 }
 
 static int
+mini_stream_pump_sender_ready_locked(mini_backend_stream_t *stream)
+{
+    if (stream->direction != MINI_STREAM_DIRECTION_SERVER_TO_CLIENT) {
+        return 1;
+    }
+    if (stream->data_role != MINI_STREAM_DATA_SENDER
+        || stream->role != MINI_STREAM_ENDPOINT_ACCEPT)
+    {
+        return mini_stream_fail_locked(stream, EPROTO);
+    }
+    if (!mini_stream_all_forward_headers_locked(stream)) {
+        return 0;
+    }
+    mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
+    if (lane0 == NULL) {
+        return mini_stream_fail_locked(stream, EPROTO);
+    }
+    if (!stream->ready_record_built) {
+        mini_stream_receipt_t ready = {
+            .status = MINI_STREAM_RECEIPT_READY,
+            .session_id = stream->session_id,
+            .total_bytes = 0,
+            .digest = 0,
+            .detail = 0,
+        };
+        mini_stream_receipt_encode(&ready, stream->ready_record);
+        stream->ready_record_built = 1;
+    }
+    int ret = mini_stream_send_bytes(lane0, stream->ready_record,
+        MINI_STREAM_RECEIPT_SIZE, &stream->ready_record_sent);
+    if (ret < 0) {
+        return mini_stream_fail_locked(stream, EIO);
+    }
+    return stream->ready_record_sent == MINI_STREAM_RECEIPT_SIZE ? 1 : 0;
+}
+
+static int
 mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
     uint64_t *total_bytes)
 {
@@ -494,18 +551,18 @@ mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
     return 1;
 }
 
-/* The accepting endpoint normally completes after QUIC acknowledges every
- * reverse FIN.  A compliant opener can instead receive the verified receipt
+/* The receiving endpoint normally completes after QUIC acknowledges every
+ * reverse FIN.  A compliant sender can instead receive the verified receipt
  * and immediately close the connection with H3_NO_ERROR.  In that ordering,
  * CONNECTION_CLOSE may overtake a reverse-FIN ACK on another path.  Treat the
  * peer's graceful close as the final acknowledgement only after the complete
  * payload has reached the application and the receipt plus every reverse FIN
  * have already been submitted to XQUIC. */
 static int
-mini_stream_accept_exchange_submitted_locked(mini_backend_stream_t *stream,
+mini_stream_receiver_exchange_submitted_locked(mini_backend_stream_t *stream,
     uint64_t *total_bytes)
 {
-    if (stream->role != MINI_STREAM_ENDPOINT_ACCEPT) {
+    if (stream->data_role != MINI_STREAM_DATA_RECEIVER) {
         return 0;
     }
 
@@ -561,9 +618,14 @@ mini_stream_build_receipt_locked(mini_backend_stream_t *stream,
 }
 
 static int
-mini_stream_pump_accept_credit_locked(mini_backend_stream_t *stream)
+mini_stream_pump_receiver_credit_locked(mini_backend_stream_t *stream)
 {
     if (!mini_stream_all_forward_headers_locked(stream)) {
+        return 0;
+    }
+    if (stream->direction == MINI_STREAM_DIRECTION_SERVER_TO_CLIENT
+        && !stream->peer_ready_received)
+    {
         return 0;
     }
     mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
@@ -631,10 +693,18 @@ mini_stream_pump_accept_credit_locked(mini_backend_stream_t *stream)
 }
 
 static int
-mini_stream_pump_accept_receipt_locked(mini_backend_stream_t *stream)
+mini_stream_pump_receiver_receipt_locked(mini_backend_stream_t *stream)
 {
-    if (mini_stream_pump_accept_credit_locked(stream) < 0) {
+    if (mini_stream_pump_receiver_credit_locked(stream) < 0) {
         return -1;
+    }
+    mini_stream_lane_t *lane0 = mini_stream_logical_lane(stream, 0);
+    if (lane0 != NULL
+        && lane0->receipt_status == MINI_STREAM_RECEIPT_CREDIT)
+    {
+        /* Do not submit reverse FIN while a partially written CREDIT still
+         * occupies lane 0.  The final OK receipt must follow that record. */
+        return 0;
     }
     uint64_t total_bytes = 0;
     int ready = mini_stream_all_forward_finished_locked(stream, &total_bytes);
@@ -729,18 +799,33 @@ mini_stream_process_locked(mini_backend_stream_t *stream)
 
     if (stream->role == MINI_STREAM_ENDPOINT_OPEN) {
         uint32_t i;
+        for (i = 0; i < stream->lane_count; i++) {
+            if (mini_stream_pump_open_lane_header_locked(
+                    &stream->lanes[i]) < 0)
+            {
+                return mini_stream_fail_locked(stream, EIO);
+            }
+        }
+    }
+
+    if (stream->data_role == MINI_STREAM_DATA_SENDER) {
+        int ready = mini_stream_pump_sender_ready_locked(stream);
+        if (ready <= 0) {
+            return ready;
+        }
         if (mini_stream_reserve_send_credit_locked(stream) < 0) {
             return mini_stream_fail_locked(stream, EIO);
         }
+        uint32_t i;
         for (i = 0; i < stream->lane_count; i++) {
-            if (mini_stream_pump_open_lane_locked(stream,
+            if (mini_stream_pump_sender_lane_locked(stream,
                     &stream->lanes[i]) < 0)
             {
                 return mini_stream_fail_locked(stream, EIO);
             }
         }
     } else {
-        return mini_stream_pump_accept_receipt_locked(stream);
+        return mini_stream_pump_receiver_receipt_locked(stream);
     }
     return 0;
 }
@@ -896,13 +981,22 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
         || out_stream == NULL
         || (role != MINI_STREAM_ENDPOINT_OPEN
             && role != MINI_STREAM_ENDPOINT_ACCEPT)
+        || (config->direction != MINI_STREAM_DIRECTION_CLIENT_TO_SERVER
+            && config->direction
+                != MINI_STREAM_DIRECTION_SERVER_TO_CLIENT)
         || (config->flags & ~MINI_STREAM_ALLOWED_FLAGS) != 0
         || config->preaccept_lane_count > MINI_BACKEND_STREAM_LANE_COUNT
         || (role == MINI_STREAM_ENDPOINT_OPEN
             && config->preaccept_lane_count != 0)
         || config->send_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
         || config->receive_queue_size < MINI_STREAM_MAX_FRAME_PAYLOAD
-        || (role == MINI_STREAM_ENDPOINT_ACCEPT && config->on_data == NULL))
+        || (((config->direction
+                    == MINI_STREAM_DIRECTION_CLIENT_TO_SERVER
+                && role == MINI_STREAM_ENDPOINT_ACCEPT)
+                || (config->direction
+                    == MINI_STREAM_DIRECTION_SERVER_TO_CLIENT
+                && role == MINI_STREAM_ENDPOINT_OPEN))
+            && config->on_data == NULL))
     {
         return EINVAL;
     }
@@ -918,6 +1012,14 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     memcpy(&stream->cid, cid, sizeof(*cid));
     stream->event_base = event_base;
     stream->role = role;
+    stream->direction = config->direction;
+    stream->data_role = (config->direction
+                == MINI_STREAM_DIRECTION_CLIENT_TO_SERVER
+            && role == MINI_STREAM_ENDPOINT_OPEN)
+            || (config->direction
+                == MINI_STREAM_DIRECTION_SERVER_TO_CLIENT
+            && role == MINI_STREAM_ENDPOINT_ACCEPT)
+        ? MINI_STREAM_DATA_SENDER : MINI_STREAM_DATA_RECEIVER;
     stream->flags = config->flags;
     stream->lane_count = MINI_BACKEND_STREAM_LANE_COUNT;
     stream->preaccept_lane_count = config->preaccept_lane_count;
@@ -946,6 +1048,9 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
     if (role == MINI_STREAM_ENDPOINT_OPEN) {
         stream->session_id = mini_stream_now()
             ^ (uint64_t)(uintptr_t)stream ^ ((uint64_t)getpid() << 32);
+        if (stream->session_id == 0) {
+            stream->session_id = 1;
+        }
     }
 
     int ret = pthread_mutex_init(&stream->lock, NULL);
@@ -1000,6 +1105,7 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
                 .lane_index = i,
                 .lane_count = stream->lane_count,
                 .max_frame_payload = MINI_STREAM_MAX_FRAME_PAYLOAD,
+                .direction = stream->direction,
             };
             mini_stream_lane_header_encode(&lane_header, lane->lane_header);
             mini_stream_frame_header_t fin_header = {
@@ -1015,7 +1121,7 @@ mini_stream_backend_create(xqc_engine_t *engine, const xqc_cid_t *cid,
         }
     }
 
-    if (role == MINI_STREAM_ENDPOINT_ACCEPT) {
+    if (stream->data_role == MINI_STREAM_DATA_RECEIVER) {
         ret = pthread_create(&stream->delivery_worker, NULL,
             mini_stream_delivery_worker, stream);
         if (ret != 0) {
@@ -1077,7 +1183,7 @@ mini_backend_stream_write(mini_backend_stream_t *stream, const void *data,
     *accepted = 0;
     if (!mini_stream_valid(stream)
         || (data == NULL && data_len != 0)
-        || stream->role != MINI_STREAM_ENDPOINT_OPEN)
+        || stream->data_role != MINI_STREAM_DATA_SENDER)
     {
         return EINVAL;
     }
@@ -1176,7 +1282,7 @@ mini_backend_stream_flush(mini_backend_stream_t *stream,
     uint32_t timeout_ms)
 {
     if (!mini_stream_valid(stream)
-        || stream->role != MINI_STREAM_ENDPOINT_OPEN)
+        || stream->data_role != MINI_STREAM_DATA_SENDER)
     {
         return EINVAL;
     }
@@ -1220,7 +1326,7 @@ mini_backend_stream_finish(mini_backend_stream_t *stream,
     }
     if (stream->reset_requested) {
         wait_result = ECANCELED;
-    } else if (stream->role == MINI_STREAM_ENDPOINT_OPEN
+    } else if (stream->data_role == MINI_STREAM_DATA_SENDER
         && !stream->finish_requested)
     {
         uint32_t i;
@@ -1270,6 +1376,7 @@ mini_backend_stream_reset(mini_backend_stream_t *stream,
     if (!stream->completed) {
         stream->app_error_code = error_code;
         stream->reset_requested = 1;
+        pthread_cond_broadcast(&stream->delivery_cond);
         mini_stream_wake(stream);
     }
     pthread_mutex_unlock(&stream->lock);
@@ -1359,6 +1466,23 @@ mini_backend_stream_set_logger(mini_backend_stream_t *stream,
 }
 
 static void
+mini_stream_discard_delivery_queue_locked(mini_backend_stream_t *stream)
+{
+    mini_stream_reorder_chunk_t *delivery = stream->delivery_head;
+    while (delivery != NULL) {
+        mini_stream_reorder_chunk_t *next = delivery->next;
+        if (stream->receive_records_buffered != 0) {
+            stream->receive_records_buffered--;
+        }
+        free(delivery);
+        delivery = next;
+    }
+    stream->delivery_head = NULL;
+    stream->delivery_tail = NULL;
+    stream->delivery_queue_bytes = 0;
+}
+
+static void
 mini_stream_free_queues(mini_backend_stream_t *stream)
 {
     uint32_t i;
@@ -1377,15 +1501,7 @@ mini_stream_free_queues(mini_backend_stream_t *stream)
     stream->credit_head = NULL;
     stream->credit_tail = NULL;
     mini_stream_reorder_release(&stream->reorder);
-    mini_stream_reorder_chunk_t *delivery = stream->delivery_head;
-    while (delivery != NULL) {
-        mini_stream_reorder_chunk_t *next = delivery->next;
-        free(delivery);
-        delivery = next;
-    }
-    stream->delivery_head = NULL;
-    stream->delivery_tail = NULL;
-    stream->delivery_queue_bytes = 0;
+    mini_stream_discard_delivery_queue_locked(stream);
 }
 
 void
@@ -1452,7 +1568,7 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
     uint64_t total_bytes = 0;
     int graceful_completion = error_code == 0 && !stream->completed
         && stream->error_code == 0
-        && mini_stream_accept_exchange_submitted_locked(stream,
+        && mini_stream_receiver_exchange_submitted_locked(stream,
             &total_bytes) > 0;
     if (graceful_completion) {
         stream->peer_received_bytes = total_bytes;
@@ -1501,11 +1617,16 @@ mini_stream_delivery_worker(void *arg)
     pthread_mutex_lock(&stream->lock);
     for (;;) {
         while (stream->delivery_head == NULL
-            && !stream->delivery_stop_requested)
+            && !stream->delivery_stop_requested
+            && !stream->reset_requested && stream->error_code == 0
+            && !stream->connection_closed)
         {
             (void)pthread_cond_wait(&stream->delivery_cond, &stream->lock);
         }
-        if (stream->delivery_stop_requested) {
+        if (stream->delivery_stop_requested || stream->reset_requested
+            || stream->error_code != 0 || stream->connection_closed)
+        {
+            mini_stream_discard_delivery_queue_locked(stream);
             break;
         }
         mini_stream_reorder_chunk_t *chunk = stream->delivery_head;
@@ -1583,7 +1704,8 @@ mini_stream_parse_lane_header_locked(mini_backend_stream_t *stream,
         || header.lane_count != stream->lane_count
         || header.lane_index >= stream->lane_count
         || header.max_frame_payload == 0
-        || header.max_frame_payload > MINI_STREAM_MAX_FRAME_PAYLOAD)
+        || header.max_frame_payload > MINI_STREAM_MAX_FRAME_PAYLOAD
+        || header.direction != stream->direction)
     {
         return mini_stream_fail_locked(stream, EPROTO);
     }
@@ -1635,7 +1757,7 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
     size_t payload_length = lane->incoming_frame.payload_length;
     size_t buffered = stream->reorder.buffered_bytes
         + stream->delivery_queue_bytes;
-    /* A protocol-v3 opener cannot reach these guards: it reserves payload and
+    /* A protocol-v4 sender cannot reach these guards: it reserves payload and
      * record CREDIT independently, and new credit is issued only after
      * on_data returns.  Keep the checks as protection from a non-conforming
      * peer instead of treating normal backpressure as fatal. */
@@ -1668,7 +1790,7 @@ mini_stream_begin_frame_locked(mini_backend_stream_t *stream,
 }
 
 static int
-mini_stream_receive_forward_locked(mini_backend_stream_t *stream,
+mini_stream_receive_data_locked(mini_backend_stream_t *stream,
     mini_stream_lane_t *lane, const unsigned char *data, size_t data_len,
     uint8_t fin)
 {
@@ -1689,6 +1811,37 @@ mini_stream_receive_forward_locked(mini_backend_stream_t *stream,
             {
                 return -1;
             }
+            continue;
+        }
+        if (stream->direction == MINI_STREAM_DIRECTION_SERVER_TO_CLIENT
+            && !stream->peer_ready_received)
+        {
+            if (lane->lane_index != 0) {
+                return mini_stream_fail_locked(stream, EPROTO);
+            }
+            size_t count = MINI_STREAM_RECEIPT_SIZE
+                - stream->ready_record_bytes;
+            if (count > data_len - offset) {
+                count = data_len - offset;
+            }
+            memcpy(stream->ready_record + stream->ready_record_bytes,
+                data + offset, count);
+            stream->ready_record_bytes += count;
+            offset += count;
+            if (stream->ready_record_bytes != MINI_STREAM_RECEIPT_SIZE) {
+                continue;
+            }
+            mini_stream_receipt_t ready;
+            if (mini_stream_receipt_decode(stream->ready_record,
+                    &ready) != 0
+                || ready.status != MINI_STREAM_RECEIPT_READY
+                || ready.session_id != stream->session_id
+                || ready.total_bytes != 0 || ready.digest != 0
+                || ready.detail != 0)
+            {
+                return mini_stream_fail_locked(stream, EPROTO);
+            }
+            stream->peer_ready_received = 1;
             continue;
         }
         if (lane->incoming_chunk == NULL) {
@@ -1734,18 +1887,36 @@ mini_stream_receive_forward_locked(mini_backend_stream_t *stream,
         }
         lane->transport_fin_received = 1;
     }
-    return mini_stream_pump_accept_receipt_locked(stream) < 0 ? -1 : 0;
+    return 0;
 }
 
 static int
-mini_stream_receive_receipt_locked(mini_backend_stream_t *stream,
+mini_stream_receive_sender_control_locked(mini_backend_stream_t *stream,
     mini_stream_lane_t *lane, const unsigned char *data, size_t data_len,
     uint8_t fin)
 {
-    if (lane->lane_index != 0 && data_len != 0) {
+    size_t offset = 0;
+    while (!lane->lane_header_parsed && offset < data_len) {
+        size_t count = MINI_STREAM_LANE_HEADER_SIZE - lane->lane_header_bytes;
+        if (count > data_len - offset) {
+            count = data_len - offset;
+        }
+        memcpy(lane->lane_header + lane->lane_header_bytes,
+            data + offset, count);
+        lane->lane_header_bytes += count;
+        offset += count;
+        if (lane->lane_header_bytes == MINI_STREAM_LANE_HEADER_SIZE
+            && mini_stream_parse_lane_header_locked(stream, lane) != 0)
+        {
+            return -1;
+        }
+    }
+    if (!lane->lane_header_parsed) {
+        return fin ? mini_stream_fail_locked(stream, EPROTO) : 0;
+    }
+    if (lane->lane_index != 0 && offset < data_len) {
         return mini_stream_fail_locked(stream, EPROTO);
     }
-    size_t offset = 0;
     while (lane->lane_index == 0 && offset < data_len) {
         if (lane->receipt_valid) {
             return mini_stream_fail_locked(stream, EPROTO);
@@ -1875,10 +2046,10 @@ mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
     if (stats.fin_acked_time != 0) {
         lane->reverse_fin_acked = 1;
     }
-    if (lane->stream->role == MINI_STREAM_ENDPOINT_ACCEPT) {
+    if (lane->stream->data_role == MINI_STREAM_DATA_RECEIVER) {
         uint64_t total_bytes = 0;
         int final_exchange_submitted = stats.stream_err == 0
-            && mini_stream_accept_exchange_submitted_locked(lane->stream,
+            && mini_stream_receiver_exchange_submitted_locked(lane->stream,
                 &total_bytes) > 0;
         lane->graceful_closed = lane->protocol_fin_received
             && lane->transport_fin_received
@@ -1913,9 +2084,13 @@ mini_stream_backend_bs_read(xqc_h3_ext_bytestream_t *bs, const void *data,
     }
     mini_backend_stream_t *stream = lane->stream;
     pthread_mutex_lock(&stream->lock);
-    int ret = stream->role == MINI_STREAM_ENDPOINT_ACCEPT
-        ? mini_stream_receive_forward_locked(stream, lane, data, data_len, fin)
-        : mini_stream_receive_receipt_locked(stream, lane, data, data_len, fin);
+    int ret = stream->data_role == MINI_STREAM_DATA_RECEIVER
+        ? mini_stream_receive_data_locked(stream, lane, data, data_len, fin)
+        : mini_stream_receive_sender_control_locked(stream, lane, data,
+            data_len, fin);
+    if (ret == 0) {
+        ret = mini_stream_process_locked(stream);
+    }
     pthread_mutex_unlock(&stream->lock);
     return ret == 0 ? XQC_OK : XQC_ERROR;
 }

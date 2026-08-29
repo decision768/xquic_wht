@@ -67,10 +67,11 @@ sh scripts/mini_api/package_delivery.sh BUILD_DIR OUTPUT_DIR
 ## 默认兼容行为
 
 - Demo 未传 zlog 配置时不启用 zlog；
-- 文件服务端和 GET Demo 固定使用 `adaptive`，POST 客户端可选择调度器；
+- 文件及数据流 GET 的发送端固定使用 `adaptive`，POST 客户端默认 `balanced` 并可选择调度器；
 - GET 默认并发为 8，POST 默认并发为 4；
-- 数据流 Demo 固定使用 4 lane，客户端支持重复 `--interface` 和 `--scheduler`；
+- 数据流 Demo 固定使用 4 lane，支持 `--get`/`--post` 半双工方向；客户端支持重复
+  `--interface`，POST 支持 `--scheduler`；
 - 单路径和双路径 RX 预算使用独立配置分支；
 - 未传日志和调度参数时使用上述固定策略，速率汇总格式保持不变。
 
-当前 Mini API 交付版本为 `6.4`，项目版本也可见 `VERSION`。
+当前 Mini API 交付版本为 `6.5`，Stream 内部协议为 v4，项目版本也可见 `VERSION`。

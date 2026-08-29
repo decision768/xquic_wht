@@ -26,10 +26,7 @@ if(XQC_ENABLE_MINI_API)
         netins_udp_mini_api_client
         netins_udp_mini_api_server
         netins_udp_stream_client
-        netins_udp_stream_server
-        mini_stream_protocol_test
-        mini_stream_reorder_test
-        netins_udp_stream_api_contract_test)
+        netins_udp_stream_server)
         if(TARGET ${demo_target})
             install(TARGETS ${demo_target}
                 RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"

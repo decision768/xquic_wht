@@ -1,6 +1,6 @@
 # NetIns UDP Mini API 编译指南
 
-本文对应当前 Mini API 交付版本 `6.4`（底层基于既有 XQUIC Mini 数据面）：
+本文对应当前 Mini API 交付版本 `6.5`（底层基于既有 XQUIC Mini 数据面）：
 
 - 客户端：AARCH64（SIM8810 交叉编译，或直接在 AARCH64 Linux 主机编译）；
 - 服务端：原生 Linux x86_64；
@@ -307,8 +307,8 @@ sh scripts/mini_api/package_delivery.sh \
 每个目录会生成：
 
 ```text
-netins-mini-api-6.4.tar.gz
-netins-mini-api-6.4.tar.gz.sha256
+netins-mini-api-6.5.tar.gz
+netins-mini-api-6.5.tar.gz.sha256
 ```
 
 ## 6. 常见错误

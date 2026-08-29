@@ -1139,7 +1139,18 @@ netins_udp_stream_configure(netins_udp_t *connection,
         return netins_udp_set_error(connection, EINVAL,
             "invalid stream configuration");
     }
+    uint32_t direction = config->direction;
+    if (direction == 0) {
+        direction = NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
+    }
+    if (direction != NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER
+        && direction != NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT)
+    {
+        return netins_udp_set_error(connection, EINVAL,
+            "invalid stream direction %u", config->direction);
+    }
     memset(backend_config, 0, sizeof(*backend_config));
+    backend_config->direction = direction;
     backend_config->flags = config->flags;
     backend_config->send_queue_size = config->send_queue_size != 0
         ? config->send_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
@@ -1175,9 +1186,14 @@ netins_udp_stream_create(netins_udp_t *connection,
     {
         return -1;
     }
-    if (accepting && config->on_data == NULL) {
+    int receiving = accepting
+        ? backend_config.direction
+            == NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER
+        : backend_config.direction
+            == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT;
+    if (receiving && config->on_data == NULL) {
         return netins_udp_set_error(connection, EINVAL,
-            "accepted streams require an on_data callback");
+            "receiving streams require an on_data callback");
     }
 
     netins_udp_stream_t *stream = calloc(1, sizeof(*stream));
@@ -1187,10 +1203,11 @@ netins_udp_stream_create(netins_udp_t *connection,
     }
     stream->magic = NETINS_UDP_STREAM_MAGIC;
     stream->connection = connection;
+    stream->direction = backend_config.direction;
     stream->flags = config->flags;
     stream->on_data = config->on_data;
     stream->user_data = config->user_data;
-    backend_config.on_data = accepting ? netins_udp_stream_deliver : NULL;
+    backend_config.on_data = receiving ? netins_udp_stream_deliver : NULL;
     backend_config.user_data = stream;
     connection->active_stream = stream;
 
