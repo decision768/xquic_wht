@@ -508,6 +508,9 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * sender calls stream_write(); the receiver supplies on_data.  Both sides call
  * finish(): the sender waits for a verified peer receipt, while the receiver
  * waits for peer FIN and for the receipt/reverse FINs to be QUIC-acknowledged.
+ * If a compliant receiver finishes and closes with H3_NO_ERROR before the
+ * sender's final receipt callback runs, that graceful close also completes a
+ * sender that has already submitted every payload record and lane FIN.
  * If a compliant sender closes the connection with H3_NO_ERROR immediately
  * after receiving the verified receipt, that graceful close also completes
  * the receiver after all receipt/reverse-FIN bytes have been submitted.

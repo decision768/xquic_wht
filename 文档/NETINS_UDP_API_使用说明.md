@@ -147,7 +147,7 @@ netins_udp_cleanup()
 | `netins_udp_stream_accept()` | 在启用流模式的 ACCEPTED handle 上接受同方向逻辑流；方向必须与客户端一致 |
 | `netins_udp_stream_write()` | 只能由当前方向的发送端调用；复制调用方 Buffer；`*accepted` 先清零，支持阻塞、超时、非阻塞和部分 accepted；累计 offset 溢出返回 `EOVERFLOW` |
 | `netins_udp_stream_flush()` | 等待本地队列提交给 XQUIC，不等于对端已经收到 |
-| `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN，并等待回执及反向 FIN 被 QUIC ACK；若合规发送端收到回执后立即以 `H3_NO_ERROR` 正常关闭，且接收端已经完整交付数据并提交全部回执/反向 FIN，该正常关闭同样构成完成确认 |
+| `netins_udp_stream_finish()` | 发送端等待可靠回执；接收端等待完整 FIN，并等待回执及反向 FIN 被 QUIC ACK。若合规接收端验收完成后立即以 `H3_NO_ERROR` 关闭，且发送端已提交全部数据记录及各 lane FIN，该正常关闭可替代尚未执行的最终回执回调；反向情况下，若合规发送端收到回执后立即正常关闭，且接收端已完整交付数据并提交全部回执/反向 FIN，该正常关闭同样构成完成确认 |
 | `netins_udp_stream_reset()` | 取消本地逻辑流；API v1 不把应用错误码传给对端 |
 | `netins_udp_stream_get_snapshot()` | 查询队列、重排、记录数和逐 lane 字节统计 |
 | `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |

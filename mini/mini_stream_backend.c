@@ -526,6 +526,47 @@ mini_stream_pump_sender_ready_locked(mini_backend_stream_t *stream)
 }
 
 static int
+mini_stream_sender_exchange_submitted_locked(mini_backend_stream_t *stream,
+    uint64_t *total_bytes)
+{
+    if (stream->data_role != MINI_STREAM_DATA_SENDER
+        || !stream->finish_requested || !stream->peer_credit_received
+        || stream->allocated_lanes != stream->lane_count
+        || stream->send_queue_bytes != 0 || stream->send_queue_charge != 0
+        || stream->credit_head != NULL || stream->credit_tail != NULL
+        || stream->records_submitted != stream->records_enqueued
+        || stream->send_credit_reserved != stream->accepted_bytes
+        || stream->send_records_reserved != stream->records_enqueued)
+    {
+        return 0;
+    }
+
+    uint64_t submitted_bytes = 0;
+    uint32_t i;
+    for (i = 0; i < stream->lane_count; i++) {
+        mini_stream_lane_t *lane = &stream->lanes[i];
+        if (!lane->allocated || !lane->lane_header_parsed
+            || lane->send_head != NULL || lane->send_tail != NULL
+            || !lane->protocol_fin_sent
+            || lane->fin_frame_sent != MINI_STREAM_FRAME_HEADER_SIZE
+            || !lane->send_fin_submitted
+            || (stream->role == MINI_STREAM_ENDPOINT_OPEN
+                && lane->lane_header_sent != MINI_STREAM_LANE_HEADER_SIZE)
+            || submitted_bytes > UINT64_MAX
+                - stream->lane_payload_sent[lane->lane_index])
+        {
+            return 0;
+        }
+        submitted_bytes += stream->lane_payload_sent[lane->lane_index];
+    }
+    if (submitted_bytes != stream->accepted_bytes) {
+        return 0;
+    }
+    *total_bytes = submitted_bytes;
+    return 1;
+}
+
+static int
 mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
     uint64_t *total_bytes)
 {
@@ -552,12 +593,11 @@ mini_stream_all_forward_finished_locked(mini_backend_stream_t *stream,
 }
 
 /* The receiving endpoint normally completes after QUIC acknowledges every
- * reverse FIN.  A compliant sender can instead receive the verified receipt
- * and immediately close the connection with H3_NO_ERROR.  In that ordering,
- * CONNECTION_CLOSE may overtake a reverse-FIN ACK on another path.  Treat the
- * peer's graceful close as the final acknowledgement only after the complete
- * payload has reached the application and the receipt plus every reverse FIN
- * have already been submitted to XQUIC. */
+ * reverse FIN.  A compliant peer can instead finish and immediately close the
+ * connection with H3_NO_ERROR.  In that ordering, CONNECTION_CLOSE may
+ * overtake the last stream callback on another path.  The helpers in this
+ * section allow that graceful close to complete only an endpoint whose entire
+ * local half of the final exchange was already submitted. */
 static int
 mini_stream_receiver_exchange_submitted_locked(mini_backend_stream_t *stream,
     uint64_t *total_bytes)
@@ -1566,10 +1606,16 @@ mini_stream_backend_on_connection_close(mini_backend_stream_t *stream,
     pthread_mutex_lock(&stream->lock);
     stream->connection_closed = 1;
     uint64_t total_bytes = 0;
-    int graceful_completion = error_code == 0 && !stream->completed
-        && stream->error_code == 0
-        && mini_stream_receiver_exchange_submitted_locked(stream,
-            &total_bytes) > 0;
+    int graceful_completion = 0;
+    if (error_code == 0 && !stream->completed
+        && stream->error_code == 0)
+    {
+        graceful_completion =
+            mini_stream_receiver_exchange_submitted_locked(stream,
+                &total_bytes) > 0
+            || mini_stream_sender_exchange_submitted_locked(stream,
+                &total_bytes) > 0;
+    }
     if (graceful_completion) {
         stream->peer_received_bytes = total_bytes;
         stream->accepted_bytes = total_bytes;
@@ -2046,11 +2092,13 @@ mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
     if (stats.fin_acked_time != 0) {
         lane->reverse_fin_acked = 1;
     }
+    uint64_t total_bytes = 0;
+    int final_exchange_submitted = stats.stream_err == 0
+        && (mini_stream_receiver_exchange_submitted_locked(lane->stream,
+                &total_bytes) > 0
+            || mini_stream_sender_exchange_submitted_locked(lane->stream,
+                &total_bytes) > 0);
     if (lane->stream->data_role == MINI_STREAM_DATA_RECEIVER) {
-        uint64_t total_bytes = 0;
-        int final_exchange_submitted = stats.stream_err == 0
-            && mini_stream_receiver_exchange_submitted_locked(lane->stream,
-                &total_bytes) > 0;
         lane->graceful_closed = lane->protocol_fin_received
             && lane->transport_fin_received
             && lane->reverse_fin_submitted
@@ -2058,7 +2106,7 @@ mini_stream_backend_bs_close(xqc_h3_ext_bytestream_t *bs,
     } else {
         lane->graceful_closed = lane->protocol_fin_sent
             && lane->send_fin_submitted
-            && lane->transport_fin_received;
+            && (lane->transport_fin_received || final_exchange_submitted);
     }
     lane->bs = NULL;
     (void)mini_stream_process_locked(lane->stream);
