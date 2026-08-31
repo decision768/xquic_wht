@@ -380,8 +380,7 @@ typedef struct netins_udp_stream_config_s {
      * ABI layout of the former reserved32 field. */
     uint32_t direction;
     uint32_t flags;
-    /* Reserved ABI slots.  Set to zero; queue capacity is fixed at 64 MiB
-     * and is not caller-configurable. */
+    /* Reserved ABI slots.  Set to zero. */
     size_t reserved_size[2];
     netins_udp_stream_data_cb on_data;
     void *user_data;
@@ -518,10 +517,9 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * on_data runs on a bounded delivery worker, outside the XQUIC event thread
  * and outside the stream mutex.  Its memory is valid only during the
  * callback.  The receiver advertises cumulative payload and record credit
- * only after on_data returns, so a slow callback backpressures the sender at
- * the fixed 64 MiB queue budget without allowing tiny records to grow
- * allocator/list overhead without bound.  The callback must not close or wait
- * on the same stream.
+ * only after on_data returns, so a slow callback backpressures the sender
+ * without allowing tiny records to grow allocator/list overhead without
+ * bound.  The callback must not close or wait on the same stream.
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;

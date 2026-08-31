@@ -37,7 +37,7 @@ usage(const char *program)
         "  --scheduler NAME        POST scheduler: default|minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
         "                          fastprobe20|fastonly|adaptive; default balanced;\n"
-        "                          GET is fixed adaptive\n"
+        "                          GET uses adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
         "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
         "  --repeat N              Sequential tasks on one connection (default 1)\n"

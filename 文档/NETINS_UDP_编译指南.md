@@ -17,7 +17,7 @@
 - Libevent 2.1，包含 `libevent.a` 和 `libevent_pthreads.a`；
 - zlog 1.2，包含 `zlog.h` 和 `libzlog.a`；
 - Linux pthread、dl 和 math 库；
-- 打包/ABI 检查需要 Python 3、`nm`、`tar` 和 `sha256sum`。
+- ABI 和源码隔离检查需要 Python 3 和 `nm`。
 
 所有静态依赖应使用 `-fPIC` 编译，否则生成 `libxquic.so` 时可能出现
 `relocation ... can not be used when making a shared object`。
@@ -246,10 +246,10 @@ ldd build-mini-api-linux/mini/netins_udp_mini_api_server
 
 `Machine` 应为 `Advanced Micro Devices X86-64`，`ldd` 不应出现 `not found`。
 
-## 5. 完整 Mini API 库与交付包
+## 5. 完整 Mini API 库与源码交付
 
 只构建上述单个 demo 时，CMake 会生成它依赖的 `libxquic-static.a`，但不会保证共享库和
-另一个 demo 已生成。需要 SDK/正式交付包时，对相应架构执行全量构建：
+其他 demo 已生成。需要完整 SDK 产物时，对相应架构执行全量构建：
 
 ```bash
 cmake --build build-mini-api-aarch64 --parallel "$(nproc)"
@@ -265,9 +265,6 @@ mini/netins_udp_mini_api_client
 mini/netins_udp_mini_api_server
 mini/netins_udp_stream_client
 mini/netins_udp_stream_server
-mini/mini_stream_protocol_test
-mini/mini_stream_reorder_test
-mini/netins_udp_stream_api_contract_test
 ```
 
 分别安装，禁止两个架构安装到同一目录：
@@ -291,25 +288,19 @@ python3 scripts/mini_api/check_abi.py \
 python3 scripts/mini_api/check_stream_isolation.py
 ```
 
-数据流的同机回环、背压、故障注入和主板到云端测试见
-[`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
-
-正式打包：
+数据流正式压测使用：
 
 ```bash
-sh scripts/mini_api/package_delivery.sh \
-  build-mini-api-aarch64 "$PWD/delivery/aarch64"
-
-sh scripts/mini_api/package_delivery.sh \
-  build-mini-api-linux "$PWD/delivery/linux-x86_64"
+python3 tests/stream_api_benchmark.py --iterations 10
 ```
 
-每个目录会生成：
+该脚本每次传输 100 MiB，每轮执行 GET 和 POST 的 `5G1 -> Agg -> 5G2`，并复用
+文件压测环境中现有的两个资源监控 `.sh` 脚本。运行环境和公共 API 约束见
+[`NETINS_UDP_API_使用说明.md`](NETINS_UDP_API_使用说明.md)。
 
-```text
-netins-mini-api-6.5.tar.gz
-netins-mini-api-6.5.tar.gz.sha256
-```
+本项目以完整源码仓库作为正式交付物，不再维护额外的打包脚本。`cmake --install` 仍可选用于
+收集公开头文件、库、四个 Demo、`VERSION` 和检查脚本；文档与压测脚本直接从源码树使用，
+不通过 CMake 安装。
 
 ## 6. 常见错误
 

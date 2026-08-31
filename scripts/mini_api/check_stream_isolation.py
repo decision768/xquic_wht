@@ -28,8 +28,8 @@ def main() -> int:
         "file_client_demo": root / "demo/netins_udp_mini_api_client.c",
         "stream_client_demo": root / "demo/netins_udp_stream_client.c",
         "stream_server_demo": root / "demo/netins_udp_stream_server.c",
-        "stream_acceptance": root / "tests/stream_api_acceptance.py",
         "api": root / "src/netins_udp/netins_udp_api.c",
+        "internal_header": root / "src/netins_udp/netins_udp_internal.h",
         "public_header": root / "include/xquic/netins_udp.h",
     }
     try:
@@ -124,6 +124,27 @@ def main() -> int:
             r"typedef\s+struct\s+netins_udp_stream_config_s\s*\{\s*"
             r"uint32_t\s+struct_size;\s*uint32_t\s+api_version;\s*"
             r".*?uint32_t\s+direction;\s*uint32_t\s+flags;",
+        ),
+        (
+            "public stream configuration preserves reserved ABI slots",
+            "public_header",
+            r"typedef\s+struct\s+netins_udp_stream_config_s\s*\{.*?"
+            r"uint32_t\s+flags;.*?size_t\s+reserved_size\[2\];\s*"
+            r"netins_udp_stream_data_cb\s+on_data;",
+        ),
+        (
+            "stream queue budget is fixed at 64 MiB",
+            "internal_header",
+            r"#define\s+NETINS_UDP_STREAM_FIXED_QUEUE_SIZE\s*"
+            r"\(64U\s*\*\s*1024U\s*\*\s*1024U\)",
+        ),
+        (
+            "public API applies the fixed send and receive queue budget",
+            "api",
+            r"backend_config->send_queue_size\s*=\s*"
+            r"NETINS_UDP_STREAM_FIXED_QUEUE_SIZE;\s*"
+            r"backend_config->receive_queue_size\s*=\s*"
+            r"NETINS_UDP_STREAM_FIXED_QUEUE_SIZE;",
         ),
         (
             "server buffers Bytestreams that arrive before stream accept",
@@ -251,13 +272,6 @@ def main() -> int:
             r"preaccept_lane_count\+\+.*?"
             r"stream_config\.preaccept_lane_count\s*=\s*"
             r"preaccept_lane_count",
-        ),
-        (
-            "delayed-accept acceptance requires all four preaccept headers",
-            "stream_acceptance",
-            r"case\.require_delayed_accept.*?"
-            r"integer\(snapshot,\s*\"preaccept_lanes\"\)\s*"
-            r"!=\s*FIXED_LANES",
         ),
         (
             "client state polling yields to the active stream worker",
@@ -390,12 +404,6 @@ def main() -> int:
             r"connection->last_error_code\s*=\s*error_code;",
         ),
         (
-            "fault acceptance waits for delivered stream progress",
-            "stream_acceptance",
-            r"stream_api_ready.*?stream_api_progress.*?"
-            r"if\s+not\s+established.*?stop_process\(server\)",
-        ),
-        (
             "stream server emits the fault-test progress marker after data",
             "stream_server_demo",
             r"receiver->received\s*=\s*offset\s*\+\s*data_len.*?"
@@ -424,17 +432,13 @@ def main() -> int:
             r"options->scheduler\s*=\s*NETINS_UDP_SCHEDULER_ADAPTIVE",
         ),
         (
-            "acceptance covers both half-duplex directions by default",
-            "stream_acceptance",
-            r"--direction.*?choices=\(\"both\",\s*\"post\",\s*\"get\"\)"
-            r".*?default=\"both\".*?directions\s*=\s*\(\"post\",\s*\"get\"\)"
-            r".*?case\.direction",
-        ),
-        (
-            "release acceptance refuses a single transfer direction",
-            "stream_acceptance",
-            r"args\.release\s+and\s+args\.direction\s*!=\s*\"both\".*?"
-            r"--release requires --direction both",
+            "stream POST throughput waits for the local queue to flush",
+            "stream_client_demo",
+            r"netins_udp_stream_flush\s*\(\s*stream\s*,\s*"
+            r"options\.write_timeout_ms\s*\).*?"
+            r"submit_end_time_us\s*=\s*stream_demo_now_us\s*\(\s*\)\s*;.*?"
+            r"netins_udp_stream_finish\s*\(.*?"
+            r"metric_name\s*=\s*\"first_write_to_xquic_flush\"",
         ),
     )
 

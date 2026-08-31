@@ -2,7 +2,7 @@
 
 本文介绍理解、配置、扩展和调试 XQUIC `mini_client` 与 `mini_server` 所需的网络基础知识。
 
-本文与 [XQUIC Mini 客户端与服务器开发指南](./QUIC2Path_Mini_Client_Server_Developer_Guide_zh-CN_v2.md) 配套使用：
+本文与 [XQUIC Mini 客户端与服务器开发指南](./QUIC2Path_Mini_Client_Server_Developer_Guide_zh-CN_v2.1.md) 配套使用：
 
 - 本文解释系统**为什么**这样工作；
 - 《开发指南》说明代码**如何**构建、配置、运行和集成。
@@ -1856,7 +1856,7 @@ QUIC 连接中的可靠有序字节序列。
 
 项目运行方面，请继续阅读：
 
-- [XQUIC Mini 客户端与服务器开发指南](./QUIC2Path_Mini_Client_Server_Developer_Guide_zh-CN_v2.md)
+- [XQUIC Mini 客户端与服务器开发指南](./QUIC2Path_Mini_Client_Server_Developer_Guide_zh-CN_v2.1.md)
 - 客户端与服务器配置文件；
 - 调度器回调实现；
 - 拥塞控制回调实现；

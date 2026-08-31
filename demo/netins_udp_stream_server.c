@@ -47,8 +47,8 @@ stream_demo_server_usage(const char *program)
         " [--get|--post] [--write-chunk-size N]"
         " [--write-timeout-ms N] [--flags N]"
         " [--callback-delay-ms N] [--accept-delay-ms N]\n"
-        "  lanes are fixed at %u; direction defaults to POST (server receives)\n"
-        "  GET makes the server send with the fixed adaptive scheduler\n",
+        "  lanes: %u; direction defaults to POST (server receives)\n"
+        "  GET makes the server send with the adaptive scheduler\n",
         program, NETINS_UDP_STREAM_DEMO_LANE_COUNT);
 }
 

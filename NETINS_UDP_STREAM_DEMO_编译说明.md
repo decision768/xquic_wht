@@ -11,10 +11,10 @@ netins_udp_stream_server
 
 | 项目 | 值 |
 |---|---|
-| 6.5 源码基线 | 本次阶段 6+7 完成后的最终源码 |
+| 6.5 源码基线 | 正式交付源码 |
 | API Release | `6.5` |
 | 内部 Stream 协议 | v4 |
-| Demo lane 数 | 固定 4 lane，不提供运行时修改参数 |
+| Demo lane 数 | 4 lane |
 | 数据方向 | `--post`（Client→Server）或 `--get`（Server→Client），同一会话不同时双向传输 |
 
 ## 1. 6.3 环境哪些可以复用
@@ -83,14 +83,14 @@ delivery/
 | `CMakeLists.txt`、`mini/CMakeLists.txt` | 覆盖 | 增加 Stream 构建目标和 backend 对象 |
 | `VERSION` | 覆盖 | Release 标识更新为 6.5 |
 | `cmake/MiniApiInstall.cmake` | 覆盖 | 增加 Stream 产物安装规则 |
-| `demo/` | 用 6.5 内容覆盖并补充新文件 | 包含 Client、Server、方向参数和固定 4-lane Demo 配置 |
+| `demo/` | 用 6.5 内容覆盖并补充新文件 | 包含 Client、Server、方向参数和 4-lane Demo 配置 |
 | `include/xquic/` | 用 6.5 内容覆盖 | 包含公开 Stream API、方向枚举和 H3 Bytestream 声明 |
 | `mini/` | 用 6.5 内容覆盖并补充新文件 | 包含分流、重排、READY/CREDIT、断链和恢复实现 |
 | `src/http3/` | 用 6.5 内容覆盖 | 包含底层 Bytestream 接入修改 |
 | `src/netins_udp/` | 用 6.5 内容覆盖 | 包含公开 Stream API 实现 |
 | `scripts/xquic.lds` | 覆盖 | 导出新增公开 API 符号 |
 | `scripts/mini_api/` | 用 6.5 内容覆盖并补充新文件 | 提供 ABI 和隔离检查 |
-| `tests/` | 用 6.5 内容覆盖并补充新文件 | 提供协议、契约和双向验收测试 |
+| `tests/` | 用 6.5 内容覆盖并补充新文件 | 提供正式 GET+POST 聚合压测脚本 |
 
 如果使用“完整 6.5 源码树覆盖”，上表会自然全部满足，不需要逐个挑选文件。
 
@@ -125,8 +125,8 @@ grep 'add_executable(netins_udp_stream_server' mini/CMakeLists.txt
 不要使用原来的 6.3 `build` 目录，也不要把旧的 `CMakeCache.txt` 复制过来。建议使用全新的：
 
 ```text
-build-stream-client-aarch64-6.5
-build-stream-server-linux-6.5
+build-stream-client-aarch64-delivery-6.5
+build-stream-server-linux-delivery-6.5
 ```
 
 原因是旧缓存保存了源码路径、编译器、目标架构、依赖库路径和旧目标列表。复用旧缓存容易把
@@ -150,7 +150,7 @@ STREAM_ARM_TC=/opt/crosstools/toolchain/gcc/usr/bin/aarch64-oe-linux
 STREAM_ARM_TLS="$STREAM_SRC/../third_party/Tongsuo-8.3.0"
 STREAM_ARM_EVENT=/home/admin123/libevent_aarch64/libevent-2.1.12-stable
 STREAM_ARM_ZLOG=/home/admin123/zlog-1.2.18
-STREAM_CLIENT_BUILD="$STREAM_SRC/build-stream-client-aarch64-6.5"
+STREAM_CLIENT_BUILD="$STREAM_SRC/build-stream-client-aarch64-delivery-6.5"
 
 export SIM8810_SDK_ROOT="$STREAM_ARM_SDK"
 export SIM8810_TOOLCHAIN_DIR="$STREAM_ARM_TC"
@@ -190,8 +190,8 @@ cmake --build "$STREAM_CLIENT_BUILD" \
 客户端产物：
 
 ```text
-build-stream-client-aarch64-6.5/mini/netins_udp_stream_client
-build-stream-client-aarch64-6.5/libxquic-static.a
+build-stream-client-aarch64-delivery-6.5/mini/netins_udp_stream_client
+build-stream-client-aarch64-delivery-6.5/libxquic-static.a
 ```
 
 检查架构：
@@ -216,7 +216,7 @@ STREAM_SRC="$PWD"
 STREAM_ARM_TLS="$STREAM_SRC/../third_party/Tongsuo-8.3.0"
 STREAM_ARM_EVENT=/home/admin123/libevent_aarch64/libevent-2.1.12-stable
 STREAM_ARM_ZLOG=/home/admin123/zlog-1.2.18
-STREAM_CLIENT_BUILD="$STREAM_SRC/build-stream-client-aarch64-native-6.5"
+STREAM_CLIENT_BUILD="$STREAM_SRC/build-stream-client-aarch64-native-delivery-6.5"
 
 cmake -S "$STREAM_SRC" -B "$STREAM_CLIENT_BUILD" \
   -DCMAKE_C_COMPILER=/usr/bin/gcc \
@@ -261,7 +261,7 @@ STREAM_SRC="$PWD"
 STREAM_LINUX_TLS=/usr/local/babassl
 STREAM_LINUX_EVENT=/data/quic/libevent-2.1.12-stable
 STREAM_LINUX_ZLOG=/实际路径/zlog-1.2.18
-STREAM_SERVER_BUILD="$STREAM_SRC/build-stream-server-linux-6.5"
+STREAM_SERVER_BUILD="$STREAM_SRC/build-stream-server-linux-delivery-6.5"
 
 find "$STREAM_LINUX_TLS" -maxdepth 2 \
   \( -name libssl.a -o -name libcrypto.a \) -print
@@ -319,8 +319,8 @@ cmake --build "$STREAM_SERVER_BUILD" \
 服务端产物：
 
 ```text
-build-stream-server-linux-6.5/mini/netins_udp_stream_server
-build-stream-server-linux-6.5/libxquic-static.a
+build-stream-server-linux-delivery-6.5/mini/netins_udp_stream_server
+build-stream-server-linux-delivery-6.5/libxquic-static.a
 ```
 
 检查架构和动态依赖：
@@ -333,25 +333,13 @@ ldd "$STREAM_SERVER_BUILD/mini/netins_udp_stream_server"
 
 `Machine` 应为 `Advanced Micro Devices X86-64`，`ldd` 不应出现 `not found`。
 
-## 6. 可选：同时编译测试目标和共享库
+## 6. 可选：全量编译和源码检查
 
-只构建 Client 或 Server Demo 时，CMake 会自动构建它依赖的 `libxquic-static.a`。如果还要
-执行完整的同机自动验收，建议在 Linux x86_64 服务端编译目录执行全量构建：
+只构建 Client 或 Server Demo 时，CMake 会自动构建它依赖的 `libxquic-static.a`。如果还需要
+共享库和四个 Demo，可在相应编译目录执行全量构建：
 
 ```bash
 cmake --build "$STREAM_SERVER_BUILD" --parallel "$(nproc)"
-```
-
-或只增加这些测试目标：
-
-```bash
-cmake --build "$STREAM_SERVER_BUILD" --target \
-  netins_udp_stream_client \
-  mini_stream_protocol_test \
-  mini_stream_reorder_test \
-  netins_udp_stream_api_contract_test \
-  xquic \
-  --parallel "$(nproc)"
 ```
 
 源码静态检查：
@@ -382,7 +370,7 @@ Server。Client 与 Server 的 `BYTES`、`SEED` 和方向必须一致。
 
 ```bash
 ./netins_udp_stream_server 0.0.0.0 18460 67108864 7 \
-  8388608 600000 --post
+  600000 --post
 ```
 
 服务端应输出：
@@ -396,7 +384,7 @@ Server。Client 与 Server 的 `BYTES`、`SEED` 和方向必须一致。
 
 ```bash
 ./netins_udp_stream_client SERVER_IP 18460 67108864 7 \
-  8388608 8388608 0 600000 600000 \
+  0 600000 600000 \
   --post --interface rmnet_data0 --interface usb0 --scheduler balanced
 ```
 
@@ -406,7 +394,7 @@ Server。Client 与 Server 的 `BYTES`、`SEED` 和方向必须一致。
 
 ```bash
 ./netins_udp_stream_server 0.0.0.0 18460 67108864 7 \
-  8388608 600000 --get --send-queue-bytes 8388608 \
+  600000 --get \
   --write-timeout-ms 600000
 ```
 
@@ -414,15 +402,15 @@ Server。Client 与 Server 的 `BYTES`、`SEED` 和方向必须一致。
 
 ```bash
 ./netins_udp_stream_client SERVER_IP 18460 67108864 7 \
-  8388608 8388608 0 600000 600000 \
+  0 600000 600000 \
   --get --interface rmnet_data0 --interface usb0
 ```
 
 ### 7.3 参数与成功标准
 
-- Demo 固定使用 4 lane，命令中没有 lane 数参数；
+- Demo 使用 4 lane；
 - `--interface` 可以重复，单网卡测试只传一个，双网卡聚合测试传两个；
-- GET 固定使用 `adaptive`；POST 不传 `--scheduler` 时默认使用 `balanced`，也可以显式选择其他上传调度器；
+- GET 使用 `adaptive`；POST 不传 `--scheduler` 时默认使用 `balanced`，也可以选择其他上传调度器；
 - Client 和 Server 的 `BYTES`、`SEED` 必须一致；
 - Client 和 Server 必须同时使用 `--post` 或同时使用 `--get`，省略时兼容默认为 POST；
 - 每轮服务端默认处理一个客户端，下一轮测试前需要重新启动服务端；
@@ -434,7 +422,21 @@ Server。Client 与 Server 的 `BYTES`、`SEED` 和方向必须一致。
 [stream_api_result] ... success=1 ...
 ```
 
-## 8. 常见问题判断
+## 8. 正式 GET+POST 压测
+
+控制主机安装 Python 3 和 `paramiko`，主板与云端按原文件压测环境部署
+`monitor_board_resource.sh` 和 `monitor_server_memory.sh`。运行：
+
+```bash
+python tests/stream_api_benchmark.py --iterations 10
+```
+
+脚本每轮传输 100 MiB，依次执行 GET 和 POST 的 `5G1 -> Agg -> 5G2`。GET 使用
+`adaptive`，POST 默认 `balanced`。输出包含每次速率日志、GET/POST 聚合率汇总、资源汇总和
+资源采样 CSV；不保留每次 Client/Server 的原始 stdout/stderr。需要修改 SSH 地址、运行目录或
+可执行文件名时，执行 `python tests/stream_api_benchmark.py --help` 查看参数。
+
+## 9. 常见问题判断
 
 ### CMake 提示没有 `netins_udp_stream_client/server` 目标
 
@@ -470,7 +472,7 @@ Tongsuo/BabaSSL、Libevent 或 zlog 中至少一个静态库没有使用 `-fPIC`
 确认 Client 和 Server 都完成了相同的 6.5 文件覆盖。6.5 内部 Stream 协议为 v4，不能与
 6.4/v3、早期 Stream POC 或中间开发版本混用。
 
-## 9. 最终检查清单
+## 10. 最终检查清单
 
 - [ ] Client 和 Server 源码的 `VERSION` 都是 `6.5`；
 - [ ] 两端头文件中的 Release 都是 `6.5`；

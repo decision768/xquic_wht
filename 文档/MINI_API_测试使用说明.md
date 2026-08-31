@@ -15,13 +15,15 @@
 测试脚本位于：
 
 ```text
-tests/mini_api_benchmark/
+tests/
 ├── mini_api_benchmark.py
+├── stream_api_benchmark.py
 ├── monitor_board_resource.sh
 └── monitor_server_memory.sh
 ```
 
-三个脚本必须配套使用。Python 脚本运行在控制电脑；两个 shell 脚本分别部署到主板和云服务器。
+两个 Python 脚本分别用于文件 API 和 Stream API 压测，均运行在控制电脑；两个 shell
+脚本由压测流程共用，分别部署到主板和云服务器。
 
 ## 2. 默认测试拓扑
 
@@ -44,9 +46,9 @@ tests/mini_api_benchmark/
 控制电脑保留源码仓库中的以下文件：
 
 ```text
-tests/mini_api_benchmark/mini_api_benchmark.py
-tests/mini_api_benchmark/monitor_board_resource.sh
-tests/mini_api_benchmark/monitor_server_memory.sh
+tests/mini_api_benchmark.py
+tests/monitor_board_resource.sh
+tests/monitor_server_memory.sh
 ```
 
 控制电脑需要安装 Python 3 和 Paramiko：
@@ -126,14 +128,14 @@ test -r server.key
 上传到主板：
 
 ```powershell
-scp tests/mini_api_benchmark/monitor_board_resource.sh root@192.168.11.1:/oemdata/monitor_board_resource.sh
+scp tests/monitor_board_resource.sh root@192.168.11.1:/oemdata/monitor_board_resource.sh
 ssh root@192.168.11.1 "chmod +x /oemdata/monitor_board_resource.sh"
 ```
 
 上传到云服务器：
 
 ```powershell
-scp tests/mini_api_benchmark/monitor_server_memory.sh root@124.70.219.194:/root/test_xquic_server/monitor_server_memory.sh
+scp tests/monitor_server_memory.sh root@124.70.219.194:/root/test_xquic_server/monitor_server_memory.sh
 ssh root@124.70.219.194 "chmod +x /root/test_xquic_server/monitor_server_memory.sh"
 ```
 
@@ -171,7 +173,7 @@ ss -lunp | grep ':18446 ' || true
 在仓库根目录运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py
+python tests/mini_api_benchmark.py
 ```
 
 默认测试参数如下：
@@ -189,7 +191,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 | 服务器资源监控脚本 | `/root/test_xquic_server/monitor_server_memory.sh` |
 | GET 远端文件 | `/upload/1` |
 | POST 本地文件 | `/oemdata/gx/xquic_file/download/kkk.txt` |
-| GET 调度算法 | 固定 `adaptive` |
+| GET 调度算法 | `adaptive` |
 | POST 客户端调度算法 | `adaptive`（可选 minrtt、rap 等） |
 | 客户端拥塞控制 | `bbr` |
 | 测试轮数 | 20 |
@@ -199,7 +201,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py
 | 资源采样间隔 | 0.5 s |
 | SHA-256 校验 | 默认关闭 |
 
-服务端由 Python 脚本在 `/root/test_xquic_server` 中自动启动，服务端 Demo 固定使用
+服务端由 Python 脚本在 `/root/test_xquic_server` 中自动启动，服务端 Demo 使用
 `adaptive`。Python 的 `--scheduler` 只控制 POST 客户端；GET 命令始终传入 `adaptive`。
 
 每轮先完成全部 GET，再完成全部 POST；GET 和 POST 内部都按照 `--order` 指定的网络模式顺序执行。默认一轮的实际顺序为：
@@ -213,7 +215,7 @@ GET 5G1 -> GET 聚合 -> GET 5G2 -> POST 5G1 -> POST 聚合 -> POST 5G2
 ### 6.1 使用 SSH 密钥
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --board-ssh-key C:\keys\board_key `
   --server-ssh-key C:\keys\server_key
 ```
@@ -223,7 +225,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 ```powershell
 $env:MINI_BENCH_BOARD_PASSWORD = "主板密码"
 $env:MINI_BENCH_SERVER_PASSWORD = "服务器密码"
-python tests/mini_api_benchmark/mini_api_benchmark.py
+python tests/mini_api_benchmark.py
 ```
 
 测试结束后应清除当前终端中的密码变量：
@@ -238,7 +240,7 @@ Remove-Item Env:MINI_BENCH_SERVER_PASSWORD
 执行10轮并启用文件 SHA-256 校验：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --iterations 10 `
   --verify-sha256
 ```
@@ -246,7 +248,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 修改服务器地址和端口：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-ssh-host 124.70.219.194 `
   --quic-host 124.70.219.194 `
   --quic-port 18446
@@ -255,7 +257,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 修改 GET 组和 POST 组内部的网络模式顺序，例如改为“5G2、聚合、5G1”：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --order usb,agg,rmnet
 ```
 
@@ -264,7 +266,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 查看全部参数：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py --help
+python tests/mini_api_benchmark.py --help
 ```
 
 ### 6.4 修改GET源文件
@@ -304,7 +306,7 @@ GET源文件位于云服务器，由以下两个参数共同决定：
 可以执行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-dir /data/mini_test `
   --remote-path /files/get-500m.bin
 ```
@@ -350,7 +352,7 @@ POST源文件位于主板，由 `--post-local` 指定。建议始终使用主板
 运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --post-local /oemdata/test_data/post-1g.bin
 ```
 
@@ -371,7 +373,7 @@ test -s /oemdata/test_data/post-1g.bin
 例如：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --post-local /oemdata/test_data/post-1g.bin `
   --post-remote-rmnet /post_result/rmnet-post-1g.bin `
   --post-remote-usb /post_result/usb-post-1g.bin `
@@ -402,8 +404,8 @@ mkdir -p /data/mini_test/post_result
 
 ### 6.6 修改 POST 调度算法和客户端拥塞控制
 
-Python 参数 `--scheduler` 只用于 POST 客户端。GET 客户端和文件服务端均固定为
-`adaptive`，不会随该参数变化。
+Python 参数 `--scheduler` 只用于 POST 客户端。GET 客户端和文件服务端使用
+`adaptive`。
 
 默认配置：
 
@@ -416,7 +418,7 @@ POST: --scheduler adaptive
 使用 `minrtt`：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --scheduler minrtt `
   --cc bbr
 ```
@@ -424,7 +426,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 使用 `rap`：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --scheduler rap `
   --cc bbr
 ```
@@ -432,7 +434,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 使用 `adaptive`：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --scheduler adaptive `
   --cc bbr
 ```
@@ -440,7 +442,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 拥塞控制可以通过 `--cc` 修改。例如：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --scheduler minrtt `
   --cc cubic
 ```
@@ -449,7 +451,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 并在记录中写明实际参数。不要把 Python 的 `--scheduler minrtt` 理解为 GET 或服务端也使用
 `minrtt`。
 
-实际服务端 Demo 启动命令不再包含 scheduler 参数：
+实际服务端 Demo 启动命令如下：
 
 ```sh
 ./netins_udp_mini_api_server \
@@ -471,8 +473,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 [mini-api:1] Mini API server version=6.5
 ```
 
-服务端 scheduler 已在 Demo 内部固定为 `adaptive`，不提供 `--scheduler` 或
-`--server-scheduler` 参数。
+文件服务端 Demo 使用 `adaptive`。
 
 ### 6.7 API服务端不在默认位置
 
@@ -502,7 +503,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-dir /data/api_server `
   --server-executable ./netins_udp_mini_api_server
 ```
@@ -519,7 +520,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-dir /data/mini_test `
   --server-executable /opt/netins/bin/netins_udp_mini_api_server
 ```
@@ -562,14 +563,14 @@ chmod +x /opt/netins/tests/monitor_server_memory.sh
 然后运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-resource-monitor /opt/netins/tests/monitor_server_memory.sh
 ```
 
 服务器资源CSV临时目录由 `--server-resource-dir` 控制。例如：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-resource-monitor /opt/netins/tests/monitor_server_memory.sh `
   --server-resource-dir /data/mini_resource
 ```
@@ -582,7 +583,7 @@ mkdir -p /data/mini_resource
 test -w /data/mini_resource
 ```
 
-不要把控制电脑中的 `tests/mini_api_benchmark/monitor_server_memory.sh` 路径直接传给该参数。必须先上传到云服务器，再填写上传后的服务器路径。
+不要把控制电脑中的 `tests/monitor_server_memory.sh` 路径直接传给该参数。必须先上传到云服务器，再填写上传后的服务器路径。
 
 ### 6.9 主板客户端或监控脚本不在默认位置
 
@@ -607,7 +608,7 @@ test -w /data/mini_resource
 运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --board-dir /oemdata/mini_work `
   --client-executable /opt/netins/bin/netins_udp_mini_api_client `
   --board-resource-monitor /opt/netins/tests/monitor_board_resource.sh `
@@ -654,7 +655,7 @@ GET结果文件会临时写入 `--board-dir`，因此该目录必须可写并有
 例如：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --board-ssh-host 192.168.8.1 `
   --board-ssh-port 22 `
   --board-ssh-user root `
@@ -703,7 +704,7 @@ test -s /oemdata/test_data/post-1g.bin
 控制电脑运行：
 
 ```powershell
-python tests/mini_api_benchmark/mini_api_benchmark.py `
+python tests/mini_api_benchmark.py `
   --server-dir /data/mini_test `
   --server-executable /opt/netins/bin/netins_udp_mini_api_server `
   --server-resource-monitor /opt/netins/tests/monitor_server_memory.sh `
@@ -728,7 +729,7 @@ python tests/mini_api_benchmark/mini_api_benchmark.py `
 默认结果目录为：
 
 ```text
-tests/mini_api_benchmark/log/
+tests/log/
 ```
 
 主要输出包括：

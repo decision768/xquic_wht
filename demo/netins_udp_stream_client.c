@@ -15,6 +15,8 @@ typedef struct stream_demo_receiver_s {
     uint32_t seed;
     uint32_t callback_delay_ms;
     uint64_t received;
+    uint64_t first_data_time_us;
+    uint64_t last_data_time_us;
     uint64_t first_bad_offset;
     int progress_reported;
     int mismatch;
@@ -44,7 +46,7 @@ stream_demo_usage(const char *program)
         " [FLAGS [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]"
         " [--get|--post] [--interface NAME]... [--scheduler NAME]"
         " [--write-chunk-size N] [--callback-delay-ms N]\n"
-        "  lanes are fixed at %u; --interface may be repeated up to %u times\n"
+        "  lanes: %u; --interface may be repeated up to %u times\n"
         "  direction defaults to POST (client sends); GET makes the client receive\n"
         "  write chunk defaults to %u bytes\n"
         "  --write-chunk-size and --callback-delay-ms are test-only\n"
@@ -319,6 +321,17 @@ stream_demo_sleep_ms(uint32_t delay_ms)
     }
 }
 
+static uint64_t
+stream_demo_now_us(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return (uint64_t)now.tv_sec * 1000000ULL
+        + (uint64_t)now.tv_nsec / 1000ULL;
+}
+
 static void
 stream_demo_fill(unsigned char *data, size_t data_len, uint64_t offset,
     uint32_t seed)
@@ -337,6 +350,13 @@ stream_demo_on_data(netins_udp_stream_t *stream, const void *data,
     stream_demo_receiver_t *receiver = user_data;
     const unsigned char *bytes = data;
     size_t i;
+    if (data_len != 0) {
+        uint64_t now_us = stream_demo_now_us();
+        if (receiver->first_data_time_us == 0) {
+            receiver->first_data_time_us = now_us;
+        }
+        receiver->last_data_time_us = now_us;
+    }
     if (offset != receiver->received && !receiver->mismatch) {
         receiver->mismatch = 1;
         receiver->first_bad_offset = receiver->received;
@@ -420,6 +440,8 @@ main(int argc, char **argv)
     uint64_t offset = 0;
     uint64_t eagain_count = 0;
     uint64_t partial_count = 0;
+    uint64_t submit_start_time_us = 0;
+    uint64_t submit_end_time_us = 0;
     if (options.direction
         == NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER)
     {
@@ -438,6 +460,9 @@ main(int argc, char **argv)
             while (consumed < count) {
                 size_t accepted = 0;
                 size_t requested = count - consumed;
+                if (submit_start_time_us == 0) {
+                    submit_start_time_us = stream_demo_now_us();
+                }
                 int write_result = netins_udp_stream_write(stream,
                     buffer + consumed, requested, options.write_timeout_ms,
                     &accepted);
@@ -467,6 +492,12 @@ main(int argc, char **argv)
                 }
             }
         }
+        if (netins_udp_stream_flush(stream, options.write_timeout_ms) != 0) {
+            perror("flush data stream");
+            stream_demo_print_snapshot(stream);
+            goto cleanup;
+        }
+        submit_end_time_us = stream_demo_now_us();
     }
 
     netins_udp_stream_result_t stream_result =
@@ -490,6 +521,30 @@ main(int argc, char **argv)
     double throughput_mbps = stream_result.elapsed_us == 0 ? 0.0
         : (double)stream_result.peer_received_bytes * 8.0
             / (double)stream_result.elapsed_us;
+    const char *metric_name;
+    uint64_t metric_bytes;
+    uint64_t metric_elapsed_us;
+    if (options.direction
+        == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT)
+    {
+        metric_name = "first_body_to_last_body";
+        metric_bytes = receiver.received;
+        metric_elapsed_us = receiver.last_data_time_us
+                > receiver.first_data_time_us
+            ? receiver.last_data_time_us - receiver.first_data_time_us : 0;
+    } else {
+        metric_name = "first_write_to_xquic_flush";
+        metric_bytes = offset;
+        metric_elapsed_us = submit_end_time_us > submit_start_time_us
+            ? submit_end_time_us - submit_start_time_us : 0;
+    }
+    double metric_throughput_mbps = metric_elapsed_us == 0 ? 0.0
+        : (double)metric_bytes * 8.0 / (double)metric_elapsed_us;
+    printf("[stream_api_transfer] role=client direction=%s metric=%s"
+           " bytes=%" PRIu64 " elapsed_us=%" PRIu64
+           " throughput_mbps=%.3f\n",
+        stream_demo_direction_name(options.direction), metric_name,
+        metric_bytes, metric_elapsed_us, metric_throughput_mbps);
     printf("[stream_api_result] role=client direction=%s success=%d lanes=%u"
            " accepted=%" PRIu64 " peer_received=%" PRIu64
            " received=%" PRIu64 " first_bad_offset=%" PRIu64

@@ -12,14 +12,14 @@ GET/POST 文件收发、持续数据流、状态查询、错误处理和连接�
 ## 1. API 能做什么
 
 Mini API 同时提供基于 QUIC/HTTP3 的完整文件任务 API，以及需要显式启用的持续数据流 API。
-数据流不是透明 TCP socket：SDK 会把连续字节切成带逻辑 offset 的记录，并固定聚合到 4 条
+数据流不是透明 TCP socket：SDK 会把连续字节切成带逻辑 offset 的记录，并聚合到 4 条
 H3 Extended Bytestream lane，以保留多流聚合、跨 lane 重排和完成回执能力。
 
 - `netins_udp_connect()` 建立客户端 QUIC/HTTP3 连接；
 - `netins_udp_transfer()` 在已连接客户端上执行一次完整 GET 或 POST；
 - `netins_udp_listen()` 和 `netins_udp_accept()` 建立服务端监听并接收连接；
 - `netins_udp_serve()` 在 accepted 连接上处理 GET/POST，直到对端关闭；
-- `netins_udp_stream_open()` / `accept()` 建立固定 4 lane 的半双工逻辑数据流；
+- `netins_udp_stream_open()` / `accept()` 建立 4-lane 半双工逻辑数据流；
 - `netins_udp_stream_write()` 由 `direction` 指定的一端调用，可一边接收生产者 Buffer、一边持续发送；
 - `netins_udp_stream_finish()` 等待对端长度与摘要验证回执；
 - `netins_udp_shutdown()` 执行协议关闭；
@@ -153,12 +153,9 @@ netins_udp_cleanup()
 | `netins_udp_stream_close()` | 释放流对象；每个对象只能关闭一次 |
 
 两端都必须在 `connect()` / `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`。本交付版本的
-数据流公共 API 和 stream client/server 都固定使用 4 lane，不提供 `lane_count` 字段或命令行
-lane 参数，也不允许调用方自行选择不同数量；只读快照中的 `lane_count` 恒为 4。一个连接只能
-有一个活动逻辑流，且不得与文件传输混用。设置流模式后，即使还没有创建逻辑流，
-`netins_udp_transfer()` 和 `netins_udp_serve()` 也会以 `EOPNOTSUPP` 明确拒绝。完整调用示例、
-背压语义与验收方法见
-[`NETINS_UDP_STREAM_API_阶段4至7交付与验收.md`](NETINS_UDP_STREAM_API_阶段4至7交付与验收.md)。
+每个 stream-mode 连接承载一个活动逻辑流。文件传输和数据流分别使用普通连接模式与
+stream mode；对 stream-mode 连接调用 `netins_udp_transfer()` 或 `netins_udp_serve()` 会返回
+`EOPNOTSUPP`。背压、回调与关闭约束在本手册后续章节给出，Demo 和正式压测命令见第 15 章。
 
 `netins_udp_stream_config_t.direction` 选择本次半双工数据方向：
 
@@ -167,8 +164,7 @@ lane 参数，也不允许调用方自行选择不同数量；只读快照中的
 | `NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER` | CLIENT / `stream_open()` 端 | ACCEPTED / `stream_accept()` 端 |
 | `NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT` | ACCEPTED / `stream_accept()` 端 | CLIENT / `stream_open()` 端 |
 
-初始化器默认使用 `CLIENT_TO_SERVER`；为兼容 6.4 结构布局，旧二进制在该位置传入的零值也只
-在本地归一化为 `CLIENT_TO_SERVER`，线上 v4 header 永远发送显式方向值。发送端可以调用
+初始化器默认使用 `CLIENT_TO_SERVER`。发送端可以调用
 `write()`/`flush()`，接收端必须提供 `on_data`；两端最终都调用 `finish()`。
 
 ### 3.5 状态和统计
@@ -382,8 +378,7 @@ netins_udp_serve(connection, &serve);
 |---|---|---|
 | `direction` | 两个 `NETINS_UDP_STREAM_DIRECTION_*` 值之一 | 本次逻辑流的大流量数据方向；两端必须一致 |
 | `flags` | `NONE` 或 `NONBLOCK` | 控制发送端 `write()` 在本地队列满时等待还是返回 `EAGAIN` |
-| `send_queue_size` | 0 使用默认值，或至少 64 KiB | 发送端有界复制队列预算；默认 8 MiB |
-| `receive_queue_size` | 0 使用默认值，或至少 64 KiB | 接收端重排、待回调 payload 与 record CREDIT 预算；默认 8 MiB |
+| `reserved_size[2]` | 保持为 0 | ABI 保留槽；不是队列配置入口 |
 | `on_data` | 接收端必须填写 | 按逻辑 offset 递增交付；Buffer 只在回调期间有效 |
 | `user_data` | 可选 | 原样传给 `on_data` |
 
@@ -455,7 +450,7 @@ buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
 
 #### `netins_udp_stream_snapshot_t`：数据流快照（输出）
 
-`send_queue_bytes`、`reorder_bytes` 及其 high-water 字段统计 payload；配置的 queue size
+`send_queue_bytes`、`reorder_bytes` 及其 high-water 字段统计 payload，queue capacity
 同时作为内部内存预算。为避免大量小写入放大节点开销，每个 record 至少消耗 256 字节
 内部额度，接收端还通过独立的累计 record CREDIT 限制未交付记录数。因此小 record 场景的
 瞬时 payload 高水位可能明显低于配置容量，这是预期的内存保护行为。
@@ -463,15 +458,14 @@ buffer 使用普通 `int` 或 `uint32_t`，不是结构体。
 除队列高水位、record 计数和逐 lane 字节统计外，`preaccept_lane_count` 仅在服务端
 ACCEPT 端点有意义（无论该端在本次方向中负责发送还是接收）：
 它记录调用 `netins_udp_stream_accept()` 开始时，服务端已经完整缓存的 40 字节 lane header
-数量。正常业务无需依赖该字段；延迟 accept 验收必须看到固定值 4，才能证明测试确实覆盖了
-“Bytestream 先到、逻辑流后 accept”的暂存路径。客户端 OPEN 端点该字段为 0。
+数量。正常业务无需依赖该字段；客户端 OPEN 端点该字段为 0。
 
 ### 5.2 `netins_udp_set_opt()` 选项
 
 | option | `value` 类型 | 角色 | 默认/约束 |
 |---|---|---|---|
 | `NETINS_UDP_OPT_INTERFACES` | `netins_udp_interfaces_t` | CLIENT | 1～8 个非空网卡名 |
-| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | 文件/流 GET 发送端固定 ADAPTIVE；POST 客户端默认 BALANCED，可显式选择 |
+| `NETINS_UDP_OPT_SCHEDULER` | `int`，值为 `netins_udp_scheduler_t` | CLIENT/SERVER | GET 使用 ADAPTIVE；POST 客户端默认 BALANCED，可选择其他模式 |
 | `NETINS_UDP_OPT_CONGESTION_CONTROL` | `int`，值为 `netins_udp_congestion_control_t` | CLIENT/SERVER | default/CUBIC/BBR |
 | `NETINS_UDP_OPT_TLS` | `netins_udp_tls_config_t` | CLIENT/SERVER | client 只用 SNI；server 用文件证书覆盖内置证书 |
 | `NETINS_UDP_OPT_TLS_MEMORY` | `netins_udp_tls_memory_config_t` | SERVER | 用 PEM Buffer 覆盖内置证书；每个 Buffer 最大 1 MiB |
@@ -532,13 +526,12 @@ RAP
 BALANCED
 ```
 
-文件服务端 Demo 固定使用 `adaptive`，不提供 scheduler 参数。文件客户端 Demo 的 GET
-也强制使用 `adaptive`；POST 可用 `--scheduler` 选择 `minrtt`、`rap`、`balanced` 等模式，
-未传参数时默认 `balanced`。GET 即使传入其他 scheduler，也会归一化为 `adaptive`。
+文件服务端 Demo 和文件客户端 Demo 的 GET 使用 `adaptive`。POST 可用
+`--scheduler` 选择 `minrtt`、`rap`、`balanced` 等模式，未传参数时默认 `balanced`。
 
 数据流 POST 由客户端发送，stream client 默认 `balanced`，也可以通过 `--scheduler NAME`
-选择其他模式；GET 由服务端发送，stream server 固定 `adaptive`，stream client 的连接策略也
-归一化为 `adaptive`。scheduler 是连接级选项，必须在 `connect()` / `listen()` 前确定，连接
+选择其他模式；GET 由服务端发送并使用 `adaptive`。scheduler 是连接级选项，必须在
+`connect()` / `listen()` 前确定，连接
 建立后不能切换。
 
 拥塞控制可选值：
@@ -746,6 +739,66 @@ total_bytes × 8 / elapsed_us
 
 数值单位正好是 Mbit/s（按十进制 10^6）。
 
+### 6.5 客户端数据流
+
+数据流不调用 `netins_udp_transfer()`。必须在 `connect()` 前开启流模式：
+
+```c
+int stream_mode = 1;
+if (netins_udp_set_opt(client, NETINS_UDP_OPT_STREAM_MODE,
+        &stream_mode, sizeof(stream_mode)) != 0) {
+    /* 处理错误 */
+}
+```
+
+Client 作为 POST 发送端时，持续从业务 Buffer 取数据并写入逻辑流。下面的 `data`、
+`data_len` 代表应用当前已准备好的一段数据：
+
+```c
+netins_udp_stream_config_t config = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+config.direction = NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
+
+netins_udp_stream_t *stream = NULL;
+if (netins_udp_stream_open(client, &config, &stream) != 0) {
+    /* 处理错误 */
+    return;
+}
+
+size_t offset = 0;
+int failed = 0;
+while (offset < data_len) {
+    size_t accepted = 0;
+    int rc = netins_udp_stream_write(stream,
+        (const unsigned char *)data + offset, data_len - offset,
+        60000, &accepted);
+    offset += accepted;
+    if (rc != 0) {
+        failed = 1;
+        break;
+    }
+}
+
+if (!failed && netins_udp_stream_flush(stream, 60000) == 0) {
+    netins_udp_stream_result_t result = NETINS_UDP_STREAM_RESULT_INITIALIZER;
+    if (netins_udp_stream_finish(stream, 600000, &result) == 0) {
+        /* result.peer_received_bytes 是已验证的对端接收字节数。 */
+    }
+} else {
+    (void)netins_udp_stream_reset(stream, 0);
+}
+netins_udp_stream_close(stream);
+```
+
+一次 `write()` 会复制已 accepted 的 Buffer，返回后应用可以立即复用该部分内存。数据流
+内部队列和 lane 分流由 API 管理，业务代码只需处理 Buffer 写入和背压。
+`NONBLOCK` 模式下，应用可在 `errno==EAGAIN` 时等待可写条件后从已 accepted 的位置继续；
+其他错误进入 `reset()`/`close()` 清理。
+
+Client 作为 GET 接收端时，把 `direction` 改为
+`NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT`，并在 `open()` 前填写 `config.on_data` 和
+`config.user_data`。`on_data` 按 offset 递增接收数据；回调中只复制/消费数据或通知业务线程，
+不在回调内对同一 stream 执行 `finish()`/`close()`。
+
 ## 7. 服务端：监听、接收和处理连接
 
 ### 7.1 创建 listener
@@ -788,6 +841,37 @@ if (connection != NULL) {
 当前公开 API 的 listener 处理模型是串行的：`accept()` 一个连接后调用阻塞 `serve()`，
 该连接结束后再接受下一个连接。若上层需要并发服务多个客户端，必须为共享 server backend
 设计串行事件泵/调度；不能简单让多个线程同时调用同一 listener 及其 accepted handle。
+
+### 7.3 服务端数据流
+
+服务端也必须在 `listen()` 前设置 `NETINS_UDP_OPT_STREAM_MODE=1`。`accept()` 返回连接后，
+不调用 `netins_udp_serve()`，而是使用与 Client 相同的 `direction` 接受逻辑流：
+
+```c
+netins_udp_t *connection = netins_udp_accept(server);
+if (connection == NULL) {
+    /* 处理错误 */
+    return;
+}
+netins_udp_stream_config_t config = NETINS_UDP_STREAM_CONFIG_INITIALIZER;
+config.direction = NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
+config.on_data = on_stream_data;   /* POST 时 Server 是接收端 */
+config.user_data = &receiver_state;
+
+netins_udp_stream_t *stream = NULL;
+if (netins_udp_stream_accept(connection, &config, &stream) != 0) {
+    netins_udp_close(connection);
+    return;
+}
+netins_udp_stream_result_t result = NETINS_UDP_STREAM_RESULT_INITIALIZER;
+(void)netins_udp_stream_finish(stream, 600000, &result);
+netins_udp_stream_close(stream);
+netins_udp_close(connection);
+```
+
+GET 时把 `direction` 改为 `SERVER_TO_CLIENT`，Server 不填 `on_data`，而是在
+`stream_accept()` 成功后按照 6.5 节的写入、`flush()`、`finish()` 步骤发送数据。两端方向
+不一致会以协议错误结束；同一连接不能再进入文件 `transfer()`/`serve()` 流程。
 
 ## 8. 完整客户端示例
 
@@ -1165,9 +1249,9 @@ if (netins_udp_get_close_reason(handle, &reason) == 0) {
 API 内部事件循环使用阻塞 `EVLOOP_ONCE` 驱动，不再用固定 1 ms 轮询；显式状态查询只进行
 一次非阻塞事件泵。
 
-## 13. 固定传输语义
+## 13. 传输语义
 
-为保持与当前 mini 数据面一致，下列参数固定在库内部，API v1 不开放修改：
+文件传输沿用当前 mini 数据面的以下参数：
 
 - 文件分片：4 MiB；
 - GET 并发 request：8；
@@ -1178,6 +1262,9 @@ API 内部事件循环使用阻塞 `EVLOOP_ONCE` 驱动，不再用固定 1 ms �
 - GET 返回前等待异步写队列和 `fsync()`；
 - 0 字节文件合法；
 - 任务超时会关闭/终止连接，避免迟到 request 继续写文件。
+
+数据流使用 4-lane 聚合。GET 方向使用 `adaptive`；POST 默认使用 `balanced`，Demo 可用
+`--scheduler` 选择其他上传调度器。
 
 ## 14. 编译和链接
 
@@ -1233,7 +1320,7 @@ build/mini/netins_udp_stream_server
 | `--host`、`--port` | `netins_udp_connect()` |
 | `--interface` | `NETINS_UDP_OPT_INTERFACES` |
 | `--server-name` | client `NETINS_UDP_OPT_TLS` |
-| client `--scheduler` | `NETINS_UDP_OPT_SCHEDULER`；GET 固定 adaptive，文件/流 POST 默认 balanced 并可选 |
+| client `--scheduler` | `NETINS_UDP_OPT_SCHEDULER`；GET 使用 adaptive，文件/流 POST 默认 balanced 并可选 |
 | `--cc` | `NETINS_UDP_OPT_CONGESTION_CONTROL` |
 | `--get`/`--post` | `task.direction` |
 | `--local` | `task.local_path` |
@@ -1243,18 +1330,17 @@ build/mini/netins_udp_stream_server
 | `--zlog-config`/`--zlog-category` | `NETINS_UDP_OPT_ZLOG`；不传时 zlog 关闭 |
 | server `--cert`/`--key` | 可选；server `NETINS_UDP_OPT_TLS` 文件覆盖；不传时使用内置证书 |
 | server `--root` | `serve.root_path` |
-| server scheduler | Demo 内部固定为 `NETINS_UDP_SCHEDULER_ADAPTIVE`，无命令行参数 |
+| server scheduler | GET 使用 `NETINS_UDP_SCHEDULER_ADAPTIVE` |
 | server `--accept-timeout-ms` | `NETINS_UDP_OPT_ACCEPT_TIMEOUT_MS` |
 | server `--serve-timeout-ms` | `serve.timeout_ms` |
 
 ### 15.1 数据流 Demo 参数
 
-数据流 client 的命令格式如下，lane 固定为 4，因此参数中没有 `LANES`：
+数据流 client 的命令格式如下：
 
 ```text
 netins_udp_stream_client HOST PORT BYTES SEED
-  [SEND_QUEUE_BYTES [RECEIVE_QUEUE_BYTES [FLAGS
-  [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]]]
+  [FLAGS [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]
   [--get|--post] [--interface NAME]... [--scheduler NAME]
   [--write-chunk-size N] [--callback-delay-ms N]
 ```
@@ -1263,30 +1349,45 @@ netins_udp_stream_client HOST PORT BYTES SEED
 单网卡；传入 `--interface rmnet_data0 --interface usb0` 用于双路径聚合。未传接口时保留
 底层默认选路，但性能验收必须显式指定，避免受默认路由影响。
 
-不传方向时兼容旧命令并默认 POST。POST 中 client 是发送端，`--write-chunk-size` 仅用于验收
-调用侧的小块写入，默认 256 KiB；GET 中 client 是接收端，`--callback-delay-ms` 用于模拟慢
-回调。自动验收使用发送端 1 字节写入连续产生 1024 个 record，覆盖小 record 内存保护和
-record CREDIT。
+不传方向时兼容旧命令并默认 POST。POST 中 client 是发送端，`--write-chunk-size` 可调整调用侧
+每次写入大小，默认 256 KiB；GET 中 client 是接收端，`--callback-delay-ms` 可用于慢回调调试。
+性能压测不应启用人工回调延迟。
 
 数据流 server 的命令格式：
 
 ```text
 netins_udp_stream_server LISTEN_IP PORT EXPECTED_BYTES SEED
-  [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]
-  [--get|--post] [--send-queue-bytes N] [--write-chunk-size N]
+  [FINISH_TIMEOUT_MS [CLIENTS]]
+  [--get|--post] [--write-chunk-size N]
   [--write-timeout-ms N] [--flags N]
   [--callback-delay-ms N] [--accept-delay-ms N]
 ```
 
 不传方向时 server 同样默认 POST。POST 中 server 是接收端，`--callback-delay-ms` 模拟慢回调；
-GET 中 server 是发送端，使用 `--send-queue-bytes`、`--write-chunk-size`、`--write-timeout-ms`
-和 `--flags` 控制写入验收。`--accept-delay-ms` 在连接 accept 后、逻辑 `stream_accept()` 前
+GET 中 server 是发送端，使用 `--write-chunk-size`、`--write-timeout-ms` 和 `--flags` 控制写入行为。
+`--accept-delay-ms` 在连接 accept 后、逻辑 `stream_accept()` 前
 等待，用于验证两个方向在 accept 前都只有四个 lane header。延迟 accept 用例还必须在服务端
 快照看到 `preaccept_lanes=4`；只有延迟日志和最终传输成功不足以判定该路径已被覆盖。
 delay 默认均为 0，性能测试不得启用。
 
-客户端和服务端内部都固定为 4 lane。两端必须选择同一个方向，`BYTES` 和
+两端必须选择同一个方向，`BYTES` 和
 `EXPECTED_BYTES` 必须一致；传 0 表示严格验收空数据流，仍会完成四 lane FIN、回执和统计。
+`BYTES`/`EXPECTED_BYTES` 只是 Demo 生成和校验模拟数据的参数；公共 Stream API 本身不要求发送前
+预知总长度，业务可以一边产生 Buffer 一边连续 `write()`，最后以 `finish()` 结束。
+
+### 15.2 正式 GET+POST 聚合压测
+
+交付压测脚本为 `tests/stream_api_benchmark.py`，每轮传输 100 MiB，顺序为
+GET `5G1 -> Agg -> 5G2`，然后 POST `5G1 -> Agg -> 5G2`。例如：
+
+```bash
+python tests/stream_api_benchmark.py --iterations 10
+```
+
+脚本复用文件压测环境已部署的 `monitor_board_resource.sh` 和
+`monitor_server_memory.sh`。输出包含每次测试的简化速率日志、GET/POST 聚合率汇总、
+资源汇总和资源采样 CSV；不保留 Client/Server 每次运行的原始 stdout/stderr，速率日志也不写入
+各 lane 流量。脚本不操作网卡开关，断链恢复需要单独人工验证。
 
 ## 16. 常见错误
 
