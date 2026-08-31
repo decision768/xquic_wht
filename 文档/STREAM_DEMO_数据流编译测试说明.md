@@ -415,24 +415,213 @@ ABI CHECK: PASS (28 public functions)
 
 ## 8. 正式 GET+POST 压测
 
-控制主机安装 Python 3 和 `paramiko`，主板与云端沿用文件压测环境中的
-`monitor_board_resource.sh` 和 `monitor_server_memory.sh`。运行：
+### 8.1 复用文件 Demo 压测环境
+
+数据流压测与文件 Demo 压测使用相同的控制主机、SSH连接、主板网络、云服务器、UDP端口和
+资源监控脚本，不需要重新搭建一套环境。保留原文件压测环境，只补充下面三个文件：
+
+```text
+控制主机：tests/stream_api_benchmark.py
+主板：    /oemdata/gx/xquic_file/netins_udp_stream_client
+云服务器：/root/test_xquic_server/netins_udp_stream_server
+```
+
+两个监控脚本继续使用文件压测时的原位置：
+
+```text
+主板：    /oemdata/monitor_board_resource.sh
+云服务器：/root/test_xquic_server/monitor_server_memory.sh
+```
+
+确认新可执行文件和监控脚本具有执行权限：
 
 ```bash
+# 主板
+chmod +x /oemdata/gx/xquic_file/netins_udp_stream_client
+chmod +x /oemdata/monitor_board_resource.sh
+
+# 云服务器
+chmod +x /root/test_xquic_server/netins_udp_stream_server
+chmod +x /root/test_xquic_server/monitor_server_memory.sh
+```
+
+Stream Demo 在内存中生成并校验测试数据，不需要准备文件 Demo 使用的 GET源文件和POST源文件。
+原文件综合压测脚本及其文件可以继续保留，不需要修改。
+
+### 8.2 默认测试内容
+
+脚本默认配置如下：
+
+| 项目 | 默认值 |
+|---|---|
+| 主板 SSH | `root@192.168.11.1:22` |
+| 云服务器 SSH | `root@124.70.219.194:22` |
+| QUIC 地址 | `124.70.219.194:18446` |
+| 主板工作目录 | `/oemdata/gx/xquic_file` |
+| 云服务器工作目录 | `/root/test_xquic_server` |
+| 单次数据量 | 100 MiB |
+| 测试轮数 | 10 |
+| 单项失败重试 | 1次，最多尝试2次 |
+| 每轮顺序 | GET `5G1 -> Agg -> 5G2`，然后 POST `5G1 -> Agg -> 5G2` |
+| 5G1 | `rmnet_data0` |
+| 5G2 | `usb0` |
+| Agg | `rmnet_data0 + usb0` |
+| GET 调度器 | `adaptive` |
+| POST 调度器 | `balanced`，可通过 `--scheduler` 修改 |
+| Stream lane | 4 |
+| 资源采样间隔 | 0.5秒 |
+
+单次100 MiB由交付压测脚本固定，不提供测试数据量参数。`--scheduler` 只控制POST方向，GET仍
+使用 `adaptive`。
+
+### 8.3 运行压测
+
+控制主机安装 Python 3 和 `paramiko`：
+
+```powershell
+python -m pip install paramiko
+```
+
+建议使用SSH密钥。使用密码时，可在当前 PowerShell 会话中设置环境变量：
+
+```powershell
+$env:MINI_BENCH_BOARD_PASSWORD = "主板密码"
+$env:MINI_BENCH_SERVER_PASSWORD = "云服务器密码"
 python tests/stream_api_benchmark.py --iterations 10
 ```
 
-脚本每轮传输 100 MiB，依次执行 GET 和 POST 的 `5G1 -> Agg -> 5G2`。GET 使用
-`adaptive`，POST 默认 `balanced`。输出包含每次速率日志、GET/POST 聚合率汇总、资源汇总和
-资源采样 CSV。
+测试结束后清除密码变量：
 
-执行下面的命令可以查看 SSH 地址、运行目录和可执行文件名等参数：
+```powershell
+Remove-Item Env:MINI_BENCH_BOARD_PASSWORD
+Remove-Item Env:MINI_BENCH_SERVER_PASSWORD
+```
+
+使用SSH密钥的示例：
+
+```powershell
+python tests/stream_api_benchmark.py `
+  --iterations 10 `
+  --board-ssh-key C:\keys\board_key `
+  --server-ssh-key C:\keys\server_key
+```
+
+修改SSH地址、QUIC地址或程序目录时，直接传入对应参数。例如：
+
+```powershell
+python tests/stream_api_benchmark.py `
+  --iterations 10 `
+  --board-ssh-host 192.168.11.1 `
+  --server-ssh-host 124.70.219.194 `
+  --quic-host 124.70.219.194 `
+  --quic-port 18446 `
+  --board-dir /oemdata/gx/xquic_file `
+  --server-dir /root/test_xquic_server
+```
+
+测试POST其他调度器时，例如：
+
+```powershell
+python tests/stream_api_benchmark.py --iterations 10 --scheduler minrtt
+```
+
+查看全部可选参数：
 
 ```bash
 python tests/stream_api_benchmark.py --help
 ```
 
-原文件综合压测脚本仍可继续用于文件 Demo，不需要因增加 Stream Demo 而修改。
+### 8.4 输出文件与统计口径
+
+默认结果保存在：
+
+```text
+tests/log/
+```
+
+主要输出如下：
+
+```text
+tests/log/
+├── 5G1_summary_get_iterXX_*.log
+├── Agg_summary_get_iterXX_*.log
+├── 5G2_summary_get_iterXX_*.log
+├── 5G1_summary_post_iterXX_*.log
+├── Agg_summary_post_iterXX_*.log
+├── 5G2_summary_post_iterXX_*.log
+├── aggregation_summary_get_<session>.csv
+├── aggregation_summary_post_<session>.csv
+├── stress_summary_<session>.csv
+├── server_memory_<session>.csv
+└── resources/<session>/*_resource.csv
+```
+
+- 每次 `summary` 日志记录方向、模式、100 MiB数据量、数据面耗时和速率；
+- `aggregation_summary_get/post` 按轮次计算最佳单卡、单卡速率和、聚合增益和聚合效率；
+- `stress_summary` 汇总各次成功状态、速率及主板/服务器资源指标；
+- `server_memory` 保存云服务器整机和服务端进程的资源采样；
+- `resources/<session>` 保存每次主板客户端进程的资源采样。
+
+正式脚本不保存每次 Client/Server 的原始 stdout、stderr，也不把各 lane 流量写入速率日志。
+如需把结果保存到其他位置，可使用 `--output-root` 指定目录。
+
+速率统计口径为：
+
+```text
+GET：客户端首次数据回调到末次数据回调
+POST：客户端首次写入到本地发送队列 flush 完成
+```
+
+聚合结果包含两个指标：
+
+```text
+聚合增益 = Agg / max(5G1, 5G2) - 1
+聚合效率 = Agg / (5G1 + 5G2)
+```
+
+单卡和Agg在同一轮内依次测试，不是三项同时传输；聚合效率用于对比同轮网络状态下的理论
+单卡速率和。
+
+### 8.5 成功判定与常见错误
+
+一次传输被判定为成功，需要Client和Server正常结束，并且两端均报告：
+
+```text
+[stream_api_result] ... success=1 ...
+```
+
+脚本还会检查方向、4 lane、发送和接收字节数以及数据校验结果。资源监控结果会单独写入汇总，
+便于区分传输失败和资源样本缺失。
+
+测试前建议确认：
+
+```bash
+# 主板
+test -x /oemdata/gx/xquic_file/netins_udp_stream_client
+test -x /oemdata/monitor_board_resource.sh
+ip -o -4 addr show dev rmnet_data0
+ip -o -4 addr show dev usb0
+
+# 云服务器
+test -x /root/test_xquic_server/netins_udp_stream_server
+test -x /root/test_xquic_server/monitor_server_memory.sh
+ss -H -lunp | grep -E ':18446([[:space:]]|$)' || true
+```
+
+常见错误：
+
+- `STREAM_PORT_BUSY`：UDP 18446 已被旧服务端或其他程序占用；
+- SSH认证失败：检查密码环境变量、密钥、用户名和端口；
+- 接口或路由预检失败：检查 `rmnet_data0`、`usb0` 的IPv4地址以及到服务器的路由；
+- 资源样本为空：测试时间短于采样间隔，或监控脚本路径、权限不正确；
+- 用户中断后再次提示端口占用：先确认旧的 Stream Server 是否仍在运行以及18446是否仍被监听。
+
+检查服务端进程和端口：
+
+```bash
+pgrep -af netins_udp_stream_server
+ss -H -lunp | grep -E ':18446([[:space:]]|$)'
+```
 
 ## 9. 常见问题
 
