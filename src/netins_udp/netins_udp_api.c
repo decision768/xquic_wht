@@ -1152,10 +1152,8 @@ netins_udp_stream_configure(netins_udp_t *connection,
     memset(backend_config, 0, sizeof(*backend_config));
     backend_config->direction = direction;
     backend_config->flags = config->flags;
-    backend_config->send_queue_size = config->send_queue_size != 0
-        ? config->send_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
-    backend_config->receive_queue_size = config->receive_queue_size != 0
-        ? config->receive_queue_size : NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
+    backend_config->send_queue_size = NETINS_UDP_STREAM_FIXED_QUEUE_SIZE;
+    backend_config->receive_queue_size = NETINS_UDP_STREAM_FIXED_QUEUE_SIZE;
     backend_config->logger = connection->backend_config.logger;
     backend_config->logger_user_data =
         connection->backend_config.logger_user_data;

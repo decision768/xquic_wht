@@ -29,7 +29,6 @@ extern "C" {
 #define NETINS_UDP_REMOTE_PATH_LEN 1024U
 #define NETINS_UDP_TLS_PEM_MAX_LEN (1024U * 1024U)
 #define NETINS_UDP_STREAM_LANE_COUNT 4U
-#define NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE (8U * 1024U * 1024U)
 
 typedef struct netins_udp_s netins_udp_t;
 
@@ -381,10 +380,9 @@ typedef struct netins_udp_stream_config_s {
      * ABI layout of the former reserved32 field. */
     uint32_t direction;
     uint32_t flags;
-    /* Payload budget; tiny records also consume a bounded internal record
-     * charge so allocator/list overhead cannot exceed the configured scale. */
-    size_t send_queue_size;
-    size_t receive_queue_size;
+    /* Reserved ABI slots.  Set to zero; queue capacity is fixed at 64 MiB
+     * and is not caller-configurable. */
+    size_t reserved_size[2];
     netins_udp_stream_data_cb on_data;
     void *user_data;
     uint64_t reserved[6];
@@ -393,8 +391,7 @@ typedef struct netins_udp_stream_config_s {
 #define NETINS_UDP_STREAM_CONFIG_INITIALIZER \
     { sizeof(netins_udp_stream_config_t), NETINS_UDP_API_VERSION, \
       NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER, \
-      NETINS_UDP_STREAM_FLAG_NONE, NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, \
-      NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE, NULL, NULL, {0} }
+      NETINS_UDP_STREAM_FLAG_NONE, {0}, NULL, NULL, {0} }
 
 typedef struct netins_udp_stream_result_s {
     uint32_t struct_size;
@@ -522,9 +519,9 @@ NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
  * and outside the stream mutex.  Its memory is valid only during the
  * callback.  The receiver advertises cumulative payload and record credit
  * only after on_data returns, so a slow callback backpressures the sender at
- * receive_queue_size without allowing tiny records to grow allocator/list
- * overhead without bound.  The callback must not close or wait on the same
- * stream.
+ * the fixed 64 MiB queue budget without allowing tiny records to grow
+ * allocator/list overhead without bound.  The callback must not close or wait
+ * on the same stream.
  *
  * NETINS_UDP_OPT_STREAM_MODE must be enabled on both endpoints before
  * connect()/listen().  One logical data stream may be active per connection;

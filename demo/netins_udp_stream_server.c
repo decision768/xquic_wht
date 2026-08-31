@@ -24,8 +24,6 @@ typedef struct stream_demo_receiver_s {
 typedef struct stream_demo_server_options_s {
     const char *listen_ip;
     uint64_t expected_bytes;
-    size_t send_queue_size;
-    size_t receive_queue_size;
     size_t write_chunk_size;
     size_t client_count;
     uint32_t seed;
@@ -45,8 +43,8 @@ stream_demo_server_usage(const char *program)
 {
     fprintf(stderr,
         "usage: %s LISTEN_IP PORT EXPECTED_BYTES SEED"
-        " [RECEIVE_QUEUE_BYTES [FINISH_TIMEOUT_MS [CLIENTS]]]"
-        " [--get|--post] [--send-queue-bytes N] [--write-chunk-size N]"
+        " [FINISH_TIMEOUT_MS [CLIENTS]]"
+        " [--get|--post] [--write-chunk-size N]"
         " [--write-timeout-ms N] [--flags N]"
         " [--callback-delay-ms N] [--accept-delay-ms N]\n"
         "  lanes are fixed at %u; direction defaults to POST (server receives)\n"
@@ -84,8 +82,6 @@ stream_demo_parse_args(int argc, char **argv,
     }
     memset(options, 0, sizeof(*options));
     options->listen_ip = argv[1];
-    options->send_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
-    options->receive_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     options->write_chunk_size = STREAM_DEMO_CHUNK;
     options->client_count = 1;
     options->write_timeout_ms = 60000;
@@ -116,8 +112,7 @@ stream_demo_parse_args(int argc, char **argv,
                 NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER;
             continue;
         }
-        if (strcmp(argv[i], "--send-queue-bytes") == 0
-            || strcmp(argv[i], "--write-chunk-size") == 0
+        if (strcmp(argv[i], "--write-chunk-size") == 0
             || strcmp(argv[i], "--write-timeout-ms") == 0
             || strcmp(argv[i], "--flags") == 0)
         {
@@ -127,12 +122,7 @@ stream_demo_parse_args(int argc, char **argv,
             {
                 return -1;
             }
-            if (strcmp(option, "--send-queue-bytes") == 0) {
-                if (number > SIZE_MAX) {
-                    return -1;
-                }
-                options->send_queue_size = (size_t)number;
-            } else if (strcmp(option, "--write-chunk-size") == 0) {
+            if (strcmp(option, "--write-chunk-size") == 0) {
                 if (number == 0 || number > SIZE_MAX) {
                     return -1;
                 }
@@ -175,18 +165,12 @@ stream_demo_parse_args(int argc, char **argv,
         }
         switch (positional++) {
         case 0:
-            if (number > SIZE_MAX) {
-                return -1;
-            }
-            options->receive_queue_size = (size_t)number;
-            break;
-        case 1:
             if (number > UINT32_MAX) {
                 return -1;
             }
             options->finish_timeout_ms = (uint32_t)number;
             break;
-        case 2:
+        case 1:
             if (number == 0 || number > SIZE_MAX) {
                 return -1;
             }
@@ -393,11 +377,10 @@ main(int argc, char **argv)
     printf("[stream_api_ready] listen=%s port=%u\n",
         options.listen_ip, (unsigned)options.port);
     printf("[stream_api_config] role=server direction=%s lanes=%u"
-           " scheduler=adaptive send_queue=%zu receive_queue=%zu"
-           " callback_delay_ms=%u accept_delay_ms=%u\n",
+           " scheduler=adaptive callback_delay_ms=%u"
+           " accept_delay_ms=%u\n",
         stream_demo_direction_name(options.direction),
-        NETINS_UDP_STREAM_DEMO_LANE_COUNT, options.send_queue_size,
-        options.receive_queue_size,
+        NETINS_UDP_STREAM_DEMO_LANE_COUNT,
         options.callback_delay_ms, options.accept_delay_ms);
     fflush(stdout);
     for (size_t i = 0; i < options.client_count; i++) {
@@ -420,8 +403,6 @@ main(int argc, char **argv)
             NETINS_UDP_STREAM_CONFIG_INITIALIZER;
         config.direction = options.direction;
         config.flags = options.flags;
-        config.send_queue_size = options.send_queue_size;
-        config.receive_queue_size = options.receive_queue_size;
         if (options.direction
             == NETINS_UDP_STREAM_DIRECTION_CLIENT_TO_SERVER)
         {

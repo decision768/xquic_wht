@@ -24,8 +24,6 @@ typedef struct stream_demo_options_s {
     const char *host;
     const char *interfaces[NETINS_UDP_MAX_INTERFACES];
     uint64_t total_bytes;
-    size_t send_queue_size;
-    size_t receive_queue_size;
     size_t write_chunk_size;
     uint32_t seed;
     uint32_t flags;
@@ -43,8 +41,7 @@ stream_demo_usage(const char *program)
 {
     fprintf(stderr,
         "usage: %s HOST PORT BYTES SEED"
-        " [SEND_QUEUE_BYTES [RECEIVE_QUEUE_BYTES [FLAGS"
-        " [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]]]"
+        " [FLAGS [WRITE_TIMEOUT_MS [FINISH_TIMEOUT_MS]]]"
         " [--get|--post] [--interface NAME]... [--scheduler NAME]"
         " [--write-chunk-size N] [--callback-delay-ms N]\n"
         "  lanes are fixed at %u; --interface may be repeated up to %u times\n"
@@ -132,8 +129,6 @@ stream_demo_parse_args(int argc, char **argv, stream_demo_options_t *options)
     }
     memset(options, 0, sizeof(*options));
     options->host = argv[1];
-    options->send_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
-    options->receive_queue_size = NETINS_UDP_STREAM_DEFAULT_QUEUE_SIZE;
     options->write_chunk_size = STREAM_DEMO_CHUNK;
     options->write_timeout_ms = 60000;
     options->finish_timeout_ms = 60000;
@@ -210,30 +205,18 @@ stream_demo_parse_args(int argc, char **argv, stream_demo_options_t *options)
         }
         switch (positional++) {
         case 0:
-            if (number > SIZE_MAX) {
-                return -1;
-            }
-            options->send_queue_size = (size_t)number;
-            break;
-        case 1:
-            if (number > SIZE_MAX) {
-                return -1;
-            }
-            options->receive_queue_size = (size_t)number;
-            break;
-        case 2:
             if (number > UINT32_MAX) {
                 return -1;
             }
             options->flags = (uint32_t)number;
             break;
-        case 3:
+        case 1:
             if (number > UINT32_MAX) {
                 return -1;
             }
             options->write_timeout_ms = (uint32_t)number;
             break;
-        case 4:
+        case 2:
             if (number > UINT32_MAX) {
                 return -1;
             }
@@ -407,13 +390,12 @@ main(int argc, char **argv)
         goto cleanup;
     }
     printf("[stream_api_config] role=client direction=%s lanes=%u"
-           " scheduler=%s interfaces=%u send_queue=%zu receive_queue=%zu"
-           " write_chunk=%zu callback_delay_ms=%u\n",
+           " scheduler=%s interfaces=%u write_chunk=%zu"
+           " callback_delay_ms=%u\n",
         stream_demo_direction_name(options.direction),
         NETINS_UDP_STREAM_DEMO_LANE_COUNT,
         stream_demo_scheduler_name(options.scheduler),
-        options.interface_count, options.send_queue_size,
-        options.receive_queue_size, options.write_chunk_size,
+        options.interface_count, options.write_chunk_size,
         options.callback_delay_ms);
     for (uint32_t i = 0; i < options.interface_count; i++) {
         printf("[stream_api_interface] index=%u name=%s\n",
@@ -424,8 +406,6 @@ main(int argc, char **argv)
         NETINS_UDP_STREAM_CONFIG_INITIALIZER;
     config.direction = options.direction;
     config.flags = options.flags;
-    config.send_queue_size = options.send_queue_size;
-    config.receive_queue_size = options.receive_queue_size;
     if (options.direction
         == NETINS_UDP_STREAM_DIRECTION_SERVER_TO_CLIENT)
     {
