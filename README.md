@@ -26,7 +26,7 @@ tests/                         文件与数据流 GET/POST 自动化压测及资
 
 - [`文档/NETINS_UDP_API_使用说明.md`](文档/NETINS_UDP_API_使用说明.md)：公开结构体、配置项、生命周期、文件/数据流语义和 Demo；
 - [`文档/NETINS_UDP_编译指南.md`](文档/NETINS_UDP_编译指南.md)：AARCH64 客户端和 Linux x86_64 服务端编译与可选安装；
-- [`NETINS_UDP_STREAM_DEMO_编译说明.md`](NETINS_UDP_STREAM_DEMO_编译说明.md)：在原 6.3 编译环境中通过文件覆盖生成数据流 Demo；
+- [`文档/STREAM_DEMO_数据流编译测试说明.md`](文档/STREAM_DEMO_数据流编译测试说明.md)：复用原编译环境，通过文件覆盖构建并测试文件 Demo 与数据流 Demo；
 - [`文档/MINI_API_测试使用说明.md`](文档/MINI_API_测试使用说明.md)：文件自动化压测环境、文件完整性和资源监控。
 
 ## 构建依赖
