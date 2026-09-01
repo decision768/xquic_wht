@@ -1118,7 +1118,7 @@ def parse_and_append_server_resource(
         ).writerows(normalized)
     return {
         "server_memory_status": monitor_status,
-        "server_memory_aggregation_eligible": True,
+        "server_memory_aggregation_eligible": monitor_status == "OK",
         "server_memory_csv": str(combined),
         "server_memory_samples": len(rows),
         "server_cpu_samples": len(rows),
@@ -1136,6 +1136,26 @@ def parse_and_append_server_resource(
         "server_process_hwm_max_kb": max(process_hwm),
         "server_process_vmsize_max_kb": max(process_vmsize),
     }
+
+
+def collect_board_client_logs(
+    board: SSHRemote,
+    token: str,
+    stdout_path: Path,
+    stderr_path: Path,
+) -> None:
+    if not re.fullmatch(r"stream_[A-Za-z0-9_]+", token):
+        raise ValueError("invalid session token")
+    remote_dir = f"/tmp/stream_api_bench_{token}_board"
+    remote_logs = (
+        (f"{remote_dir}/client.stdout.log", stdout_path),
+        (f"{remote_dir}/client.stderr.log", stderr_path),
+    )
+    for remote_path, local_path in remote_logs:
+        try:
+            board.download(remote_path, local_path)
+        except Exception as exc:
+            LOG.debug("客户端远端日志回收失败 %s: %s", remote_path, exc)
 
 
 def collect_board_resource(
@@ -1273,6 +1293,13 @@ def attempt_once(
         errors.append(f"{type(exc).__name__}: {exc}")
     finally:
         try:
+            session_process_cleanup(board, token)
+        except Exception as exc:
+            LOG.debug("主板临时进程静默清理失败: %s", exc)
+        collect_board_client_logs(
+            board, token, raw_stdout_path, raw_stderr_path
+        )
+        try:
             board_resource = collect_board_resource(
                 board, token, client_result.output, resource_dir
             )
@@ -1299,10 +1326,6 @@ def attempt_once(
                 )
             except Exception as exc:
                 LOG.warning("云服务器资源结果处理失败: %s", exc)
-        try:
-            session_process_cleanup(board, token)
-        except Exception as exc:
-            LOG.debug("主板临时进程静默清理失败: %s", exc)
         try:
             if run is not None:
                 cleanup_server_run(server, run)
