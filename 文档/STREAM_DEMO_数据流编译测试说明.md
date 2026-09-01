@@ -553,6 +553,8 @@ tests/log/
 ├── aggregation_summary_post_<session>.csv
 ├── stress_summary_<session>.csv
 ├── server_memory_<session>.csv
+├── raw_client/<session>/*.stdout.log
+├── raw_client/<session>/*.stderr.log
 └── resources/<session>/*_resource.csv
 ```
 
@@ -560,9 +562,10 @@ tests/log/
 - `aggregation_summary_get/post` 按轮次计算最佳单卡、单卡速率和、聚合增益和聚合效率；
 - `stress_summary` 汇总各次成功状态、速率及主板/服务器资源指标；
 - `server_memory` 保存云服务器整机和服务端进程的资源采样；
+- `raw_client/<session>` 保存每次客户端尝试的原始 stdout 和 stderr，异常时优先检查该目录；
 - `resources/<session>` 保存每次主板客户端进程的资源采样。
 
-正式脚本不保存每次 Client/Server 的原始 stdout、stderr，也不把各 lane 流量写入速率日志。
+正式脚本不保存云服务端每次运行的原始 stdout、stderr，也不把各 lane 流量写入速率日志。
 如需把结果保存到其他位置，可使用 `--output-root` 指定目录。
 
 速率统计口径为：

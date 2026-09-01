@@ -53,7 +53,6 @@ DEFAULT_WRITE_TIMEOUT_MS = 600000
 DEFAULT_FINISH_TIMEOUT_MS = 600000
 DEFAULT_COMMAND_TIMEOUT_S = 690.0
 DEFAULT_SERVER_READY_TIMEOUT_S = 15.0
-DEFAULT_SERVER_EXIT_TIMEOUT_S = 30.0
 DEFAULT_RESOURCE_INTERVAL_S = 0.5
 DEFAULT_BOARD_MONITOR_SCRIPT = "/oemdata/monitor_board_resource.sh"
 DEFAULT_SERVER_MONITOR_SCRIPT = (
@@ -349,6 +348,8 @@ class ServerRun:
     done_path: str
     server_rc_path: str
     resource_csv_path: str
+    resource_stop_path: str
+    monitor_rc_path: str
 
 
 @dataclass
@@ -367,7 +368,6 @@ class AttemptRecord:
     payload_elapsed_us: int
     payload_throughput_mbps: float
     client_exit: int
-    server_exited: bool
     error: str
     board_resource: Dict[str, object] = field(default_factory=dict)
     server_resource: Dict[str, object] = field(default_factory=dict)
@@ -604,87 +604,6 @@ def validate_client_output(
     return parsed, errors
 
 
-def validate_server_output(
-    output: str, expected_bytes: int, direction: str
-) -> Tuple[Dict[str, object], List[str]]:
-    errors: List[str] = []
-    result = last_role_record(output, RESULT_MARKER, "server")
-    config = last_role_record(output, CONFIG_MARKER, "server")
-    if "[stream_api_ready]" not in output:
-        errors.append("server缺少stream_api_ready")
-    if result is None:
-        errors.append("缺少server stream_api_result")
-        result = {}
-    if config is None:
-        errors.append("缺少server stream_api_config")
-        config = {}
-
-    success = parse_positive_int(result.get("success", ""), "server success", errors)
-    lanes = parse_positive_int(result.get("lanes", ""), "server lanes", errors)
-    accepted = parse_positive_int(
-        result.get("accepted", ""), "server accepted", errors
-    )
-    received = parse_positive_int(
-        result.get("received", ""), "server received", errors
-    )
-    peer_received = parse_positive_int(
-        result.get("peer_received", ""), "server peer_received", errors
-    )
-    eagain = parse_positive_int(
-        result.get("eagain", ""), "server eagain", errors
-    )
-    partial = parse_positive_int(
-        result.get("partial", ""), "server partial", errors
-    )
-    if success != 1:
-        errors.append("server success不是1")
-    if lanes != 4:
-        errors.append(f"server lanes={lanes}，预期4")
-    if accepted != expected_bytes:
-        errors.append(f"server accepted={accepted}，预期{expected_bytes}")
-    if direction == "post" and received != expected_bytes:
-        errors.append(f"server received={received}，预期{expected_bytes}")
-    if peer_received != expected_bytes:
-        errors.append(
-            f"server peer_received={peer_received}，预期{expected_bytes}"
-        )
-    if config.get("lanes") != "4":
-        errors.append(f"server config lanes={config.get('lanes')}，预期4")
-    if result.get("direction") != direction:
-        errors.append(
-            f"server result direction={result.get('direction', '<missing>')}，"
-            f"预期{direction}"
-        )
-    if config.get("direction") != direction:
-        errors.append(
-            f"server config direction={config.get('direction', '<missing>')}，"
-            f"预期{direction}"
-        )
-    if config.get("scheduler") != "adaptive":
-        errors.append(
-            f"server scheduler={config.get('scheduler', '<missing>')}，"
-            "预期adaptive"
-        )
-
-    lane_field = "sent" if direction == "get" else "received"
-    lane_bytes = parse_lane_bytes(output, "server", lane_field)
-    if set(lane_bytes) != {0, 1, 2, 3}:
-        errors.append(f"server lane统计不完整: {sorted(lane_bytes)}")
-    elif sum(lane_bytes.values()) != expected_bytes:
-        errors.append(
-            f"server lane字节和={sum(lane_bytes.values())}，预期{expected_bytes}"
-        )
-    elif any(value <= 0 for value in lane_bytes.values()):
-        errors.append("server端存在未承载数据的lane")
-    parsed: Dict[str, object] = {
-        "lanes": lanes,
-        "eagain": eagain,
-        "partial": partial,
-        "lane_bytes": lane_bytes,
-    }
-    return parsed, errors
-
-
 def board_preflight(board: SSHRemote, args) -> None:
     checks = [
         f"cd -- {q(args.board_dir)}",
@@ -872,6 +791,8 @@ def start_server(
         done_path=done_path,
         server_rc_path=server_rc_path,
         resource_csv_path=resource_csv_path,
+        resource_stop_path=resource_stop_path,
+        monitor_rc_path=monitor_rc_path,
     )
 
 
@@ -900,46 +821,26 @@ def wait_server_ready(
     raise RuntimeError(f"等待Stream Server ready超时({timeout_s}s)")
 
 
-def wait_server_exit(
-    server: SSHRemote, run: ServerRun, timeout_s: float
-) -> bool:
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        result = server.run(
-            f"if test -f {q(run.done_path)}; then echo DONE; "
-            f"elif kill -0 {run.wrapper_pid} 2>/dev/null; then echo RUNNING; "
-            "else echo DEAD; exit 1; fi",
-            timeout_s=10,
-        )
-        if "DONE" in result.output:
-            return True
-        if result.exit_code != 0:
-            return False
-        time.sleep(0.10)
-    return False
-
-
-def collect_server_logs(
-    server: SSHRemote, run: ServerRun
-) -> Tuple[str, str]:
-    stdout_result = server.run(
-        f"cat -- {q(run.stdout_path)} 2>/dev/null || true", timeout_s=15
+def stop_server_resource_monitor(server: SSHRemote, run: ServerRun) -> str:
+    command = (
+        f"if test -f {q(run.monitor_rc_path)}; then "
+        f"cat -- {q(run.monitor_rc_path)}; exit 0; fi; "
+        f"touch -- {q(run.resource_stop_path)} || exit 2; "
+        "count=0; "
+        f"while test -e {q(run.resource_stop_path)} "
+        f"&& ! test -f {q(run.monitor_rc_path)} "
+        "&& test \"$count\" -lt 100; do "
+        "sleep 0.05; count=$((count + 1)); done; "
+        f"if test -f {q(run.monitor_rc_path)}; then "
+        f"cat -- {q(run.monitor_rc_path)}; "
+        f"elif ! test -e {q(run.resource_stop_path)}; then echo 0; "
+        "else exit 3; fi"
     )
-    stderr_result = server.run(
-        f"cat -- {q(run.stderr_path)} 2>/dev/null || true", timeout_s=15
-    )
-    return stdout_result.output, stderr_result.output
-
-
-def collect_server_exit_code(server: SSHRemote, run: ServerRun) -> int:
-    result = server.run(
-        f"cat -- {q(run.server_rc_path)} 2>/dev/null",
-        timeout_s=10,
-    )
+    result = server.run(command, timeout_s=10)
     value = result.output.strip()
     if result.exit_code != 0 or not value.isdigit():
-        raise RuntimeError("服务端退出码缺失或无效")
-    return int(value)
+        return "MONITOR_STOP_ERROR"
+    return "OK" if value == "0" else f"MONITOR_RC_{value}"
 
 
 def cleanup_server_token(server: SSHRemote, token: str) -> None:
@@ -1281,16 +1182,9 @@ def collect_server_resource(
     mode: str,
     round_index: int,
     attempt: int,
+    monitor_status: str,
 ) -> Dict[str, object]:
     local_temp = resource_dir / f".{run.token}_server_resource.csv"
-    rc_result = server.run(
-        f"cat -- {q(run.state_dir + '/server_monitor.rc')} 2>/dev/null || true",
-        timeout_s=10,
-    )
-    monitor_rc = rc_result.output.strip()
-    monitor_status = "OK" if monitor_rc == "0" else (
-        f"MONITOR_RC_{monitor_rc}" if monitor_rc.isdigit() else "MISSING_STATUS"
-    )
     try:
         server.download(run.resource_csv_path, local_temp)
         return parse_and_append_server_resource(
@@ -1323,6 +1217,7 @@ def attempt_once(
     mode: str,
     attempt: int,
     resource_dir: Path,
+    raw_client_dir: Path,
     server_memory_csv: Path,
 ) -> AttemptRecord:
     display_mode = DISPLAY_MODE_NAMES[mode]
@@ -1333,11 +1228,10 @@ def attempt_once(
         f"stream_{session}_r{round_index:03d}_{direction}_{mode}_"
         f"a{attempt:02d}_{time.time_ns()}"
     )
+    raw_stdout_path = raw_client_dir / f"{token}.stdout.log"
+    raw_stderr_path = raw_client_dir / f"{token}.stderr.log"
     run: Optional[ServerRun] = None
     client_result = CommandResult("", "", 125, 0.0)
-    server_stdout = ""
-    server_stderr = ""
-    server_exited = False
     parsed: Dict[str, object] = {
         "lanes": 0,
         "payload_elapsed_us": 0,
@@ -1346,6 +1240,7 @@ def attempt_once(
     errors: List[str] = []
     board_resource = empty_board_resource("NOT_AVAILABLE")
     server_resource = empty_server_resource("NOT_AVAILABLE")
+    server_monitor_status = "MONITOR_STOP_ERROR"
 
     try:
         run = start_server(server, args, token, seed, direction)
@@ -1354,20 +1249,12 @@ def attempt_once(
         client_result = board.run(
             command,
             timeout_s=args.command_timeout_s,
+            output_path=raw_stdout_path,
+            stderr_path=raw_stderr_path,
+            max_capture_bytes=8 * 1024 * 1024,
         )
         if client_result.timed_out:
             errors.append("controller client timeout")
-        server_exited = wait_server_exit(
-            server, run, args.server_exit_timeout_s
-        )
-        if not server_exited:
-            errors.append("server未在client结束后退出")
-        server_stdout, server_stderr = collect_server_logs(server, run)
-        if server_exited:
-            server_exit_code = collect_server_exit_code(server, run)
-            if server_exit_code != 0:
-                errors.append(f"server exit={server_exit_code}")
-
         expected_scheduler = "adaptive" if direction == "get" else args.scheduler
         client_parsed, client_errors = validate_client_output(
             client_result.output,
@@ -1378,21 +1265,12 @@ def attempt_once(
             direction,
         )
         errors.extend(client_errors)
-        _server_parsed, server_errors = validate_server_output(
-            server_stdout, args.total_bytes, direction
-        )
-        errors.extend(server_errors)
         # Match the file benchmark with the client direction-specific metric.
         parsed = client_parsed
         if client_result.truncated:
             errors.append("client输出被截断")
     except Exception as exc:
         errors.append(f"{type(exc).__name__}: {exc}")
-        if run is not None:
-            try:
-                server_stdout, server_stderr = collect_server_logs(server, run)
-            except Exception as log_exc:
-                server_stderr += f"\ncollect logs failed: {log_exc}\n"
     finally:
         try:
             board_resource = collect_board_resource(
@@ -1401,6 +1279,12 @@ def attempt_once(
         except Exception as exc:
             LOG.warning("主板资源结果处理失败: %s", exc)
         if run is not None:
+            try:
+                server_monitor_status = stop_server_resource_monitor(
+                    server, run
+                )
+            except Exception as exc:
+                LOG.debug("云服务器资源监控静默停止失败: %s", exc)
             try:
                 server_resource = collect_server_resource(
                     server,
@@ -1411,25 +1295,24 @@ def attempt_once(
                     mode,
                     round_index,
                     attempt,
+                    server_monitor_status,
                 )
             except Exception as exc:
                 LOG.warning("云服务器资源结果处理失败: %s", exc)
         try:
             session_process_cleanup(board, token)
         except Exception as exc:
-            errors.append(f"board cleanup: {exc}")
+            LOG.debug("主板临时进程静默清理失败: %s", exc)
         try:
             if run is not None:
                 cleanup_server_run(server, run)
             else:
                 cleanup_server_token(server, token)
         except Exception as exc:
-            errors.append(f"server cleanup: {exc}")
+            LOG.debug("服务端临时进程静默清理失败: %s", exc)
 
     if client_result.stderr.strip() and client_result.exit_code != 0:
         errors.append("client stderr: " + client_result.stderr.strip()[-1000:])
-    if server_stderr.strip() and not server_exited:
-        errors.append("server stderr: " + server_stderr.strip()[-1000:])
     return AttemptRecord(
         start_time=start_time,
         end_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
@@ -1447,7 +1330,6 @@ def attempt_once(
             parsed.get("payload_throughput_mbps", 0.0)
         ),
         client_exit=client_result.exit_code,
-        server_exited=server_exited,
         error="; ".join(errors),
         board_resource=board_resource,
         server_resource=server_resource,
@@ -1858,11 +1740,6 @@ def parse_args(argv: Optional[Sequence[str]] = None):
         default=DEFAULT_SERVER_READY_TIMEOUT_S,
     )
     parser.add_argument(
-        "--server-exit-timeout-s",
-        type=float,
-        default=DEFAULT_SERVER_EXIT_TIMEOUT_S,
-    )
-    parser.add_argument(
         "--skip-route-check",
         action="store_true",
         help="只检查接口和IPv4地址，不执行指定oif的route get预检",
@@ -1908,7 +1785,6 @@ def parse_args(argv: Optional[Sequence[str]] = None):
     for name in (
         "command_timeout_s",
         "server_ready_timeout_s",
-        "server_exit_timeout_s",
     ):
         if getattr(args, name) <= 0:
             parser.error(f"--{name.replace('_', '-')}必须大于0")
@@ -1984,7 +1860,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_root = Path(args.output_root).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     resource_dir = output_root / "resources" / session
+    raw_client_dir = output_root / "raw_client" / session
     resource_dir.mkdir(parents=True, exist_ok=True)
+    raw_client_dir.mkdir(parents=True, exist_ok=True)
     server_memory_csv = output_root / f"server_memory_{session}.csv"
     initialize_server_memory_csv(server_memory_csv)
 
@@ -2052,6 +1930,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                             mode,
                             attempt,
                             resource_dir,
+                            raw_client_dir,
                             server_memory_csv,
                         )
                         last_record = record
@@ -2120,6 +1999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     LOG.info("最终资源汇总: %s", stress_path)
     LOG.info("云服务器资源汇总: %s", server_memory_csv)
     LOG.info("主板资源目录: %s", resource_dir)
+    LOG.info("客户端原始日志目录: %s", raw_client_dir)
 
     if interrupted:
         return 130

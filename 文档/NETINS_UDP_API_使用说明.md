@@ -1386,8 +1386,9 @@ python tests/stream_api_benchmark.py --iterations 10
 
 脚本复用文件压测环境已部署的 `monitor_board_resource.sh` 和
 `monitor_server_memory.sh`。输出包含每次测试的简化速率日志、GET/POST 聚合率汇总、
-资源汇总和资源采样 CSV；不保留 Client/Server 每次运行的原始 stdout/stderr，速率日志也不写入
-各 lane 流量。脚本不操作网卡开关，断链恢复需要单独人工验证。
+资源汇总和资源采样 CSV；`raw_client/<session>` 保存每次客户端尝试的原始
+stdout/stderr，不保存云服务端原始日志，速率日志也不写入各 lane 流量。脚本不操作
+网卡开关，断链恢复需要单独人工验证。
 
 ## 16. 常见错误
 
