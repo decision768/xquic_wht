@@ -50,6 +50,7 @@ usage(const char *program)
         "  --attempt-id ID         Safe experiment attempt identifier\n"
         "  --telemetry-output FILE Write transport samples as JSONL\n"
         "  --telemetry-interval-ms MS  Sampling period (default 250)\n"
+        "  --version               Print experiment version and exit\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
         "  --zlog-category NAME    zlog category (default xquic_mini_api_client)\n",
@@ -453,6 +454,13 @@ main(int argc, char **argv)
     int initialized = 0;
     int exit_code = EXIT_FAILURE;
     netins_udp_telemetry_json_t telemetry_writer = {0};
+
+    printf("[experiment] %s role=client api_release=%s\n",
+        NETINS_UDP_EXPERIMENT_VERSION, NETINS_UDP_API_RELEASE_VERSION);
+    fflush(stdout);
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        return EXIT_SUCCESS;
+    }
 
     if (parse_args(argc, argv, &options) != 0) {
         usage(argv[0]);
