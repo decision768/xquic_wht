@@ -442,6 +442,7 @@ xqc_mini_svr_log_get_submit_done(xqc_mini_svr_user_stream_t *user_stream)
             user_conn->get_split_total_ns,
             user_conn->get_split_min_ns,
             user_conn->get_split_max_ns);
+        mini_backend_server_telemetry_stop(user_conn);
         user_conn->get_submit_active = 0;
     }
 }
@@ -1019,6 +1020,23 @@ xqc_mini_svr_header_name_is(const xqc_http_header_t *header,
     return header != NULL && header->name.iov_len == name_len
         && strncasecmp((const char *)header->name.iov_base,
             name, name_len) == 0;
+}
+
+static int
+xqc_mini_svr_attempt_id_valid(const void *value, size_t length)
+{
+    if (value == NULL || length == 0 || length >= NETINS_UDP_ATTEMPT_ID_LEN) {
+        return 0;
+    }
+    const unsigned char *text = value;
+    for (size_t i = 0; i < length; i++) {
+        if (!(isalnum(text[i]) || text[i] == '.' || text[i] == '_'
+                || text[i] == '-'))
+        {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static int
@@ -2179,6 +2197,8 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         int have_content_length = 0;
         int have_method = 0;
         int have_path = 0;
+        int have_attempt_id = 0;
+        char parsed_attempt_id[NETINS_UDP_ATTEMPT_ID_LEN] = {0};
         uint64_t parsed_index = 0;
         uint64_t parsed_count = 0;
         uint64_t parsed_offset = 0;
@@ -2280,6 +2300,18 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                 have_total = 1;
                 continue;
             }
+            if (xqc_mini_svr_header_name_is(h, "x-mini-bench-id")) {
+                if (!have_attempt_id
+                    && xqc_mini_svr_attempt_id_valid(h->value.iov_base,
+                        h->value.iov_len))
+                {
+                    memcpy(parsed_attempt_id, h->value.iov_base,
+                        h->value.iov_len);
+                    parsed_attempt_id[h->value.iov_len] = '\0';
+                }
+                have_attempt_id = 1;
+                continue;
+            }
         }
         printf("=============================================================\n");
         if (!have_method || !have_path || user_stream->request_path[0] != '/') {
@@ -2292,6 +2324,12 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         }
         user_stream->expected_content_length =
             have_content_length ? (size_t)parsed_content_length : 0;
+        xqc_mini_svr_user_conn_t *request_conn =
+            xqc_mini_svr_get_conn_from_request(user_stream);
+        if (request_conn != NULL) {
+            mini_backend_server_telemetry_set_attempt(request_conn,
+                parsed_attempt_id);
+        }
 
         if (user_stream->method == REQUEST_METHOD_GET) {
             if (!have_index || !have_count || !have_offset || !have_total
@@ -2562,6 +2600,8 @@ xqc_mini_svr_send_body(xqc_mini_svr_user_stream_t *user_stream)
         xqc_mini_svr_user_conn_t *user_conn =
             xqc_mini_svr_get_conn_from_request(user_stream);
         xqc_mini_svr_get_diag_maybe_reset_phase(user_stream);
+        mini_backend_server_telemetry_start(user_conn,
+            NETINS_UDP_TRANSFER_GET);
         xqc_mini_svr_get_diag_capture(user_conn, &user_stream->get_path_diag_start);
         user_stream->get_path_diag_started = user_stream->get_path_diag_start.valid;
         printf("[diag_server_get] send_body_enter body_len=%zu body_offset=%zu"

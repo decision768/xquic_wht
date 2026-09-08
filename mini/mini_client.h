@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <event2/event.h>
 #include <xquic/xquic.h>
+#include <xquic/netins_udp.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
 #include <zlog.h>
@@ -328,6 +329,8 @@ typedef struct xqc_mini_cli_user_conn_s {
     xqc_h3_conn_t          *h3_conn;
 
     xqc_mini_cli_ctx_t     *ctx;
+    void                   *api_backend;
+    char                    telemetry_attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
 
     xqc_mini_cli_user_path_t paths[MAX_PATH_CNT];
     int                     active_path_cnt;

@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "netins_udp_telemetry_json.h"
+
 typedef struct server_options_s {
     const char *bind_address;
     const char *certificate_file;
@@ -13,9 +15,11 @@ typedef struct server_options_s {
     const char *root_path;
     const char *zlog_config_file;
     const char *zlog_category;
+    const char *telemetry_output;
     uint32_t accept_timeout_ms;
     uint32_t serve_timeout_ms;
     uint32_t max_connections;
+    uint32_t telemetry_interval_ms;
     uint16_t port;
     int log_level;
 } server_options_t;
@@ -33,6 +37,8 @@ usage(const char *program)
         "  --accept-timeout-ms MS  Per-accept timeout; 0 is infinite\n"
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
         "  --max-connections N     Connections to serve (default 1)\n"
+        "  --telemetry-output FILE Append transport samples as JSONL\n"
+        "  --telemetry-interval-ms MS  Sampling period (default 250)\n"
         "  scheduler               Fixed to adaptive\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
@@ -75,6 +81,7 @@ parse_args(int argc, char **argv, server_options_t *options)
     options->bind_address = "0.0.0.0";
     options->port = 8443;
     options->max_connections = 1;
+    options->telemetry_interval_ms = 250;
     options->log_level = NETINS_UDP_LOG_DEBUG;
 
     for (i = 1; i < argc; ++i) {
@@ -123,6 +130,18 @@ parse_args(int argc, char **argv, server_options_t *options)
                 || parse_u32(value, UINT32_MAX,
                     &options->max_connections) != 0
                 || options->max_connections == 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--telemetry-output") == 0) {
+            if (need_value(argc, argv, &i, &options->telemetry_output) != 0) {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--telemetry-interval-ms") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, UINT32_MAX,
+                    &options->telemetry_interval_ms) != 0
+                || options->telemetry_interval_ms == 0)
             {
                 return -1;
             }
@@ -188,12 +207,28 @@ copy_option_string(char *destination, size_t capacity, const char *source)
 }
 
 static int
-configure_server(netins_udp_t *server, const server_options_t *options)
+configure_server(netins_udp_t *server, const server_options_t *options,
+    netins_udp_telemetry_json_t *telemetry_writer)
 {
     netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
     netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     int scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
+
+    if (options->telemetry_output != NULL) {
+        netins_udp_telemetry_config_t telemetry =
+            NETINS_UDP_TELEMETRY_CONFIG_INITIALIZER;
+        telemetry.enabled = 1;
+        telemetry.interval_ms = options->telemetry_interval_ms;
+        telemetry.callback = netins_udp_telemetry_json_write;
+        telemetry.user_data = telemetry_writer;
+        if (netins_udp_set_opt(server, NETINS_UDP_OPT_TELEMETRY,
+                &telemetry, sizeof(telemetry)) != 0)
+        {
+            fprintf(stderr, "telemetry configuration disabled: %s\n",
+                strerror(errno));
+        }
+    }
 
     logger.callback = api_logger;
     logger.user_data = stderr;
@@ -254,6 +289,7 @@ main(int argc, char **argv)
     uint32_t served = 0;
     int initialized = 0;
     int exit_code = EXIT_FAILURE;
+    netins_udp_telemetry_json_t telemetry_writer = {0};
 
     if (parse_args(argc, argv, &options) != 0) {
         usage(argv[0]);
@@ -265,12 +301,20 @@ main(int argc, char **argv)
     }
     initialized = 1;
 
+    if (options.telemetry_output != NULL
+        && netins_udp_telemetry_json_open(&telemetry_writer,
+            options.telemetry_output, 1) != 0)
+    {
+        perror("telemetry output");
+        options.telemetry_output = NULL;
+    }
+
     server = netins_udp_new(NETINS_UDP_ROLE_SERVER);
     if (server == NULL) {
         perror("netins_udp_new");
         goto done;
     }
-    if (configure_server(server, &options) != 0) {
+    if (configure_server(server, &options, &telemetry_writer) != 0) {
         print_handle_error(server, "configure");
         goto done;
     }
@@ -318,5 +362,6 @@ done:
             exit_code = EXIT_FAILURE;
         }
     }
+    netins_udp_telemetry_json_close(&telemetry_writer);
     return exit_code;
 }

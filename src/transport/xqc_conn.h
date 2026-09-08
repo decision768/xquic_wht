@@ -38,6 +38,29 @@
 
 #define XQC_MAX_RECV_WINDOW (512 * 1024 * 1024)
 
+#define XQC_CONN_TELEMETRY_MAX_PATHS 8
+
+typedef struct xqc_conn_path_telemetry_s {
+    uint64_t path_id;
+    uint32_t path_index;
+    int path_state;
+    int app_status;
+    uint64_t cwnd_bytes;
+    uint64_t effective_cwnd_bytes;
+    uint64_t inflight_packets;
+    uint64_t inflight_bytes;
+    uint64_t srtt_us;
+    uint64_t sent_bytes;
+} xqc_conn_path_telemetry_t;
+
+typedef struct xqc_conn_telemetry_s {
+    uint64_t connection_credit_bytes;
+    uint64_t active_stream_credit_bytes;
+    uint64_t effective_swnd_bytes;
+    uint32_t path_count;
+    xqc_conn_path_telemetry_t paths[XQC_CONN_TELEMETRY_MAX_PATHS];
+} xqc_conn_telemetry_t;
+
 #define XQC_MP_SETTINGS_STR_LEN (30)
 
 static const uint32_t MAX_RSP_CONN_CLOSE_CNT = 3;
@@ -694,6 +717,9 @@ xqc_int_t xqc_conn_handle_deprecated_stateless_reset(xqc_connection_t *conn,
 void xqc_conn_try_to_update_mss(xqc_connection_t *conn);
 
 void xqc_conn_get_stats_internal(xqc_connection_t *conn, xqc_conn_stats_t *stats);
+
+xqc_int_t xqc_conn_get_telemetry(xqc_engine_t *engine,
+    const xqc_cid_t *cid, xqc_conn_telemetry_t *telemetry);
 
 xqc_ping_record_t* xqc_conn_create_ping_record(xqc_connection_t *conn);
 

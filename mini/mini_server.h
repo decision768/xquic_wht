@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <xquic/xquic.h>
+#include <xquic/netins_udp.h>
 #include <event2/event.h>
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
@@ -181,6 +182,14 @@ typedef struct xqc_mini_svr_user_conn_s {
     int                     serve_root_fd;
     int                     accept_yield_requested;
     void                   *api_backend;
+    struct event           *telemetry_event;
+    uint64_t                telemetry_next_deadline_us;
+    uint32_t                telemetry_sample_seq;
+    int                     telemetry_active;
+    int                     telemetry_failed;
+    int                     telemetry_direction;
+    int                     telemetry_attempt_invalid;
+    char                    telemetry_attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
     int                     api_close_requested;
     int                     api_close_submitted;
     struct xqc_mini_svr_user_stream_s *pending_stream_head;

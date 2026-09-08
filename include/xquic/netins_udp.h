@@ -22,6 +22,7 @@ extern "C" {
 #define NETINS_UDP_MAX_INTERFACES 8U
 #define NETINS_UDP_INTERFACE_NAME_LEN 64U
 #define NETINS_UDP_ADDRESS_LEN 128U
+#define NETINS_UDP_ATTEMPT_ID_LEN 128U
 #define NETINS_UDP_FILE_PATH_LEN 1024U
 #define NETINS_UDP_SERVER_NAME_LEN 256U
 #define NETINS_UDP_ZLOG_CATEGORY_LEN 64U
@@ -128,7 +129,8 @@ typedef enum netins_udp_opt_e {
      * h3-ext ALPN required by the data-stream API.  Ordinary file clients
      * keep using the original h3 ALPN unless this option is explicitly set.
      */
-    NETINS_UDP_OPT_STREAM_MODE = 13
+    NETINS_UDP_OPT_STREAM_MODE = 13,
+    NETINS_UDP_OPT_TELEMETRY = 14
 } netins_udp_opt_t;
 
 typedef enum netins_udp_transfer_direction_e {
@@ -259,6 +261,73 @@ typedef struct netins_udp_zlog_config_s {
 #define NETINS_UDP_ZLOG_CONFIG_INITIALIZER \
     { sizeof(netins_udp_zlog_config_t), NETINS_UDP_API_VERSION, \
       0, NETINS_UDP_LOG_DEBUG, {0}, {0}, {0} }
+
+typedef enum netins_udp_telemetry_role_e {
+    NETINS_UDP_TELEMETRY_ROLE_CLIENT = 1,
+    NETINS_UDP_TELEMETRY_ROLE_SERVER = 2
+} netins_udp_telemetry_role_t;
+
+typedef enum netins_udp_telemetry_sample_kind_e {
+    NETINS_UDP_TELEMETRY_START = 1,
+    NETINS_UDP_TELEMETRY_PERIODIC = 2,
+    NETINS_UDP_TELEMETRY_END = 3
+} netins_udp_telemetry_sample_kind_t;
+
+typedef struct netins_udp_path_telemetry_s {
+    uint64_t path_id;
+    uint32_t path_index;
+    int path_state;
+    int app_status;
+    char interface_name[NETINS_UDP_INTERFACE_NAME_LEN];
+    char local_address[NETINS_UDP_ADDRESS_LEN];
+    uint64_t cwnd_bytes;
+    uint64_t effective_cwnd_bytes;
+    uint64_t inflight_packets;
+    uint64_t inflight_bytes;
+    uint64_t srtt_us;
+    uint64_t sent_bytes;
+} netins_udp_path_telemetry_t;
+
+typedef struct netins_udp_telemetry_sample_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    char attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
+    int role;
+    int direction;
+    int sample_kind;
+    uint32_t sample_seq;
+    uint64_t scheduled_mono_us;
+    uint64_t actual_mono_us;
+    uint64_t realtime_us;
+    uint64_t lateness_us;
+    uint32_t missed_intervals;
+    uint32_t path_count;
+    uint64_t connection_credit_bytes;
+    uint64_t active_stream_credit_bytes;
+    uint64_t effective_swnd_bytes;
+    netins_udp_path_telemetry_t paths[NETINS_UDP_MAX_PATHS];
+    uint64_t reserved[4];
+} netins_udp_telemetry_sample_t;
+
+/* Called synchronously on the Mini event-loop thread. Return nonzero to stop
+ * telemetry for this connection. The callback must not call this handle. */
+typedef int (*netins_udp_telemetry_cb)(void *user_data,
+    const netins_udp_telemetry_sample_t *sample);
+
+typedef struct netins_udp_telemetry_config_s {
+    uint32_t struct_size;
+    uint32_t api_version;
+    int enabled;
+    uint32_t interval_ms;
+    char attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
+    netins_udp_telemetry_cb callback;
+    void *user_data;
+    uint64_t reserved[4];
+} netins_udp_telemetry_config_t;
+
+#define NETINS_UDP_TELEMETRY_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_telemetry_config_t), NETINS_UDP_API_VERSION, \
+      0, 250, {0}, NULL, NULL, {0} }
 
 typedef struct netins_udp_path_statis_s {
     uint32_t struct_size;

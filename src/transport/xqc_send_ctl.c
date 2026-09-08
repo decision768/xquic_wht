@@ -264,6 +264,7 @@ xqc_send_ctl_create(xqc_path_ctx_t *path)
     send_ctl->ctl_rttvar = send_ctl->ctl_srtt / 2;
     send_ctl->ctl_latest_rtt = 0;
     send_ctl->ctl_max_bytes_in_flight = 0;
+    send_ctl->ctl_packets_in_flight = 0;
     send_ctl->ctl_reordering_packet_threshold = conn->conn_settings.loss_detection_pkt_thresh;
     send_ctl->ctl_reordering_time_threshold_shift = XQC_kTimeThresholdShift;
     send_ctl->ctl_first_rtt_sample_time = 0;
@@ -437,6 +438,7 @@ xqc_send_ctl_destroy(xqc_send_ctl_t *send_ctl)
     }
 
     send_ctl->ctl_bytes_in_flight = 0;
+    send_ctl->ctl_packets_in_flight = 0;
 }
 
 void
@@ -450,6 +452,7 @@ xqc_send_ctl_reset(xqc_send_ctl_t *send_ctl)
     send_ctl->ctl_srtt = conn->conn_settings.initial_rtt;
     send_ctl->ctl_rttvar = send_ctl->ctl_srtt / 2;
     send_ctl->ctl_max_bytes_in_flight = 0;
+    send_ctl->ctl_packets_in_flight = 0;
     send_ctl->ctl_reordering_packet_threshold = XQC_kPacketThreshold;
     send_ctl->ctl_reordering_time_threshold_shift = XQC_kTimeThresholdShift;
     send_ctl->ctl_ack_sent_cnt = 0;
@@ -818,6 +821,7 @@ xqc_send_ctl_increase_inflight(xqc_connection_t *conn, xqc_packet_out_t *packet_
     if (!(packet_out->po_flag & XQC_POF_IN_FLIGHT) && XQC_CAN_IN_FLIGHT(packet_out->po_frame_types)) {
         if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
             send_ctl->ctl_bytes_in_flight += packet_out->po_used_size;
+            send_ctl->ctl_packets_in_flight++;
             send_ctl->ctl_bytes_ack_eliciting_inflight[packet_out->po_pkt.pkt_pns] += packet_out->po_used_size;
             packet_out->po_flag |= XQC_POF_IN_FLIGHT;
         }
@@ -838,6 +842,9 @@ xqc_send_ctl_decrease_inflight(xqc_connection_t *conn, xqc_packet_out_t *packet_
         if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
             send_ctl->ctl_bytes_ack_eliciting_inflight[packet_out->po_pkt.pkt_pns] = xqc_uint32_bounded_subtract(send_ctl->ctl_bytes_ack_eliciting_inflight[packet_out->po_pkt.pkt_pns], packet_out->po_used_size);
             send_ctl->ctl_bytes_in_flight = xqc_uint32_bounded_subtract(send_ctl->ctl_bytes_in_flight, packet_out->po_used_size);
+            if (send_ctl->ctl_packets_in_flight > 0) {
+                send_ctl->ctl_packets_in_flight--;
+            }
             packet_out->po_flag &= ~XQC_POF_IN_FLIGHT;
         }
     }

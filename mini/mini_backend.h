@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <xquic/netins_udp.h>
 
 #define MINI_BACKEND_MAX_INTERFACES 8
 #define MINI_BACKEND_INTERFACE_NAME_LEN 64
@@ -112,6 +113,12 @@ typedef struct mini_backend_config_s {
     char zlog_category[64];
 
     int stream_mode;
+
+    int telemetry_enabled;
+    uint32_t telemetry_interval_ms;
+    char telemetry_attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
+    netins_udp_telemetry_cb telemetry_callback;
+    void *telemetry_user_data;
 } mini_backend_config_t;
 
 typedef struct mini_backend_stream_config_s {
@@ -191,6 +198,7 @@ int mini_backend_client_last_error(mini_backend_client_t *client);
 int mini_backend_client_active_path_count(mini_backend_client_t *client);
 int mini_backend_client_get_snapshot(mini_backend_client_t *client,
     mini_backend_snapshot_t *snapshot);
+void mini_backend_client_telemetry_start(void *backend, int direction);
 int mini_backend_client_stream_open(mini_backend_client_t *client,
     const mini_backend_stream_config_t *config,
     mini_backend_stream_t **out_stream);
@@ -237,6 +245,12 @@ int mini_backend_server_stream_accept(mini_backend_server_t *server,
 
 /* Called only by the Mini server's XQUIC callbacks. */
 void mini_backend_server_on_connection_created(void *backend,
+    mini_backend_server_connection_t *connection);
+void mini_backend_server_telemetry_set_attempt(
+    mini_backend_server_connection_t *connection, const char *attempt_id);
+void mini_backend_server_telemetry_start(
+    mini_backend_server_connection_t *connection, int direction);
+void mini_backend_server_telemetry_stop(
     mini_backend_server_connection_t *connection);
 void mini_backend_server_on_handshake_finished(void *backend,
     mini_backend_server_connection_t *connection);

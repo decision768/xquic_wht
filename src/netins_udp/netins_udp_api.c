@@ -2,6 +2,7 @@
 #include "netins_udp_builtin_tls.h"
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -746,6 +747,48 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
                 "stream mode option requires an int boolean");
         }
         handle->backend_config.stream_mode = *(const int *)value;
+        break;
+    }
+    case NETINS_UDP_OPT_TELEMETRY: {
+        if (value == NULL
+            || value_len < sizeof(netins_udp_telemetry_config_t))
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid telemetry option size");
+        }
+        const netins_udp_telemetry_config_t *telemetry = value;
+        if (telemetry->struct_size < sizeof(*telemetry)
+            || telemetry->api_version != NETINS_UDP_API_VERSION
+            || (telemetry->enabled != 0 && telemetry->enabled != 1)
+            || (telemetry->enabled
+                && (telemetry->interval_ms == 0
+                    || telemetry->callback == NULL))
+            || memchr(telemetry->attempt_id, '\0',
+                sizeof(telemetry->attempt_id)) == NULL)
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "invalid telemetry configuration");
+        }
+        if (telemetry->enabled && handle->role == NETINS_UDP_ROLE_CLIENT
+            && telemetry->attempt_id[0] == '\0')
+        {
+            return netins_udp_set_error(handle, EINVAL,
+                "client telemetry requires an attempt id");
+        }
+        for (size_t i = 0; telemetry->attempt_id[i] != '\0'; i++) {
+            unsigned char ch = (unsigned char)telemetry->attempt_id[i];
+            if (!(isalnum(ch) || ch == '.' || ch == '_' || ch == '-')) {
+                return netins_udp_set_error(handle, EINVAL,
+                    "telemetry attempt id contains an invalid character");
+            }
+        }
+        handle->backend_config.telemetry_enabled = telemetry->enabled;
+        handle->backend_config.telemetry_interval_ms = telemetry->interval_ms;
+        netins_udp_copy_string(handle->backend_config.telemetry_attempt_id,
+            sizeof(handle->backend_config.telemetry_attempt_id),
+            telemetry->attempt_id);
+        handle->backend_config.telemetry_callback = telemetry->callback;
+        handle->backend_config.telemetry_user_data = telemetry->user_data;
         break;
     }
     default:
