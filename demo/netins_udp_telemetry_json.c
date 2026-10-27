@@ -1,3 +1,6 @@
+#include <xquic/netins_udp.h>
+
+#ifdef NETINS_UDP_TELEMETRY_CONFIG_INITIALIZER
 #include "netins_udp_telemetry_json.h"
 
 #include <errno.h>
@@ -118,3 +121,4 @@ netins_udp_telemetry_json_close(netins_udp_telemetry_json_t *writer)
         writer->file = NULL;
     }
 }
+#endif
