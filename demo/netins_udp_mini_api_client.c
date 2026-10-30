@@ -5,9 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
-
-#include "netins_udp_telemetry_json.h"
 
 typedef struct client_options_s {
     const char *host;
@@ -16,13 +13,10 @@ typedef struct client_options_s {
     const char *server_name;
     const char *zlog_config_file;
     const char *zlog_category;
-    const char *attempt_id;
-    const char *telemetry_output;
     const char *interfaces[NETINS_UDP_MAX_INTERFACES];
     uint32_t interface_count;
     uint32_t timeout_ms;
     uint32_t repeat_count;
-    uint32_t telemetry_interval_ms;
     uint16_t port;
     int direction;
     int scheduler;
@@ -47,9 +41,6 @@ usage(const char *program)
         "  --cc NAME               default|cubic|bbr\n"
         "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
         "  --repeat N              Sequential tasks on one connection (default 1)\n"
-        "  --attempt-id ID         Safe experiment attempt identifier\n"
-        "  --telemetry-output FILE Write transport samples as JSONL\n"
-        "  --telemetry-interval-ms MS  Sampling period (default 250)\n"
         "  --version               Print experiment version and exit\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
@@ -140,7 +131,6 @@ parse_args(int argc, char **argv, client_options_t *options)
     options->host = "127.0.0.1";
     options->port = 8443;
     options->repeat_count = 1;
-    options->telemetry_interval_ms = 250;
     options->direction = 0;
     options->scheduler = NETINS_UDP_SCHEDULER_BALANCED;
     options->congestion_control = NETINS_UDP_CC_DEFAULT;
@@ -199,22 +189,6 @@ parse_args(int argc, char **argv, client_options_t *options)
             {
                 return -1;
             }
-        } else if (strcmp(argv[i], "--attempt-id") == 0) {
-            if (need_value(argc, argv, &i, &options->attempt_id) != 0) {
-                return -1;
-            }
-        } else if (strcmp(argv[i], "--telemetry-output") == 0) {
-            if (need_value(argc, argv, &i, &options->telemetry_output) != 0) {
-                return -1;
-            }
-        } else if (strcmp(argv[i], "--telemetry-interval-ms") == 0) {
-            if (need_value(argc, argv, &i, &value) != 0
-                || parse_u32(value, UINT32_MAX,
-                    &options->telemetry_interval_ms) != 0
-                || options->telemetry_interval_ms == 0)
-            {
-                return -1;
-            }
         } else if (strcmp(argv[i], "--scheduler") == 0) {
             if (need_value(argc, argv, &i, &value) != 0
                 || parse_scheduler(value, &options->scheduler) != 0)
@@ -256,23 +230,6 @@ parse_args(int argc, char **argv, client_options_t *options)
             && options->zlog_config_file == NULL))
     {
         return -1;
-    }
-    if (options->telemetry_output != NULL) {
-        if (options->attempt_id == NULL
-            || strlen(options->attempt_id) == 0
-            || strlen(options->attempt_id) >= NETINS_UDP_ATTEMPT_ID_LEN)
-        {
-            return -1;
-        }
-        for (const unsigned char *p =
-                (const unsigned char *)options->attempt_id; *p != '\0'; p++)
-        {
-            if (!(isalnum(*p) || *p == '.' || *p == '_'
-                    || *p == '-'))
-            {
-                return -1;
-            }
-        }
     }
     if (options->direction == NETINS_UDP_TRANSFER_GET) {
         options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
@@ -316,31 +273,13 @@ copy_option_string(char *destination, size_t capacity, const char *source)
 }
 
 static int
-configure_client(netins_udp_t *client, const client_options_t *options,
-    netins_udp_telemetry_json_t *telemetry_writer)
+configure_client(netins_udp_t *client, const client_options_t *options)
 {
     netins_udp_logger_config_t logger = NETINS_UDP_LOGGER_CONFIG_INITIALIZER;
     netins_udp_zlog_config_t zlog = NETINS_UDP_ZLOG_CONFIG_INITIALIZER;
     netins_udp_interfaces_t interfaces = NETINS_UDP_INTERFACES_INITIALIZER;
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     uint32_t i;
-
-    if (options->telemetry_output != NULL) {
-        netins_udp_telemetry_config_t telemetry =
-            NETINS_UDP_TELEMETRY_CONFIG_INITIALIZER;
-        telemetry.enabled = 1;
-        telemetry.interval_ms = options->telemetry_interval_ms;
-        telemetry.callback = netins_udp_telemetry_json_write;
-        telemetry.user_data = telemetry_writer;
-        if (copy_option_string(telemetry.attempt_id,
-                sizeof(telemetry.attempt_id), options->attempt_id) != 0
-            || netins_udp_set_opt(client, NETINS_UDP_OPT_TELEMETRY,
-                &telemetry, sizeof(telemetry)) != 0)
-        {
-            fprintf(stderr, "telemetry configuration disabled: %s\n",
-                strerror(errno));
-        }
-    }
 
     logger.callback = api_logger;
     logger.user_data = stderr;
@@ -453,7 +392,6 @@ main(int argc, char **argv)
     uint32_t iteration;
     int initialized = 0;
     int exit_code = EXIT_FAILURE;
-    netins_udp_telemetry_json_t telemetry_writer = {0};
 
     printf("[experiment] %s role=client api_release=%s\n",
         NETINS_UDP_EXPERIMENT_VERSION, NETINS_UDP_API_RELEASE_VERSION);
@@ -473,20 +411,12 @@ main(int argc, char **argv)
     }
     initialized = 1;
 
-    if (options.telemetry_output != NULL
-        && netins_udp_telemetry_json_open(&telemetry_writer,
-            options.telemetry_output, 0) != 0)
-    {
-        perror("telemetry output");
-        options.telemetry_output = NULL;
-    }
-
     client = netins_udp_new(NETINS_UDP_ROLE_CLIENT);
     if (client == NULL) {
         perror("netins_udp_new");
         goto done;
     }
-    if (configure_client(client, &options, &telemetry_writer) != 0) {
+    if (configure_client(client, &options) != 0) {
         print_handle_error(client, "configure");
         goto done;
     }
@@ -536,6 +466,5 @@ done:
             exit_code = EXIT_FAILURE;
         }
     }
-    netins_udp_telemetry_json_close(&telemetry_writer);
     return exit_code;
 }

@@ -1,5 +1,4 @@
 #include "mini_client.h"
-#include "mini_backend.h"
 #include "mini_stream_backend.h"
 #include <inttypes.h>
 #include <stdint.h>
@@ -1472,20 +1471,6 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
     for (size_t i = 0; i < req_sz; i++) {
         headers[i] = req_hdr[i];
     }
-    if (user_stream->user_conn->telemetry_attempt_id[0] != '\0') {
-        if (req_sz >= H3_HDR_CNT) {
-            printf("[error] telemetry header exceeds header capacity\n");
-            return XQC_ERROR;
-        }
-        headers[req_sz].name.iov_base = "x-mini-bench-id";
-        headers[req_sz].name.iov_len = strlen("x-mini-bench-id");
-        headers[req_sz].value.iov_base =
-            user_stream->user_conn->telemetry_attempt_id;
-        headers[req_sz].value.iov_len = strlen(
-            user_stream->user_conn->telemetry_attempt_id);
-        headers[req_sz].flags = 0;
-        req_sz++;
-    }
     
     return req_sz;
 }
@@ -1752,10 +1737,6 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     user_stream->start_time = xqc_now();
     if (user_conn->upload_start_time == 0) {
         user_conn->upload_start_time = user_stream->start_time;
-        if (req_cfg->method == REQUEST_METHOD_POST) {
-            mini_backend_client_telemetry_start(user_conn->api_backend,
-                NETINS_UDP_TRANSFER_POST);
-        }
     }
 
     ret = xqc_mini_cli_send_h3_headers(user_stream);

@@ -162,11 +162,9 @@ if(XQC_ENABLE_MINI_API)
     endif()
 
     add_executable(netins_udp_mini_api_client
-        ../demo/netins_udp_mini_api_client.c
-        ../demo/netins_udp_telemetry_json.c)
+        ../demo/netins_udp_mini_api_client.c)
     add_executable(netins_udp_mini_api_server
-        ../demo/netins_udp_mini_api_server.c
-        ../demo/netins_udp_telemetry_json.c)
+        ../demo/netins_udp_mini_api_server.c)
     add_executable(netins_udp_stream_client
         ../demo/netins_udp_stream_client.c)
     add_executable(netins_udp_stream_server

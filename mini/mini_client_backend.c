@@ -8,8 +8,6 @@
 
 #include "mini_client.h"
 #include "mini_stream_backend.h"
-#include "src/transport/xqc_conn.h"
-#include "src/common/xqc_time.h"
 
 #if MINI_BACKEND_MAX_INTERFACES > MAX_PATH_CNT
 #error "Mini backend interface capacity exceeds Mini client path slots"
@@ -27,200 +25,7 @@ struct mini_backend_client_s {
     int connect_started;
     mini_backend_stream_t *active_stream;
     pthread_mutex_t engine_lock;
-    int telemetry_enabled;
-    uint32_t telemetry_interval_ms;
-    char telemetry_attempt_id[NETINS_UDP_ATTEMPT_ID_LEN];
-    netins_udp_telemetry_cb telemetry_callback;
-    void *telemetry_user_data;
-    struct event *telemetry_event;
-    uint64_t telemetry_next_deadline_us;
-    uint32_t telemetry_sample_seq;
-    int telemetry_active;
-    int telemetry_failed;
-    int telemetry_direction;
 };
-
-static uint64_t
-mini_backend_realtime_us(void)
-{
-    return xqc_realtime_timestamp();
-}
-
-static void
-mini_backend_client_fill_path_identity(mini_backend_client_t *client,
-    netins_udp_path_telemetry_t *path)
-{
-    for (int i = 0; i < MAX_PATH_CNT; i++) {
-        xqc_mini_cli_user_path_t *source = &client->connection->paths[i];
-        if (source->path_id != path->path_id) {
-            continue;
-        }
-        snprintf(path->interface_name, sizeof(path->interface_name), "%s",
-            source->interface_name);
-        if (source->local_addr != NULL && source->local_addrlen > 0) {
-            (void)getnameinfo(source->local_addr, source->local_addrlen,
-                path->local_address, sizeof(path->local_address),
-                NULL, 0, NI_NUMERICHOST);
-        }
-        return;
-    }
-}
-
-static int
-mini_backend_client_emit_telemetry(mini_backend_client_t *client,
-    int sample_kind, uint64_t scheduled_us, uint32_t missed)
-{
-    xqc_conn_telemetry_t raw;
-    if (client == NULL || client->connection == NULL
-        || client->telemetry_callback == NULL
-        || xqc_conn_get_telemetry(client->ctx.engine,
-            &client->connection->cid, &raw) != XQC_OK)
-    {
-        return -1;
-    }
-    uint64_t actual_us = xqc_monotonic_timestamp();
-    netins_udp_telemetry_sample_t sample;
-    memset(&sample, 0, sizeof(sample));
-    sample.struct_size = sizeof(sample);
-    sample.api_version = NETINS_UDP_API_VERSION;
-    snprintf(sample.attempt_id, sizeof(sample.attempt_id), "%s",
-        client->telemetry_attempt_id);
-    sample.role = NETINS_UDP_TELEMETRY_ROLE_CLIENT;
-    sample.direction = client->telemetry_direction;
-    sample.sample_kind = sample_kind;
-    sample.sample_seq = client->telemetry_sample_seq++;
-    sample.scheduled_mono_us = scheduled_us;
-    sample.actual_mono_us = actual_us;
-    sample.realtime_us = mini_backend_realtime_us();
-    sample.lateness_us = actual_us > scheduled_us
-        ? actual_us - scheduled_us : 0;
-    sample.missed_intervals = missed;
-    sample.connection_credit_bytes = raw.connection_credit_bytes;
-    sample.active_stream_credit_bytes = raw.active_stream_credit_bytes;
-    sample.effective_swnd_bytes = raw.effective_swnd_bytes;
-    sample.path_count = raw.path_count;
-    for (uint32_t i = 0; i < raw.path_count; i++) {
-        netins_udp_path_telemetry_t *dst = &sample.paths[i];
-        xqc_conn_path_telemetry_t *src = &raw.paths[i];
-        dst->path_id = src->path_id;
-        dst->path_index = src->path_index;
-        dst->path_state = src->path_state;
-        dst->app_status = src->app_status;
-        dst->cwnd_bytes = src->cwnd_bytes;
-        dst->effective_cwnd_bytes = src->effective_cwnd_bytes;
-        dst->inflight_packets = src->inflight_packets;
-        dst->inflight_bytes = src->inflight_bytes;
-        dst->srtt_us = src->srtt_us;
-        dst->sent_bytes = src->sent_bytes;
-        mini_backend_client_fill_path_identity(client, dst);
-    }
-    return client->telemetry_callback(client->telemetry_user_data, &sample);
-}
-
-static void
-mini_backend_client_telemetry_timer(evutil_socket_t fd, short events,
-    void *arg)
-{
-    (void)fd;
-    (void)events;
-    mini_backend_client_t *client = arg;
-    if (client == NULL || !client->telemetry_active) {
-        return;
-    }
-    uint64_t now = xqc_monotonic_timestamp();
-    uint64_t interval_us = (uint64_t)client->telemetry_interval_ms * 1000ULL;
-    uint32_t missed = now > client->telemetry_next_deadline_us
-        ? (uint32_t)((now - client->telemetry_next_deadline_us) / interval_us)
-        : 0;
-    uint64_t scheduled = client->telemetry_next_deadline_us;
-    if (mini_backend_client_emit_telemetry(client,
-            NETINS_UDP_TELEMETRY_PERIODIC, scheduled, missed) != 0)
-    {
-        client->telemetry_active = 0;
-        client->telemetry_failed = 1;
-        return;
-    }
-    client->telemetry_next_deadline_us +=
-        (uint64_t)(missed + 1) * interval_us;
-    now = xqc_monotonic_timestamp();
-    uint64_t wait_us = client->telemetry_next_deadline_us > now
-        ? client->telemetry_next_deadline_us - now : 1;
-    struct timeval delay = {
-        (time_t)(wait_us / 1000000ULL),
-        (suseconds_t)(wait_us % 1000000ULL)
-    };
-    if (event_add(client->telemetry_event, &delay) != 0) {
-        client->telemetry_active = 0;
-        client->telemetry_failed = 1;
-    }
-}
-
-void
-mini_backend_client_telemetry_start(void *backend, int direction)
-{
-    mini_backend_client_t *client = backend;
-    if (client == NULL || !client->telemetry_enabled || client->telemetry_failed
-        || client->telemetry_callback == NULL)
-    {
-        return;
-    }
-    client->telemetry_direction = direction;
-    client->telemetry_sample_seq = 0;
-    client->telemetry_active = 1;
-    uint64_t now = xqc_monotonic_timestamp();
-    if (mini_backend_client_emit_telemetry(client,
-            NETINS_UDP_TELEMETRY_START, now, 0) != 0)
-    {
-        client->telemetry_active = 0;
-        client->telemetry_failed = 1;
-        return;
-    }
-    client->telemetry_next_deadline_us = now
-        + (uint64_t)client->telemetry_interval_ms * 1000ULL;
-    client->telemetry_event = event_new(client->ctx.eb, -1, 0,
-        mini_backend_client_telemetry_timer, client);
-    if (client->telemetry_event == NULL) {
-        client->telemetry_active = 0;
-        client->telemetry_failed = 1;
-        return;
-    }
-    uint64_t wait_us = (uint64_t)client->telemetry_interval_ms * 1000ULL;
-    struct timeval delay = {
-        (time_t)(wait_us / 1000000ULL),
-        (suseconds_t)(wait_us % 1000000ULL)
-    };
-    if (event_add(client->telemetry_event, &delay) != 0) {
-        event_free(client->telemetry_event);
-        client->telemetry_event = NULL;
-        client->telemetry_active = 0;
-        client->telemetry_failed = 1;
-    }
-}
-
-static void
-mini_backend_client_telemetry_stop(mini_backend_client_t *client)
-{
-    if (client == NULL) {
-        return;
-    }
-    int was_active = client->telemetry_active;
-    client->telemetry_active = 0;
-    if (client->telemetry_event != NULL) {
-        event_del(client->telemetry_event);
-    }
-    if (was_active) {
-        if (mini_backend_client_emit_telemetry(client,
-                NETINS_UDP_TELEMETRY_END,
-                xqc_monotonic_timestamp(), 0) != 0)
-        {
-            client->telemetry_failed = 1;
-        }
-    }
-    if (client->telemetry_event != NULL) {
-        event_free(client->telemetry_event);
-        client->telemetry_event = NULL;
-    }
-}
 
 static void
 mini_backend_client_timeout_wakeup(evutil_socket_t fd, short events, void *arg)
@@ -389,15 +194,6 @@ mini_backend_client_create(const mini_backend_config_t *config,
 
     client->args = args;
     client->api_mode = config != NULL && config->api_mode;
-    if (config != NULL) {
-        client->telemetry_enabled = config->telemetry_enabled;
-        client->telemetry_interval_ms = config->telemetry_interval_ms;
-        client->telemetry_callback = config->telemetry_callback;
-        client->telemetry_user_data = config->telemetry_user_data;
-        snprintf(client->telemetry_attempt_id,
-            sizeof(client->telemetry_attempt_id), "%s",
-            config->telemetry_attempt_id);
-    }
     xqc_mini_cli_init_args(args);
     if (config == NULL || config->load_config_file) {
         (void)xqc_mini_cli_load_config_file(args, MINI_CONFIG_FILE);
@@ -516,10 +312,6 @@ mini_backend_client_connect(mini_backend_client_t *client,
         return EIO;
     }
     client->connection->auto_start_requests = client->api_mode ? 0 : 1;
-    client->connection->api_backend = client;
-    snprintf(client->connection->telemetry_attempt_id,
-        sizeof(client->connection->telemetry_attempt_id), "%s",
-        client->telemetry_attempt_id);
     if (xqc_mini_cli_main_process(client->connection, &client->ctx)
         != XQC_OK)
     {
@@ -588,9 +380,6 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     }
 
     int ret = XQC_OK;
-    if (direction == MINI_BACKEND_TRANSFER_GET) {
-        mini_backend_client_telemetry_start(client, direction);
-    }
     if (method == REQUEST_METHOD_GET
         && !xqc_mini_cli_paths_ready_for_requests(client->connection))
     {
@@ -601,7 +390,6 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     }
     if (ret != XQC_OK) {
         mini_backend_client_abort_transfer(client, EIO);
-        mini_backend_client_telemetry_stop(client);
         return EIO;
     }
 
@@ -640,7 +428,6 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         }
     }
     mini_backend_client_disarm_timeout(&timeout_event);
-    mini_backend_client_telemetry_stop(client);
 
     if (client->connection->transfer_end_time == 0) {
         client->connection->transfer_end_time = xqc_now();
@@ -712,7 +499,6 @@ mini_backend_client_destroy(mini_backend_client_t *client)
     if (client == NULL) {
         return;
     }
-    mini_backend_client_telemetry_stop(client);
     if (client->active_stream != NULL) {
         mini_backend_stream_destroy(client->active_stream);
     }
