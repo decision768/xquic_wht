@@ -971,6 +971,7 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
     if (user_conn == NULL) {
         return;
     }
+    mini_observer_stop(&user_conn->observer);
     xqc_mini_stream_poc_server_release(user_conn);
     xqc_mini_svr_release_connection_state(user_conn);
     if (user_conn->serve_root_fd >= 0) {

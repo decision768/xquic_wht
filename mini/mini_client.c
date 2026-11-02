@@ -1472,6 +1472,15 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
         headers[i] = req_hdr[i];
     }
     
+    const netins_udp_observer_config_t *oc = &user_stream->user_conn->ctx->args->observer_config;
+    if (oc->enabled && oc->attempt_id[0]) {
+        headers[req_sz].name.iov_base = "x-observer-attempt";
+        headers[req_sz].name.iov_len = strlen("x-observer-attempt");
+        headers[req_sz].value.iov_base = (void *)oc->attempt_id;
+        headers[req_sz].value.iov_len = strlen(oc->attempt_id);
+        headers[req_sz].flags = 0;
+        ++req_sz;
+    }
     return req_sz;
 }
 // 实际分片发送 HTTP/3 请求体
@@ -1487,7 +1496,7 @@ xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream)
         return XQC_OK;
     }
 
-    xqc_http_header_t headers[H3_HDR_CNT];
+    xqc_http_header_t headers[H3_HDR_CNT + 1];
     xqc_mini_cli_req_config_t *req_cfg =
         &user_stream->user_conn->ctx->args->req_cfg;
     int header_count = xqc_mini_cli_format_h3_req(headers, req_cfg,
@@ -1688,6 +1697,11 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
         return XQC_ERROR;
     }
 
+    xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
+        xqc_h3_stream_id(user_stream->h3_request), user_conn->ctx->args->observer_config.attempt_id,
+        user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET ? 1 : 2,
+        stream_index, chunk_offset, chunk_length, user_conn->max_concurrent_requests,
+        xqc_mini_cli_get_stream_range_size(user_conn));
     int ret;
     xqc_mini_cli_req_config_t *req_cfg =
         &user_stream->user_conn->ctx->args->req_cfg;
@@ -4012,4 +4026,23 @@ xqc_mini_cli_bind_to_interface(int fd, const char *interface_name, int family)
     (void)family;
 #endif
     return XQC_OK;
+}
+
+void
+xqc_mini_cli_observer_extra(void *data)
+{
+    xqc_mini_cli_user_conn_t *c = data;
+    uint64_t bytes = 0, depth = 0;
+    if (c->download_write_thread_running) {
+        pthread_mutex_lock(&c->download_write_lock);
+        bytes = c->download_write_queue_bytes; depth = c->download_write_queue_depth;
+        pthread_mutex_unlock(&c->download_write_lock);
+    }
+    for (int i = 0; i < MAX_PATH_CNT; ++i) {
+        if (c->paths[i].interface_name[0]) {
+            xqc_observer_path_interface(c->ctx->engine, &c->cid, c->paths[i].path_id,
+                c->paths[i].interface_name);
+        }
+    }
+    xqc_observer_phase(c->ctx->engine, &c->cid, "write_queue", bytes, depth, 0);
 }

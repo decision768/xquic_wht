@@ -115,6 +115,7 @@ mini_backend_client_apply_config(xqc_mini_cli_args_t *args,
         args->defer_transfer_setup = 1;
         args->disable_0rtt_storage = 1;
     }
+    args->observer_config = config->observer;
     args->stream_api_enabled = config->stream_mode != 0;
     if (config->has_zlog) {
         args->env_cfg.use_zlog = config->zlog_enabled;
@@ -379,6 +380,10 @@ mini_backend_client_transfer(mini_backend_client_t *client,
             ? client->connection->transfer_error_code : EIO;
     }
 
+    mini_observer_stop(&client->connection->observer);
+    client->connection->observer = mini_observer_start(client->ctx.engine,
+        &client->connection->cid, client->ctx.eb, &client->args->observer_config,
+        "board", xqc_mini_cli_observer_extra, client->connection);
     int ret = XQC_OK;
     if (method == REQUEST_METHOD_GET
         && !xqc_mini_cli_paths_ready_for_requests(client->connection))
@@ -469,6 +474,10 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     if (ret != XQC_OK) {
         mini_backend_client_abort_transfer(client, ret);
     }
+    xqc_observer_phase(client->ctx.engine, &client->connection->cid,
+        ret == XQC_OK ? "client_confirmed" : "client_failed", 0, 0,
+        xqc_now() - client->connection->transfer_start_time);
+    mini_observer_finish(client->connection->observer);
     return ret == XQC_OK ? 0 : ret;
 }
 
@@ -499,6 +508,7 @@ mini_backend_client_destroy(mini_backend_client_t *client)
     if (client == NULL) {
         return;
     }
+    if (client->connection) { mini_observer_stop(&client->connection->observer); }
     if (client->active_stream != NULL) {
         mini_backend_stream_destroy(client->active_stream);
     }

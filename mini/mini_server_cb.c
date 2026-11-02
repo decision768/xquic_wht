@@ -169,6 +169,17 @@ xqc_mini_svr_log_response_send_stats(xqc_mini_svr_user_stream_t *user_stream)
 
         xqc_mini_svr_log_get_submit_done(user_stream);
         xqc_mini_svr_log_get_path_response_done(user_stream, duration_ms, mbps);
+        xqc_mini_svr_user_conn_t *observer_conn = xqc_mini_svr_get_conn_from_request(user_stream);
+        if (observer_conn) {
+            size_t range = xqc_mini_svr_get_stream_range_size(user_stream);
+            uint64_t required = user_stream->total_file_size ?
+                (user_stream->total_file_size - 1) / range + 1 : 1;
+            if (observer_conn->get_submit_streams >= required) {
+                xqc_observer_phase(observer_conn->ctx->engine, &observer_conn->cid,
+                    "get_body_submitted", observer_conn->get_submit_bytes, 0, 0);
+                /* Keep sampling queued/inflight bytes until connection/task confirmation. */
+            }
+        }
     }
 
     user_stream->send_logged = 1;
@@ -1586,6 +1597,7 @@ xqc_mini_svr_mark_stream_complete(xqc_mini_svr_user_stream_t *user_stream)
             user_stream->stream_offset);
 
         if (state->completed_streams >= state->expected_streams) {
+            mini_observer_finish(user_stream->user_conn ? user_stream->user_conn->observer : NULL);
             printf("[server] all %d segments received, assembled size %zu bytes\n",
                 state->expected_streams, state->total_size);
             double duration_ms = xqc_mini_svr_duration_ms(&state->earliest_start,
@@ -1834,6 +1846,7 @@ xqc_mini_svr_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *ret
         (xqc_mini_svr_user_conn_t *)user_data;
     if (user_conn != NULL && new_cid != NULL) {
         memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
+        mini_observer_update_cid(user_conn->observer, new_cid);
     }
 }
 
@@ -1918,6 +1931,8 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             user_conn->api_backend, user_conn);
     }
 
+    user_conn->observer = mini_observer_start(user_conn->ctx->engine, cid,
+        user_conn->ctx->eb, &user_conn->ctx->args->observer_config, "server", NULL, NULL);
     printf("[stats] xqc_mini_svr_h3_conn_create_notify \n");
     printf("[diag_server_conn] h3_conn_create\n");
     xqc_mini_svr_log_mp_active_state_force(user_conn, "h3_conn_create");
@@ -1935,6 +1950,7 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
         return 0;
     }
     xqc_mini_svr_log_mp_active_state_force(user_conn, "h3_conn_close");
+    mini_observer_stop(&user_conn->observer);
     printf("[stats] xqc_mini_svr_h3_conn_close_notify success \n");
     if (user_conn->is_connection_scope) {
         xqc_mini_svr_user_conn_t *listener_conn = user_conn->listener_conn;
@@ -2031,6 +2047,14 @@ xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_us
     xqc_mini_svr_user_conn_t *user_conn =
         xqc_mini_svr_get_conn_from_request(user_stream);
     xqc_mini_svr_unlink_deferred_request(user_conn, user_stream);
+    if (user_conn && user_stream->method == REQUEST_METHOD_GET && user_stream->metadata_parsed
+        && user_stream->response_status >= 200 && user_stream->response_status < 300) {
+        user_conn->observer_get_closed++;
+        if (user_conn->observer_get_expected && user_conn->observer_get_closed >= user_conn->observer_get_expected) {
+            xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid, "get_requests_closed", 0, 0, 0);
+            mini_observer_finish(user_conn->observer);
+        }
+    }
     if (user_stream->recv_body_fd >= 0) {
         close(user_stream->recv_body_fd);
         user_stream->recv_body_fd = -1;
@@ -2172,6 +2196,8 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             printf("[error] xqc_h3_request_recv_headers error\n");
             return XQC_ERROR;
         }
+        char observer_attempt[192] = {0};
+        int observer_attempt_seen = 0;
         int have_index = 0;
         int have_count = 0;
         int have_offset = 0;
@@ -2191,6 +2217,15 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             printf("%.*s: %.*s\n",
                 (int)h->name.iov_len, (char*)h->name.iov_base,
                 (int)h->value.iov_len, (char*)h->value.iov_base);
+            if (xqc_mini_svr_header_name_is(h, "x-observer-attempt")) {
+                if (!observer_attempt_seen && h->value.iov_len > 0
+                    && h->value.iov_len < sizeof(observer_attempt)
+                    && !memchr(h->value.iov_base, 0, h->value.iov_len)) {
+                    memcpy(observer_attempt, h->value.iov_base, h->value.iov_len);
+                } else { observer_attempt[0] = 0; }
+                observer_attempt_seen++;
+                continue;
+            }
             if (xqc_mini_svr_header_name_is(h, ":method")) {
                 char buf[16] = {0};
                 if (have_method
@@ -2358,6 +2393,19 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                     user_stream->use_file_response,
                     user_stream->resolved_path);
             }
+            if (user_stream->metadata_parsed) {
+                if (user_stream->stream_index == 0 && user_conn->observer_get_closed >= user_conn->observer_get_expected) {
+                    user_conn->observer_get_closed = 0;
+                }
+                size_t observer_range = xqc_mini_svr_get_stream_range_size(user_stream);
+                user_conn->observer_get_expected = user_stream->total_file_size ?
+                    (user_stream->total_file_size - 1) / observer_range + 1 : 1;
+            }
+            xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
+                xqc_h3_stream_id(h3_request), observer_attempt, 1, user_stream->stream_index,
+                user_stream->response_body_offset, user_stream->response_body_len, 0,
+                xqc_mini_svr_get_stream_range_size(user_stream));
+            mini_observer_resume(user_conn->observer);
             xqc_mini_svr_send_response(user_stream);
             user_stream->header_recvd = 1;
         } else {
@@ -2414,6 +2462,10 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                 return XQC_ERROR;
             }
 
+            xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
+                xqc_h3_stream_id(h3_request), observer_attempt, 2, user_stream->stream_index,
+                user_stream->stream_offset, user_stream->expected_content_length, 0, range_size);
+            mini_observer_resume(user_conn->observer);
             if (xqc_mini_svr_prepare_output_file(user_stream) != XQC_OK) {
                 return XQC_ERROR;
             }
@@ -2471,6 +2523,9 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             }
 
             off_t write_off = (off_t)(user_stream->stream_offset + user_stream->recv_body_len);
+            xqc_observer_body(user_conn->ctx->engine, &user_conn->cid,
+                xqc_h3_stream_id(h3_request), (uint64_t)read);
+            uint64_t observer_write_start = xqc_now();
             size_t write_total = 0;
             while (write_total < (size_t)read) {
                 if (user_conn != NULL && user_conn->serve_cancelled) {
@@ -2489,6 +2544,8 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                 write_total += (size_t)written;
             }
 
+            xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
+                "post_write", (uint64_t)read, 0, xqc_now() - observer_write_start);
             user_stream->recv_body_len += read;
             uint64_t aggregate_end_ns = xqc_mini_svr_monotonic_now_ns();
             if (read > 0) {
@@ -2521,10 +2578,16 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
     if (user_stream->fin_received) {
 
         if (user_stream->recv_body_fd >= 0) {
+            uint64_t observer_sync_start = xqc_now();
             if (fsync(user_stream->recv_body_fd) != 0) {
+                xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
+                    "post_fsync_failed", user_stream->recv_body_len, 0, xqc_now() - observer_sync_start);
                 perror("fsync");
                 return XQC_ERROR;
             }
+            xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
+                "post_fsync_complete", user_stream->recv_body_len, 0,
+                xqc_now() - observer_sync_start);
             close(user_stream->recv_body_fd);
             user_stream->recv_body_fd = -1;
         }

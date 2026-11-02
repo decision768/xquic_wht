@@ -2,6 +2,7 @@
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
 
+#include "src/transport/xqc_observer.h"
 #include "src/common/xqc_memory_pool.h"
 #include "src/common/xqc_id_hash.h"
 #include "src/transport/xqc_conn.h"
@@ -790,6 +791,12 @@ xqc_destroy_stream(xqc_stream_t *stream)
         stream->stream_if->stream_close_notify(stream, stream->user_data);
     }
 
+    xqc_observer_stream_end(stream, "stream_destroy");
+    if (stream->observer) {
+        free(stream->observer->state.ranges);
+        free(stream->observer);
+        stream->observer = NULL;
+    }
     xqc_list_del_init(&stream->all_stream_list);
 
     xqc_destroy_frame_list(&stream->stream_data_in.frames_tailq);
@@ -1452,6 +1459,7 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_s
         }
     }
 
+    xqc_observer_stream_update(stream, 0, 0);
     stream->stream_conn->conn_flow_ctl.fc_data_read += read;
 
     xqc_log_event(stream->stream_conn->log, TRA_STREAM_DATA_MOVED, stream, 1, read,

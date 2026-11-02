@@ -466,7 +466,7 @@ class TelemetrySession:
             for line_number, line in enumerate(source, 1):
                 try:
                     sample = json.loads(line)
-                    if sample.get("schema_version") != TRANSPORT_SCHEMA_VERSION:
+                    if sample.get("schema_version") not in (TRANSPORT_SCHEMA_VERSION, 2):
                         raise ValueError("未知schema_version")
                     if not isinstance(sample.get("paths"), list):
                         raise ValueError("paths不是数组")
@@ -706,7 +706,8 @@ def export_workbook(journal, target):
             continue
         window = max(0, int((actual_us - start_us) / (interval_s * 1_000_000)))
         for path in sample.get("paths", []):
-            interface = path.get("interface_name") or client_maps.get(tag, {}).get(path.get("path_id"), "")
+            interface = path.get("interface_name") or (client_maps.get(tag, {}).get(path.get("path_id"), "")
+                if sample.get("schema_version") == 1 else "")
             module = MODULES.get(interface, "UNKNOWN")
             key = (tag, window, module, path.get("path_id"))
             bucket = bins.setdefault(key, {"endpoint": endpoint, "interface": interface,
@@ -721,12 +722,16 @@ def export_workbook(journal, target):
                 add(bucket, field, sample.get(field))
             srtt = path.get("srtt_us")
             if isinstance(srtt, (int, float)) and srtt > 0:
-                add(bucket, "cwnd_rtt_mbps", 8 * path.get("cwnd_bytes", 0) / srtt)
-                add(bucket, "inp_rtt_packets_s", 1_000_000 * path.get("inflight_packets", 0) / srtt)
-                add(bucket, "swnd_rtt_mbps", 8 * sample.get("effective_swnd_bytes", 0) / srtt)
-            pkey = (tag, endpoint, path.get("path_id"))
+                cwnd, packets, swnd = path.get("cwnd_bytes"), path.get("inflight_packets"), sample.get("effective_swnd_bytes")
+                if isinstance(cwnd, (int, float)):
+                    add(bucket, "cwnd_rtt_mbps", 8 * cwnd / srtt)
+                if isinstance(packets, (int, float)):
+                    add(bucket, "inp_rtt_packets_s", 1_000_000 * packets / srtt)
+                if isinstance(swnd, (int, float)):
+                    add(bucket, "swnd_rtt_mbps", 8 * swnd / srtt)
+            pkey = (tag, endpoint, sample.get("conn_uid"), path.get("path_id"), path.get("mapping_generation"))
             prior = previous_path.get(pkey)
-            sent = path.get("sent_bytes")
+            sent = path.get("sent_bytes", path.get("wire_sent_bytes"))
             if prior and isinstance(sent, int) and sent >= prior[1] and actual_us > prior[0]:
                 add(bucket, "path_tx_mbps", 8 * (sent - prior[1]) / (actual_us - prior[0]))
             if isinstance(sent, int):

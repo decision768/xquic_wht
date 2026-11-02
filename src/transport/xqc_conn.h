@@ -6,6 +6,7 @@
 #define _XQC_CONN_H_INCLUDED_
 
 #include <openssl/ssl.h>
+#include <xquic/xqc_observer.h>
 #include <xquic/xquic.h>
 #include <xquic/xquic_typedef.h>
 #include "src/transport/xqc_cid.h"
@@ -393,6 +394,7 @@ struct xqc_connection_s {
     const
     xqc_scheduler_callback_t       *scheduler_callback;
     void                           *scheduler;
+    xqc_observer_t                 *observer;
 
     const
     xqc_reinj_ctl_callback_t       *reinj_callback;

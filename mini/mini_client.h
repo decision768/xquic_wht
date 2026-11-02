@@ -11,6 +11,7 @@
 #include <pthread.h>
 #include <event2/event.h>
 #include <xquic/xquic.h>
+#include "mini_observer.h"
 #include <xquic/xqc_http3.h>
 #include <xquic/xquic_typedef.h>
 #include <zlog.h>
@@ -219,6 +220,7 @@ typedef struct xqc_mini_cli_args_s {
     xqc_mini_stream_poc_config_t stream_poc;
 
     /* Public data-stream API mode; selected before connecting. */
+    netins_udp_observer_config_t observer_config;
     int                         stream_api_enabled;
 } xqc_mini_cli_args_t;
 
@@ -326,6 +328,7 @@ typedef struct xqc_mini_cli_diag_stats_s {
 typedef struct xqc_mini_cli_user_conn_s {
     xqc_cid_t               cid;
     xqc_h3_conn_t          *h3_conn;
+    mini_observer_t        *observer;
 
     xqc_mini_cli_ctx_t     *ctx;
 
@@ -409,6 +412,7 @@ typedef struct xqc_mini_cli_user_conn_s {
 
 } xqc_mini_cli_user_conn_t;
 
+void xqc_mini_cli_observer_extra(void *);
 void xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
     const char *scene, int force);
 void xqc_mini_cli_diag_record_pwrite(xqc_mini_cli_user_conn_t *user_conn,

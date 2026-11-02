@@ -129,8 +129,21 @@ typedef enum netins_udp_opt_e {
      * h3-ext ALPN required by the data-stream API.  Ordinary file clients
      * keep using the original h3 ALPN unless this option is explicitly set.
      */
-    NETINS_UDP_OPT_STREAM_MODE = 13
+    NETINS_UDP_OPT_STREAM_MODE = 13,
+    NETINS_UDP_OPT_OBSERVER_V2 = 14
 } netins_udp_opt_t;
+
+/* Independent observer configuration. Existing API v1 structures are unchanged. */
+typedef struct netins_udp_observer_config_s {
+    uint32_t struct_size;
+    uint32_t schema_version;
+    uint32_t interval_ms;
+    uint32_t enabled;
+    char output_prefix[NETINS_UDP_FILE_PATH_LEN];
+    char attempt_id[192];
+} netins_udp_observer_config_t;
+#define NETINS_UDP_OBSERVER_CONFIG_INITIALIZER \
+    { sizeof(netins_udp_observer_config_t), 2U, 100U, 0U, {0}, {0} }
 
 typedef enum netins_udp_transfer_direction_e {
     NETINS_UDP_TRANSFER_GET = 1,

@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
 typedef struct client_options_s {
     const char *host;
@@ -21,6 +23,7 @@ typedef struct client_options_s {
     int direction;
     int scheduler;
     int congestion_control;
+    netins_udp_observer_config_t observer;
     int log_level;
 } client_options_t;
 
@@ -30,6 +33,9 @@ usage(const char *program)
     fprintf(stderr,
         "Usage: %s --get|--post --local FILE --remote /PATH [options]\n"
         "Options:\n"
+        "  --telemetry-output PREFIX  Passive observer output prefix\n"
+        "  --attempt-id TOKEN         Unique attempt identifier\n"
+        "  --telemetry-interval-ms N  Snapshot interval (default 100)\n"
         "  --host IPv4             Server address (default 127.0.0.1)\n"
         "  --port PORT             Server port (default 8443)\n"
         "  --interface NAME        Client interface; repeat up to 8 times\n"
@@ -130,6 +136,7 @@ parse_args(int argc, char **argv, client_options_t *options)
     memset(options, 0, sizeof(*options));
     options->host = "127.0.0.1";
     options->port = 8443;
+    options->observer = (netins_udp_observer_config_t)NETINS_UDP_OBSERVER_CONFIG_INITIALIZER;
     options->repeat_count = 1;
     options->direction = 0;
     options->scheduler = NETINS_UDP_SCHEDULER_BALANCED;
@@ -140,7 +147,19 @@ parse_args(int argc, char **argv, client_options_t *options)
         const char *value = NULL;
         uint32_t number;
 
-        if (strcmp(argv[i], "--get") == 0) {
+        if (strcmp(argv[i], "--telemetry-output") == 0 || strcmp(argv[i], "--attempt-id") == 0) {
+            int output = strcmp(argv[i], "--telemetry-output") == 0;
+            if (need_value(argc, argv, &i, &value) != 0) { return -1; }
+            char *target = output ? options->observer.output_prefix : options->observer.attempt_id;
+            size_t capacity = output ? sizeof(options->observer.output_prefix) : sizeof(options->observer.attempt_id);
+            if (strlen(value) >= capacity) { return -1; }
+            memcpy(target, value, strlen(value) + 1);
+            if (output) { options->observer.enabled = 1; }
+        } else if (strcmp(argv[i], "--telemetry-interval-ms") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, 60000, &number) != 0 || number == 0 || number > 60000) { return -1; }
+            options->observer.interval_ms = number;
+        } else if (strcmp(argv[i], "--get") == 0) {
             options->direction = NETINS_UDP_TRANSFER_GET;
         } else if (strcmp(argv[i], "--post") == 0) {
             options->direction = NETINS_UDP_TRANSFER_POST;
@@ -281,6 +300,8 @@ configure_client(netins_udp_t *client, const client_options_t *options)
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     uint32_t i;
 
+    if (options->observer.enabled && netins_udp_set_opt(client, NETINS_UDP_OPT_OBSERVER_V2,
+        &options->observer, sizeof(options->observer)) != 0) { return -1; }
     logger.callback = api_logger;
     logger.user_data = stderr;
     logger.minimum_level = options->log_level;
@@ -396,6 +417,22 @@ main(int argc, char **argv)
     printf("[experiment] %s role=client api_release=%s\n",
         NETINS_UDP_EXPERIMENT_VERSION, NETINS_UDP_API_RELEASE_VERSION);
     fflush(stdout);
+    if (argc == 2 && strcmp(argv[1], "--observer-clock") == 0) {
+        struct timespec mono; struct timeval real;
+        char boot[80] = "unknown";
+        FILE *boot_file = fopen("/proc/sys/kernel/random/boot_id", "r");
+        if (boot_file) { if (!fgets(boot, sizeof(boot), boot_file)) { strcpy(boot, "unknown"); } fclose(boot_file); }
+        boot[strcspn(boot, "\r\n")] = 0;
+        if (clock_gettime(CLOCK_MONOTONIC, &mono) || gettimeofday(&real, NULL)) { return EXIT_FAILURE; }
+        printf("{\"monotonic_us\":%"PRIu64",\"realtime_us\":%"PRIu64",\"boot_id\":\"%s\"}\n",
+            (uint64_t)mono.tv_sec * 1000000 + (uint64_t)mono.tv_nsec / 1000,
+            (uint64_t)real.tv_sec * 1000000 + (uint64_t)real.tv_usec, boot);
+        return EXIT_SUCCESS;
+    }
+    if (argc == 2 && strcmp(argv[1], "--telemetry-capabilities") == 0) {
+        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true}");
+        return EXIT_SUCCESS;
+    }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
         return EXIT_SUCCESS;
     }

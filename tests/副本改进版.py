@@ -53,6 +53,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+# Both maintained entry points share one observer implementation.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
+from roadtest_observability import add_arguments as add_observer_arguments, create_observer, observe
+
 try:
     import paramiko
 except ImportError:  # Deferred so --help still works without dependencies.
@@ -1139,6 +1143,8 @@ def build_client_command(
             str(args.client_timeout_ms),
         ]
     )
+    argv.extend(observe(args, "client_arguments", attempt_token) or [])
+    observe(args, "command", "board", argv)
     client_command = " ".join(q(item) for item in argv)
     gate_file = f"/tmp/{attempt_token}_client.start"
 
@@ -1726,7 +1732,10 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         help="本机结果目录，默认是脚本目录下的log",
     )
 
+    add_observer_arguments(parser)
     args = parser.parse_args(argv)
+    if not 1 <= args.observer_interval_ms <= 60000:
+        parser.error("--observer-interval-ms 必须在 1 到 60000 之间")
     try:
         if args.scheduler is not None:
             args.scheduler = validate_schedulers([args.scheduler])[0]
@@ -1860,7 +1869,7 @@ def start_server_quiet(
     if scheduler not in SUPPORTED_SCHEDULERS:
         raise ValueError(f"不支持的服务端调度算法：{scheduler}")
     state_dir = posixpath.dirname(remote_pidfile)
-    startup_file = posixpath.join(state_dir, "server_startup.log")
+    startup_file = posixpath.join(state_dir, f"server_startup_{scheduler}_{time.time_ns()}.log")
     port_pattern = f":{int(args.quic_port)}([[:space:]]|$)"
     command = (
         f"cd -- {q(args.server_dir)} || exit 90; "
@@ -1878,12 +1887,14 @@ def start_server_quiet(
         f"--serve-timeout-ms {int(args.serve_timeout_ms)} "
         f"--max-connections {int(max_connections)} "
         f"--scheduler {q(scheduler)} "
-        f"> {q(startup_file)} 2>/dev/null < /dev/null & "
+        + (observe(args, "server_arguments") or "")
+        + f"> {q(startup_file)} 2>&1 < /dev/null & "
         "server_pid=$!; "
         "server_start=$(awk '{print $22}' \"/proc/$server_pid/stat\" 2>/dev/null || true); "
         f"printf '%s %s\\n' \"$server_pid\" \"$server_start\" > {q(remote_pidfile)}; "
         "printf '__MINI_SERVER_PID__=%s\\n' \"$server_pid\""
     )
+    observe(args, "command", "server", command)
     result = server.run(command, timeout_s=20)
     match = SERVER_PID_RE.search(result.output)
     if result.exit_code != 0 or result.timed_out or result.truncated or not match:
@@ -3026,6 +3037,8 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "server_resource_interval_s": args.server_resource_interval_s,
         "server_hwm_scope": "server process lifetime; use RSS samples for per-case comparison",
         "metrics": EXPECTED_B_METRIC,
+        "observer_enabled": not args.disable_observer,
+        "observer_interval_ms": args.observer_interval_ms,
         "measured_cases": sum(c.phase == "measured" for c in plan),
         "warmup_cases": sum(c.phase == "warmup" for c in plan),
         "maximum_attempts": len(plan) * (args.retries + 1),
@@ -3146,6 +3159,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             LOG.info("%s: client_scheduler=%s cc=%s server=%s", case.case_id,
                      case.client_scheduler, case.client_cc, case.server_scheduler)
         return 0
+    args._observer = create_observer(args, session, log_root, board, server)
     records: List[Dict[str, object]] = []
     started_cases = set()
     last_block = None
@@ -3192,6 +3206,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
         if "get" in directions and args.verify_sha256:
             get_expected_sha = get_server_sha256(server, source_path)
 
+        observe(args, "start")
         for case in plan:
             round_index, direction, mode = case.round, case.direction, case.mode
             scheduler, cc = case.scheduler, case.cc
@@ -3214,6 +3229,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             if server_started and current_server_scheduler != case.server_scheduler:
                 if not stop_server(server, server_pid, args.server_executable, remote_pidfile, session):
                     raise RuntimeError("无法确认原服务端已停止，拒绝切换算法或开始传输")
+                observe(args, "archive_server_log", remote_state_dir)
+                observe(args, "collect")
                 server_started = False
                 server_pid = None
                 server_stop_confirmed = True
@@ -3247,6 +3264,10 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     f"api_{session}_{case.phase}_{case.profile}_r{round_index:03d}_{display_mode}_"
                     f"{direction}_i{round_index:03d}_a{attempt:02d}_{time.time_ns()}"
                 )
+                observe(args, "begin", run_tag, {**case_metadata(case, session),
+                    "expected_bytes": get_expected_size if direction == "get" else post_expected_size,
+                    "expected_sha256": get_expected_sha if direction == "get" else post_expected_sha,
+                    "interfaces": MODE_INTERFACES[mode], "verify_sha256": args.verify_sha256})
                 raw_stdout_path = raw_client_dir / f"{run_tag}.stdout.log"
                 raw_stderr_path = raw_client_dir / f"{run_tag}.stderr.log"
                 attempt_token = run_tag
@@ -3479,6 +3500,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     "board_resource": board_resource, "server_resource": server_resource,
                 }
                 append_json_record(log_root / "attempts.jsonl", attempt_record)
+                observe(args, "end", run_tag, success, error)
                 if success:
                     successful_row = {
                         "iter": round_index,
@@ -3596,6 +3618,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 connect_ssh_with_optional_prompt(server, "云端")
         except Exception as exc:
             LOG.warning("最终清理前无法重连云服务器: %s", exc)
+        observe(args, "archive_server_log", remote_state_dir)
+        observe(args, "finish")
         if remote_activity_started:
             cleanup_current_session_remote_artifacts(
                 board,
@@ -3603,7 +3627,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 args,
                 session,
                 remote_state_dir,
-                server_stop_confirmed or not server_started,
+                (server_stop_confirmed or not server_started)
+                and not observe(args, "needs_server_state"),
                 directions,
             )
 

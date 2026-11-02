@@ -2,6 +2,7 @@
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
 
+#include "src/transport/xqc_observer.h"
 #include <xquic/xquic_typedef.h>
 #include "src/http3/xqc_h3_conn.h"
 #include "src/common/xqc_log.h"
@@ -602,6 +603,9 @@ xqc_process_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_in)
         return -XQC_EPROTO;
     }
 
+    xqc_observer_stream_update(stream, stream_frame->data_offset,
+        stream_frame->data_offset + stream_frame->data_length);
+
     if (stream->stream_data_in.stream_determined
         && stream->stream_data_in.stream_length == stream->stream_data_in.merged_offset_end) 
     {
@@ -1183,6 +1187,7 @@ xqc_process_reset_stream_frame(xqc_connection_t *conn, xqc_packet_in_t *packet_i
         }
         conn->conn_flow_ctl.fc_data_recved += (int64_t)final_size - (int64_t)stream->stream_max_recv_offset;
         conn->conn_flow_ctl.fc_data_read += (int64_t)final_size - (int64_t)stream->stream_data_in.next_read_offset;
+        xqc_observer_stream_end(stream, "reset");
         xqc_destroy_frame_list(&stream->stream_data_in.frames_tailq);
         xqc_stream_ready_to_read(stream);
     }

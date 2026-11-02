@@ -7,6 +7,7 @@
 #include "src/congestion_control/xqc_bbr_common.h"
 
 #include <inttypes.h>
+#include "src/transport/xqc_observer.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -71,6 +72,10 @@ typedef struct {
     uint64_t    diag_reinject_base;
     uint64_t    diag_retrans_base;
     unsigned    diag_lost_base;
+    uint64_t    observer_evaluation_us, observer_packet_bytes;
+    int         observer_block_reason, observer_check_cwnd, observer_reinject_excluded;
+    uint64_t    observer_reason_count[9];
+    uint64_t    observer_reason_bytes[9];
     uint64_t    selected_count;
     uint64_t    selected_bytes;
     uint64_t    primary_pick_count;
@@ -147,6 +152,14 @@ typedef struct {
     uint64_t                     secondary_queue_reduce_count;
     double                       min_probe_pct;
     double                       max_probe_pct;
+    int                          observer_enabled;
+    uint64_t                     observer_reason_count[9];
+    uint64_t                     observer_reason_bytes[9];
+    uint64_t                     observer_no_sendable_calls;
+    uint64_t                     observer_reinject_bytes;
+    uint64_t                     observer_real_bytes;
+    uint64_t                     observer_reserved_bytes;
+    uint64_t                     observer_secondary_id;
     xqc_sched_diag_t             sched_diag;
     uint64_t                     both_sendable;
     uint64_t                     primary_only;
@@ -301,6 +314,13 @@ xqc_adaptive_diag_record_pick(xqc_adaptive_scheduler_t *adaptive,
 
     xqc_adaptive_path_state_t *state = selected->state;
     adaptive->pick_count++;
+    if (adaptive->observer_enabled && (unsigned)reason < 9) {
+        adaptive->observer_reason_count[reason]++;
+        state->observer_reason_count[reason]++;
+        state->observer_reason_bytes[reason] += packet_size;
+        adaptive->observer_reason_bytes[reason] += packet_size;
+    }
+    if (adaptive->observer_enabled && reinject) { adaptive->observer_reinject_bytes += packet_size; }
     state->selected_count++;
     state->selected_bytes += packet_size;
 
@@ -558,6 +578,13 @@ xqc_adaptive_collect_candidates(xqc_adaptive_scheduler_t *adaptive,
             packet_out, check_cwnd, &candidate.cwnd_eval);
         xqc_scheduler_diag_record_evaluation(&adaptive->sched_diag, path,
             &candidate.cwnd_eval);
+        if (adaptive->observer_enabled) {
+            state->observer_evaluation_us = now;
+            state->observer_packet_bytes = candidate.cwnd_eval.packet_size;
+            state->observer_block_reason = candidate.cwnd_eval.block_reason;
+            state->observer_check_cwnd = check_cwnd;
+            state->observer_reinject_excluded = reinject && packet_out && packet_out->po_path_id == path->path_id;
+        }
         if (!candidate.can_send) {
             state->blocked_count++;
         } else {
@@ -1025,7 +1052,7 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
         return xqc_adaptive_best_candidate(candidates, count, XQC_TRUE);
     }
     if (secondary == NULL) {
-        if (adaptive->sched_diag.enabled) {
+        if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
             adaptive->probe_denied_no_secondary++;
         }
         if (primary->can_send) {
@@ -1034,7 +1061,7 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
         return primary->can_send ? primary : NULL;
     }
     if (!secondary->can_send) {
-        if (adaptive->sched_diag.enabled) {
+        if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
             adaptive->probe_considered++;
             if (secondary->excluded_by_reinject) {
                 adaptive->probe_denied_secondary_reinject++;
@@ -1052,7 +1079,7 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
         return primary->can_send ? primary : NULL;
     }
 
-    if (adaptive->sched_diag.enabled) {
+    if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
         adaptive->probe_considered++;
     }
 
@@ -1064,7 +1091,7 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
     }
 
     if (primary->can_send) {
-        if (adaptive->sched_diag.enabled) {
+        if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
             if (probe_allowed) {
                 adaptive->probe_selected++;
             } else {
@@ -1077,13 +1104,15 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
     }
 
     /* Do not idle the connection merely to preserve a target byte share. */
-    if (adaptive->sched_diag.enabled) {
+    if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
         if (primary->cwnd_eval.block_reason == XQC_SCHED_BLOCK_REAL_INFLIGHT) {
             adaptive->fallback_real_inflight++;
+            adaptive->observer_real_bytes += packet_size;
         } else if (primary->cwnd_eval.block_reason
                    == XQC_SCHED_BLOCK_SCHEDULED_RESERVATION)
         {
             adaptive->fallback_scheduled_reservation++;
+            adaptive->observer_reserved_bytes += packet_size;
         }
     }
     *pick_reason = primary->excluded_by_reinject
@@ -1097,6 +1126,25 @@ xqc_adaptive_diag_return(xqc_adaptive_scheduler_t *adaptive,
     xqc_connection_t *conn, xqc_packet_out_t *packet_out,
     xqc_path_ctx_t *selected, xqc_bool_t no_sendable, xqc_usec_t now)
 {
+    if (conn->observer) {
+    if (!selected) { adaptive->observer_no_sendable_calls++; }
+    uint64_t secondary = UINT64_MAX;
+    double secondary_score = -1.0;
+    for (unsigned i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
+        if (adaptive->states[i].in_use
+            && adaptive->states[i].path_id != adaptive->primary_path_id) {
+            xqc_path_ctx_t *candidate = xqc_conn_find_path_by_path_id(conn, adaptive->states[i].path_id);
+            if (candidate && candidate->path_state == XQC_PATH_STATE_ACTIVE
+                && adaptive->states[i].score > secondary_score) {
+                secondary = adaptive->states[i].path_id; secondary_score = adaptive->states[i].score;
+            }
+        }
+    }
+    if (!adaptive->primary_valid) { secondary = UINT64_MAX; }
+    adaptive->observer_secondary_id = secondary;
+    xqc_observer_role(conn, adaptive->primary_valid, adaptive->primary_path_id,
+        secondary, adaptive->probe_pct, adaptive->phase);
+    }
     xqc_scheduler_diag_record_decision(&adaptive->sched_diag, selected,
         packet_out ? packet_out->po_used_size : 0, no_sendable);
     xqc_scheduler_diag_maybe_tick(&adaptive->sched_diag, conn, now);
@@ -1127,13 +1175,14 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         return NULL;
     }
 
+    adaptive->observer_enabled = conn->observer != NULL;
     memset(candidates, 0, sizeof(candidates));
     memset(standby, 0, sizeof(standby));
     count = xqc_adaptive_collect_candidates(adaptive, conn, packet_out,
         check_cwnd, reinject, candidates, standby, &original_path,
         &has_active, &has_sendable, now);
 
-    if (adaptive->sched_diag.enabled && count >= 2
+    if ((adaptive->sched_diag.enabled || adaptive->observer_enabled) && count >= 2
         && adaptive->primary_valid)
     {
         xqc_adaptive_candidate_t *primary = xqc_adaptive_find_candidate(
@@ -1163,6 +1212,18 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         if (original_path != NULL && packet_out
             && !(packet_out->po_flag & XQC_POF_REINJECT_DIFF_PATH))
         {
+            if (adaptive->observer_enabled) {
+                adaptive->observer_reason_count[XQC_ADAPTIVE_PICK_ORIGINAL]++;
+                adaptive->observer_reason_bytes[XQC_ADAPTIVE_PICK_ORIGINAL] += packet_size;
+                if (reinject) { adaptive->observer_reinject_bytes += packet_size; }
+                for (unsigned i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
+                    if (adaptive->states[i].in_use && adaptive->states[i].path_id == original_path->path_id) {
+                        adaptive->states[i].observer_reason_count[XQC_ADAPTIVE_PICK_ORIGINAL]++;
+                        adaptive->states[i].observer_reason_bytes[XQC_ADAPTIVE_PICK_ORIGINAL] += packet_size;
+                        break;
+                    }
+                }
+            }
             return xqc_adaptive_diag_return(adaptive, conn, packet_out,
                 original_path, XQC_FALSE, now);
         }
@@ -1346,7 +1407,7 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
     }
     adaptive->diag_emitted = XQC_TRUE;
 
-    if (adaptive->sched_diag.enabled) {
+    if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
         printf("[diag_adaptive_probe] both_sendable=%" PRIu64
                " primary_only=%" PRIu64 " secondary_only=%" PRIu64
                " neither_sendable=%" PRIu64
@@ -1568,3 +1629,72 @@ const xqc_scheduler_callback_t xqc_adaptive_scheduler_cb = {
     .xqc_scheduler_get_path         = xqc_adaptive_scheduler_get_path,
     .xqc_scheduler_conn_close_diag  = xqc_adaptive_scheduler_conn_close_diag,
 };
+
+/* Pure diagnostic export; does not refresh candidates, rates or EMA. */
+int
+xqc_adaptive_observer_json(xqc_connection_t *conn, char *out, size_t cap)
+{
+    if (!conn->scheduler_callback || conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path || !conn->scheduler) { return 0; }
+    const xqc_adaptive_scheduler_t *a = conn->scheduler;
+    const char *names[] = {"none", "warmup", "primary", "probe", "cwnd_fallback",
+        "reinject_fallback", "best_fallback", "single", "original"};
+    char primary[32] = "null", secondary[32] = "null";
+    if (a->primary_valid) { snprintf(primary, sizeof(primary), "%"PRIu64, a->primary_path_id); }
+    if (a->primary_valid && a->observer_secondary_id != UINT64_MAX) {
+        snprintf(secondary, sizeof(secondary), "%"PRIu64, a->observer_secondary_id);
+    }
+    int n = snprintf(out, cap,
+        "\"scheduler_name\":\"adaptive\",\"adaptive_phase\":\"%s\","
+        "\"primary_valid\":%s,\"primary_path_id\":%s,\"secondary_path_id\":%s,"
+        "\"target_secondary_pct\":%.6f,\"role_epoch\":%"PRIu64","
+        "\"both_sendable\":%"PRIu64",\"primary_only\":%"PRIu64","
+        "\"secondary_only\":%"PRIu64",\"neither_sendable\":%"PRIu64","
+        "\"no_sendable_calls\":%"PRIu64",\"fallback_real_inflight_count\":%"PRIu64","
+        "\"fallback_scheduled_reservation_count\":%"PRIu64","
+        "\"fallback_real_inflight_bytes\":%"PRIu64",\"fallback_scheduled_reservation_bytes\":%"PRIu64","
+        "\"reinject_selected_bytes\":%"PRIu64,
+        xqc_adaptive_phase_name(a->phase), a->primary_valid ? "true" : "false", primary, secondary,
+        a->probe_pct, conn->observer ? conn->observer->role_epoch : 0,
+        a->both_sendable, a->primary_only, a->secondary_only, a->neither_sendable,
+        a->observer_no_sendable_calls, a->fallback_real_inflight, a->fallback_scheduled_reservation,
+        a->observer_real_bytes, a->observer_reserved_bytes, a->observer_reinject_bytes);
+    if (n < 0 || (size_t)n >= cap) { return 0; }
+    size_t used = (size_t)n;
+    for (unsigned i = 1; i < 9; ++i) {
+        n = snprintf(out + used, cap - used,
+            ",\"%s_selected_count\":%"PRIu64",\"%s_selected_bytes\":%"PRIu64,
+            names[i], a->observer_reason_count[i], names[i], a->observer_reason_bytes[i]);
+        if (n < 0 || (size_t)n >= cap - used) { return 0; }
+        used += (size_t)n;
+    }
+    return 1;
+}
+
+int
+xqc_adaptive_observer_path_json(xqc_connection_t *conn, uint64_t id, char *out, size_t cap)
+{
+    if (!conn->scheduler_callback || conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path || !conn->scheduler) { return 0; }
+    const xqc_adaptive_scheduler_t *a = conn->scheduler;
+    const xqc_adaptive_path_state_t *state = NULL;
+    for (unsigned i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
+        if (a->states[i].in_use && a->states[i].path_id == id) { state = &a->states[i]; break; }
+    }
+    if (!state) { return 0; }
+    const char *names[] = {"none", "warmup", "primary", "probe", "cwnd_fallback",
+        "reinject_fallback", "best_fallback", "single", "original"};
+    int initial = snprintf(out, cap,
+        ",\"last_evaluation_us\":%"PRIu64",\"evaluated_packet_bytes\":%"PRIu64","
+        "\"evaluation_block_reason\":%d,\"evaluation_check_cwnd\":%d,\"evaluation_reinject_excluded\":%d",
+        state->observer_evaluation_us, state->observer_packet_bytes, state->observer_block_reason,
+        state->observer_check_cwnd, state->observer_reinject_excluded);
+    if (initial < 0 || (size_t)initial >= cap) { return 0; }
+    size_t used = (size_t)initial;
+    for (unsigned i = 1; i < 9; ++i) {
+        int n = snprintf(out + used, cap - used,
+            ",\"path_%s_selected_count\":%"PRIu64",\"path_%s_selected_bytes\":%"PRIu64,
+            names[i], state->observer_reason_count[i], names[i], state->observer_reason_bytes[i]);
+        if (n < 0 || (size_t)n >= cap - used) { return 0; }
+        used += (size_t)n;
+    }
+    return 1;
+}

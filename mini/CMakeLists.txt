@@ -29,6 +29,8 @@ set(MINI_BACKEND_INCLUDE_DIRS
 add_library(mini_common_backend_obj OBJECT
     common.c
     mini_stream_backend.c
+    mini_observer.c
+    ../demo/netins_udp_telemetry_json.c
     mini_stream_protocol.c
     mini_stream_reorder.c
     mini_stream_poc_protocol.c

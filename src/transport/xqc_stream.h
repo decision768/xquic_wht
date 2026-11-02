@@ -8,6 +8,7 @@
 #include <xquic/xquic_typedef.h>
 #include <xquic/xquic.h>
 #include "src/common/xqc_list.h"
+#include <xquic/xqc_observer.h>
 #include "src/transport/xqc_packet.h"
 
 #define XQC_UNDEFINE_STREAM_ID XQC_MAX_UINT64_VALUE
@@ -129,6 +130,7 @@ struct xqc_stream_s {
     xqc_stream_flag_t       stream_flag;
     xqc_encrypt_level_t     stream_encrypt_level;
     xqc_stream_data_in_t    stream_data_in;
+    xqc_observer_stream_t  *observer;
     unsigned                stream_unacked_pkt;
     int64_t                 stream_refcnt;
     xqc_send_stream_state_t stream_state_send;

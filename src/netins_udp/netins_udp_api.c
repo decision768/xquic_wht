@@ -423,6 +423,20 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
     }
 
     switch (option) {
+    case NETINS_UDP_OPT_OBSERVER_V2: {
+        const netins_udp_observer_config_t *observer = value;
+        if (!observer || value_len != sizeof(*observer)
+            || observer->struct_size != sizeof(*observer) || observer->schema_version != 2
+            || !observer->interval_ms || observer->interval_ms > 60000
+            || !memchr(observer->output_prefix, 0, sizeof(observer->output_prefix))
+            || !memchr(observer->attempt_id, 0, sizeof(observer->attempt_id))
+            || (observer->enabled && !observer->output_prefix[0]))
+        {
+            return netins_udp_set_error(handle, EINVAL, "invalid observer v2 configuration");
+        }
+        handle->backend_config.observer = *observer;
+        break;
+    }
     case NETINS_UDP_OPT_INTERFACES: {
         if (handle->role != NETINS_UDP_ROLE_CLIENT) {
             return netins_udp_set_error(handle, EOPNOTSUPP,

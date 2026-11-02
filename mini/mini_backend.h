@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <xquic/netins_udp.h>
 
 #define MINI_BACKEND_MAX_INTERFACES 8
 #define MINI_BACKEND_INTERFACE_NAME_LEN 64
@@ -111,6 +112,7 @@ typedef struct mini_backend_config_s {
     char zlog_config_file[MINI_BACKEND_FILE_PATH_LEN];
     char zlog_category[64];
 
+    netins_udp_observer_config_t observer;
     int stream_mode;
 } mini_backend_config_t;
 

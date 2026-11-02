@@ -2,6 +2,7 @@
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
 
+#include "src/transport/xqc_observer.h"
 #include <xquic/xquic.h>
 #include <errno.h>
 #include "src/http3/xqc_h3_stream.h"
@@ -1643,6 +1644,8 @@ xqc_conn_destroy(xqc_connection_t *xc)
     }
 
     xqc_conn_destroy_ping_notification_list(xc);
+
+    xqc_observer_destroy(xc);
 
     /* remove from engine's conns_hash and destroy cid_set*/
     xqc_conn_destroy_cids(xc);
