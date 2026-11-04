@@ -259,7 +259,19 @@ class RoadtestObserver:
             json.dump(self.manifest, output, ensure_ascii=False, indent=2, allow_nan=False)
             output.flush()
             os.fsync(output.fileno())
-        pending.replace(target)
+        # Windows readers/scanners can briefly deny replacing a closed file.
+        # Retry only that operation, keeping the old manifest intact on failure.
+        for attempt in range(6):
+            try:
+                pending.replace(target)
+                return
+            except PermissionError as exc:
+                if getattr(exc, "winerror", None) not in (5, 32, 33) or attempt == 5:
+                    raise
+                delay = 0.1 * (2 ** attempt)
+                LOG.warning("Windows 拒绝替换观测清单，%.1f秒后重试（%s/5）: %s",
+                            delay, attempt + 1, target)
+                time.sleep(delay)
 
     def error(self, endpoint, reason, **extra):
         LOG.warning("P0观测 %s: %s", endpoint, reason)
@@ -790,7 +802,29 @@ def _summarize_windows(rows, tag, endpoint):
         duration = max(r.get("actual_mono_us", 0) for r in values)-min(r.get("actual_mono_us", 0) for r in values)
         covered = sum(r.get("time_weight_us", 0) for r in values)
         record = dict(conn_uid=conn, path_id=path, mapping_generation=generation,
-                      covered_us=covered, coverage_ratio=covered/duration if duration else None, estimated=True)
+                      covered_us=covered, coverage_ratio=covered/duration if duration else None, estimated=True,
+                      sample_count=len(values), observed_duration_us=duration, coverage_applicable=True)
+        # A path can be observed once before its interface is registered. Keep
+        # the evidence, but do not require a time ratio for that zero-time map
+        # when the next map promptly identifies the same physical path.
+        if (len(values) == 1 and not values[0].get("interface_name") and type(generation) is int
+                and not any(c == conn and p == path and (type(g) is not int or g < generation)
+                            for c, p, g in groups)):
+            initial = values[0]
+            successors = [v for (c, p, g), v in groups.items()
+                          if c == conn and p == path and type(g) is int and g > generation
+                          and min(r.get("actual_mono_us", 0) for r in v) > initial.get("actual_mono_us", 0)]
+            if successors:
+                following = min(successors, key=lambda v: min(r.get("actual_mono_us", 0) for r in v))
+                first = min(following, key=lambda r: r.get("actual_mono_us", 0))
+                gap = first.get("actual_mono_us", 0)-initial.get("actual_mono_us", 0)
+                same_addresses = all(initial.get(k) and initial[k] == first.get(k)
+                                     for k in ("local_address", "peer_address"))
+                if (same_addresses and first.get("interface_name")
+                        and initial.get("observer_valid", True) and initial.get("checksum_valid", True)
+                        and max(r.get("actual_mono_us", 0) for r in following) > first.get("actual_mono_us", 0)
+                        and gap <= 2.5 * (initial.get("interval_us") or first.get("interval_us") or 100000)):
+                    record.update(coverage_applicable=False, coverage_reason="initial_interface_mapping_singleton")
         for field in ("real_utilization", "scheduled_utilization", "total_utilization"):
             record["time_weighted_"+field] = sum(r.get(field, 0)*r.get("time_weight_us", 0)
                 for r in values if r.get(field) is not None)/covered if covered else None
@@ -899,7 +933,8 @@ def _plots(root, tables, manifest):
                 for a, b in zip(values, values[1:]):
                     dt = b["actual_mono_us"]-a["actual_mono_us"]
                     if dt > 0:
-                        xs.append(seconds(b, receiver)); ys.append(8*(b.get("body_received_bytes", 0)-a.get("body_received_bytes", 0))/dt)
+                        xs.append(seconds(b, receiver))
+                        ys.append(8*(b.get("body_received_bytes", 0)-a.get("body_received_bytes", 0))/dt)
                 body_axis.plot(xs, ys, color="green", alpha=0.35)
                 if not xs and values:
                     first, last = values[-1].get("first_body_us"), values[-1].get("last_body_us")
@@ -919,7 +954,8 @@ def _plots(root, tables, manifest):
                 for r in values:
                     if r.get("sample_kind") == "role_change":
                         axis.axvline(seconds(r, sender), color="black", linestyle=":", alpha=0.5)
-                axis.set_ylabel(f"Path {path_id} B"); axis.legend(loc="upper right", ncol=4)
+                axis.set_ylabel(f"Path {path_id} B")
+                axis.legend(loc="upper right", ncol=4)
             values = list({(r.get("conn_uid"), r.get("sample_seq"), r.get("schema_family")): r for r in paths}.values())
             role_values = [r for r in values if r.get("primary_valid")
                            and r.get("secondary_path_id") is not None]
@@ -957,7 +993,8 @@ def _plots(root, tables, manifest):
             quality = "COARSE alignment; no sub-100 ms ordering" if uncertainty > 100000 else "aligned"
             figure.suptitle(f"{tag}\n{quality}; combined clock uncertainty <= {uncertainty/1000:.3f} ms" if synchronized else tag+"\nCross-end timing unavailable")
             figure.tight_layout()
-            target = root / "plots"; target.mkdir(exist_ok=True)
+            target = root / "plots"
+            target.mkdir(exist_ok=True)
             filename = tag if Path(tag).name == tag and tag not in (".", "..") else hashlib.sha256(tag.encode()).hexdigest()
             figure.savefig(target / (filename+".png"), dpi=130)
         finally:
@@ -1434,7 +1471,7 @@ def export(root, artifacts=False):
             reasons.append("receiver_aggregate_coverage_incomplete")
         if final_transport.get("any_stream_hol_us") != summary["any_stream_hol_us"]:
             reasons.append("receiver_hol_union_mismatch")
-        windows = summary["window_statistics"]
+        windows = [v for v in summary["window_statistics"] if v.get("coverage_applicable", True)]
         if not windows or any(v.get("coverage_ratio") is None or v["coverage_ratio"] < 0.99 for v in windows):
             reasons.append("sender_window_coverage_below_99pct")
         failed_business = attempt.get("business_success") is False

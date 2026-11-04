@@ -644,9 +644,8 @@ def board_preflight(
     result = board.run(" && ".join(checks), timeout_s=30)
     if result.exit_code != 0:
         raise RuntimeError(f"板卡预检失败:\n{result.diagnostic_output}")
-    # Check for live clients before touching stale artifacts, then measure space
-    # after cleanup rather than rejecting the run before recovery can execute.
-    cleanup_stale_board_resource_files(board, args)
+    # Pending session journals were recovered before preflight. Current-session
+    # artifacts are removed per attempt and again in the final cleanup.
     result = board.run(
         f"df -Pk {q(args.board_dir)} | "
         "awk 'NR==2 {printf \"__MINI_FREE_BYTES__=%.0f\\n\", $4 * 1024}'", timeout_s=10)
@@ -674,52 +673,6 @@ def board_preflight(
     )
 
 
-
-def cleanup_stale_board_resource_files(board, args) -> None:
-    """Clean abandoned benchmark artifacts from earlier sessions.
-
-    Current-session artifacts are removed immediately after local collection and
-    again in the final session cleanup. This startup pass only handles leftovers
-    from older interrupted runs.
-    """
-    if not isinstance(board, SSHRemote) or args.disable_board_resource_monitor:
-        return
-    days = int(args.board_resource_retention_days)
-    remote_dir = q(args.board_resource_dir)
-    board_dir = q(args.board_dir)
-    command = (
-        f"mkdir -p {remote_dir} && "
-        f"find {remote_dir} -maxdepth 1 -type f "
-        "\\( -name 'api_*_resource.csv' -o "
-        "-name 'api_*_resource_monitor.log' -o "
-        "-name 'mini_*_resource.csv' -o "
-        "-name 'mini_*_resource_monitor.log' \\) "
-        f"-mtime +{days} -delete; "
-        "find /tmp -maxdepth 1 -type f "
-        "\\( -name 'api_*_resource.stop' -o "
-        "-name 'api_*_resource_monitor.log' -o "
-        "-name 'api_*_client.start' -o "
-        "-name 'mini_*_resource.stop' -o "
-        "-name 'mini_*_resource_monitor.log' \\) "
-        f"-mtime +{days} -delete; "
-        f"find {board_dir} -maxdepth 1 -type f "
-        "\\( -name 'get-rmnet-*.bin' -o -name 'get-usb-*.bin' "
-        "-o -name 'get-agg-*.bin' \\) "
-        f"-mtime +{days} -delete"
-    )
-    result = board.run(command, timeout_s=30)
-    if result.exit_code != 0 or result.timed_out:
-        LOG.warning(
-            "清理主板历史资源文件未确认: exit=%s output=%s",
-            result.exit_code,
-            result.diagnostic_output.strip(),
-        )
-    else:
-        LOG.info(
-            "主板历史压测文件启动清理完成: retention_days=%s dir=%s",
-            days,
-            args.board_resource_dir,
-        )
 
 def get_server_sha256(server: SSHRemote, source_path: str) -> str:
     result = server.run(
@@ -1708,6 +1661,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--board-resource-retention-days",
         type=int,
         default=DEFAULT_BOARD_RESOURCE_RETENTION_DAYS,
+        help="兼容旧参数；临时产物在测试结束时删除，不再按天数清理",
     )
 
     parser.add_argument(
@@ -1727,6 +1681,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--server-resource-retention-days",
         type=int,
         default=DEFAULT_SERVER_RESOURCE_RETENTION_DAYS,
+        help="兼容旧参数；临时产物在测试结束时删除，不再按天数清理",
     )
 
     parser.add_argument(
@@ -1986,34 +1941,6 @@ def validate_server_resource_monitor(server: SSHRemote, args) -> None:
         args.server_resource_monitor,
         args.server_resource_interval_s,
     )
-
-
-def cleanup_stale_server_resource_files(server: SSHRemote, args) -> None:
-    days = int(args.server_resource_retention_days)
-    command = (
-        "set -e; "
-        f"mkdir -p {q(args.server_resource_dir)}; "
-        f"find {q(args.server_resource_dir)} -maxdepth 1 -type f "
-        "-name 'api_*_server_memory.csv' "
-        f"-mtime +{days} -delete; "
-        "find /tmp -maxdepth 1 -type f "
-        "\\( -name 'api_*_server_memory.stop' -o "
-        "-name 'api_*_server_memory.status' \\) "
-        f"-mtime +{days} -delete"
-    )
-    result = server.run(command, timeout_s=30)
-    if result.exit_code != 0 or result.timed_out:
-        LOG.warning(
-            "云服务器历史资源文件清理未确认: exit=%s output=%s",
-            result.exit_code,
-            result.diagnostic_output.strip(),
-        )
-    else:
-        LOG.info(
-            "云服务器历史资源文件启动清理完成: retention_days=%s dir=%s",
-            days,
-            args.server_resource_dir,
-        )
 
 
 def start_server_resource_monitor(
@@ -2505,9 +2432,11 @@ def cleanup_current_session_remote_artifacts(
             "set -e; "
             f"find /tmp -maxdepth 1 -type f {control_patterns} -delete; "
             f"find {q(args.board_dir)} -maxdepth 1 -type f {board_output_patterns} -delete; "
-            f"test -z \"$(find /tmp -maxdepth 1 -type f {control_patterns} -print -quit)\" && "
-            f"test -z \"$(find {q(args.board_dir)} -maxdepth 1 -type f "
-            f"{board_output_patterns} -print -quit)\""
+            f"remaining=$(find /tmp -maxdepth 1 -type f {control_patterns} -print); "
+            'test -z "$remaining"; '
+            f"remaining=$(find {q(args.board_dir)} -maxdepth 1 -type f "
+            f"{board_output_patterns} -print); "
+            'test -z "$remaining"'
         )
         try:
             result = board.run(board_command, timeout_s=30)
@@ -2545,7 +2474,8 @@ def cleanup_current_session_remote_artifacts(
             "set -e; "
             f"find /tmp -maxdepth 1 -type f {control_patterns} -delete; "
             + post_cleanup
-            + f"test -z \"$(find /tmp -maxdepth 1 -type f {control_patterns} -print -quit)\" && "
+            + f"remaining=$(find /tmp -maxdepth 1 -type f {control_patterns} -print); "
+            + 'test -z "$remaining"; '
             + post_verify + " && " + state_cleanup
         )
         try:
@@ -3231,7 +3161,6 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             "post" in directions,
         )
         validate_server_resource_monitor(server, args)
-        cleanup_stale_server_resource_files(server, args)
         if "post" in directions:
             validate_server_post_targets(server, args)
             post_expected_size, post_expected_sha = get_board_post_source_info(

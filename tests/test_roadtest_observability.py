@@ -1,10 +1,18 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from roadtest_observability import RoadtestObserver, _union, export, observe
-from roadtest_observability import _secondary_shares, _summarize_windows, _window_statistics
+# Load the deployed module explicitly; tests/ also contains a historical copy.
+_directory = Path(__file__).resolve().parents[1] / "test_wht"
+_spec = importlib.util.spec_from_file_location("current_observer_tests", _directory / "roadtest_observability.py")
+_observer = importlib.util.module_from_spec(_spec)
+sys.modules[_spec.name] = _observer
+_spec.loader.exec_module(_observer)
+RoadtestObserver, export, observe = _observer.RoadtestObserver, _observer.export, _observer.observe
+_union, _secondary_shares = _observer._union, _observer._secondary_shares
+_summarize_windows, _window_statistics = _observer._summarize_windows, _observer._window_statistics
 
 
 def package(tmp_path, records, attempts=None):
@@ -80,14 +88,10 @@ def test_observer_failure_never_changes_verdict():
     assert observe(SimpleNamespace(_observer=Broken()), "begin") is None
 
 
-def test_both_entrypoints_keep_original_test_plan():
+def test_active_entrypoint_keeps_original_test_plan():
     root = Path(__file__).resolve().parents[1]
-    contents = [(root / name).read_text(encoding="utf-8") for name in (
-        "test_wht/副本改进版.py", "tests/副本改进版.py")]
-    assert contents[0] == contents[1]
-    spec = importlib.util.spec_from_file_location("roadtest_entry", root / "tests/副本改进版.py")
+    spec = importlib.util.spec_from_file_location("roadtest_entry", root / "test_wht/压测（路测+裘博指标）.py")
     module = importlib.util.module_from_spec(spec)
-    import sys
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     args = module.parse_gx_args([])
@@ -112,7 +116,7 @@ def test_disabled_collection_has_no_ssh_calls(tmp_path):
 
 def test_time_weighting_excludes_long_gaps():
     rows = [dict(attempt_id="a", endpoint="server", conn_uid="c", path_id=0,
-                 mapping_generation=0, actual_mono_us=t, interval_us=100000,
+                 mapping_generation=0, path_state=2, actual_mono_us=t, interval_us=100000,
                  real_utilization=value, scheduled_utilization=0, total_utilization=value)
             for t, value in [(0, .5), (100000, 1.5), (200000, 1), (2000000, 0)]]
     _window_statistics({"path_windows": rows}, {})
