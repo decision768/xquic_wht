@@ -4,16 +4,32 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#define XQC_OBSERVER_MAX_INTERVALS 256U
+#define XQC_OBSERVER_MAX_INTERVALS 8192U
+enum {
+    XQC_OBSERVER_STATE_OK, XQC_OBSERVER_INTERVAL_LIMIT,
+    XQC_OBSERVER_ALLOCATION_FAILED, XQC_OBSERVER_CLOCK_BACKWARDS,
+    XQC_OBSERVER_ARITHMETIC_OVERFLOW
+};
 typedef struct { uint64_t begin, end; } xqc_observer_interval_t;
 typedef struct {
     uint64_t c, n, b, a, last_us, pending_us, exposed_us, byte_us;
     uint64_t peak, interval_peak, episodes, episode_start, episode_peak;
     uint64_t completed_episodes, censored_episodes;
     xqc_observer_interval_t *ranges;
-    unsigned count, capacity;
-    int initialized, invalid, ended;
+    unsigned count, capacity, peak_count, required_count;
+    int initialized, invalid, ended, error;
 } xqc_observer_state_t;
+static inline const char *
+xqc_observer_state_error(const xqc_observer_state_t *s)
+{
+    switch (s->error) {
+    case XQC_OBSERVER_INTERVAL_LIMIT: return "interval_capacity_exceeded";
+    case XQC_OBSERVER_ALLOCATION_FAILED: return "interval_allocation_failed";
+    case XQC_OBSERVER_CLOCK_BACKWARDS: return "observer_clock_backwards";
+    case XQC_OBSERVER_ARITHMETIC_OVERFLOW: return "observer_arithmetic_overflow";
+    default: return s->invalid ? "observer_state_invalid" : "none";
+    }
+}
 static inline uint64_t
 xqc_observer_add(uint64_t a, uint64_t b, int *invalid)
 {
@@ -24,7 +40,10 @@ static inline void
 xqc_observer_settle(xqc_observer_state_t *s, uint64_t now)
 {
     if (!s->initialized) { s->initialized = 1; s->last_us = now; }
-    if (now < s->last_us) { s->invalid = 1; return; }
+    if (now < s->last_us) {
+        if (!s->invalid) { s->error = XQC_OBSERVER_CLOCK_BACKWARDS; }
+        s->invalid = 1; return;
+    }
     if (s->ended) { return; }
     uint64_t dt = now - s->last_us;
     if (s->b) {
@@ -35,6 +54,7 @@ xqc_observer_settle(xqc_observer_state_t *s, uint64_t now)
         if (dt && s->b > UINT64_MAX / dt) { s->invalid = 1; s->byte_us = UINT64_MAX; }
         else { s->byte_us = xqc_observer_add(s->byte_us, s->b * dt, &s->invalid); }
     }
+    if (s->invalid && !s->error) { s->error = XQC_OBSERVER_ARITHMETIC_OVERFLOW; }
     s->last_us = now;
 }
 /* Returns 1 for episode start, -1 for release, 0 otherwise. Old episode
@@ -68,24 +88,29 @@ xqc_observer_update(xqc_observer_state_t *s, uint64_t begin, uint64_t end,
             ++last;
         }
         unsigned required = s->count - (last - first) + 1;
+        s->required_count = required;
         if (required > s->capacity) {
             unsigned cap = s->capacity ? s->capacity * 2 : 8;
             if (cap > XQC_OBSERVER_MAX_INTERVALS) { cap = XQC_OBSERVER_MAX_INTERVALS; }
-            if (required > cap) { s->invalid = 1; return 0; }
+            if (required > cap) {
+                s->invalid = 1; s->error = XQC_OBSERVER_INTERVAL_LIMIT; return 0;
+            }
             void *p = realloc(s->ranges, cap * sizeof(*s->ranges));
-            if (!p) { s->invalid = 1; return 0; }
+            if (!p) { s->invalid = 1; s->error = XQC_OBSERVER_ALLOCATION_FAILED; return 0; }
             s->ranges = p; s->capacity = cap;
         }
         memmove(s->ranges + first + 1, s->ranges + last,
             (s->count - last) * sizeof(*s->ranges));
         s->ranges[first].begin = begin; s->ranges[first].end = end;
         s->count = required;
+        if (s->count > s->peak_count) { s->peak_count = s->count; }
     }
     s->b = 0;
     for (unsigned i = 0; i < s->count; ++i) {
         s->b = xqc_observer_add(s->b,
             s->ranges[i].end - s->ranges[i].begin, &s->invalid);
     }
+    if (s->invalid && !s->error) { s->error = XQC_OBSERVER_ARITHMETIC_OVERFLOW; }
     if (s->b > s->peak) { s->peak = s->b; }
     if (s->b > s->interval_peak) { s->interval_peak = s->b; }
     if (!old_b && s->b) {

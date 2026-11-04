@@ -6,7 +6,7 @@
 struct xqc_observer_stream_s {
     xqc_observer_state_t state;
     uint64_t id, request_index, file_offset, fragment_length, body_bytes;
-    uint64_t bind_us, first_body_us, last_body_us;
+    uint64_t bind_us, first_body_us, last_body_us, observed_from_us;
     uint64_t counted_b, interval_start_us;
     const char *end_reason;
     int invalid_reported, counted, bound, direction;
@@ -19,7 +19,8 @@ struct xqc_observer_s {
     uint64_t seq, event_seq, dropped, role_epoch, primary_id, secondary_id, overflow_count;
     uint64_t write_cost_us, write_samples, write_bytes, queue_bytes, queue_depth;
     uint64_t aggregate_last_us, aggregate_from_us, sum_b, sum_b_peak, sum_b_byte_us, any_hol_us;
-    uint64_t attached_us, first_request_id;
+    uint64_t attached_us, first_request_id, existing_stream_max;
+    int has_existing_streams;
     unsigned pending_streams, unbound_observed;
     struct {
         uint64_t id, generation;

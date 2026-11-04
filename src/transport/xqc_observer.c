@@ -6,10 +6,12 @@
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_engine.h"
 #include "src/common/xqc_time.h"
+#include <xquic/xqc_observer_clock.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <netdb.h>
+#include <string.h>
 #include "src/common/xqc_id_hash.h"
 #include "src/transport/scheduler/xqc_scheduler_minrtt.h"
 
@@ -23,6 +25,14 @@ static xqc_stream_t *
 observer_stream(xqc_connection_t *conn, uint64_t id)
 {
     return conn ? xqc_id_hash_find(conn->streams_hash, id) : NULL;
+}
+
+static uint64_t
+observer_now(xqc_observer_t *o)
+{
+    uint64_t now = xqc_observer_clock_us();
+    if (!now && o) { o->invalid = 1; }
+    return now;
 }
 
 /* All strings inserted into JSON below are fixed vocabulary or validated
@@ -44,15 +54,17 @@ observer_emit(xqc_connection_t *conn, int event, const char *kind, const char *b
     xqc_observer_t *o = conn->observer;
     if (!o || !o->sink) { return; }
     char *record = o->record;
+    uint64_t now = observer_now(o), realtime = xqc_observer_realtime_us();
+    if (!realtime) { o->invalid = 1; }
     uint64_t seq = event ? ++o->event_seq : ++o->seq;
     int n = snprintf(record, sizeof(o->record),
-        "{\"schema_version\":%d,\"schema_family\":\"%s\",\"sample_kind\":\"%s\","
+        "{\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"schema_version\":%d,\"schema_family\":\"%s\",\"sample_kind\":\"%s\","
         "\"sample_seq\":%"PRIu64",\"actual_mono_us\":%"PRIu64",\"realtime_us\":%"PRIu64","
         "\"conn_uid\":\"%s\",\"attempt_id\":\"%s\",\"transfer_id\":\"%s\","
         "\"endpoint\":\"%s\",\"direction\":\"%s\",\"phase\":\"task\","
         "\"observer_enabled\":true,\"observer_valid\":%s,\"dropped_records\":%"PRIu64",\"overflow_count\":%"PRIu64",%s}",
         event ? 1 : 2, event ? "observer_events" : "transport", kind, seq,
-        (uint64_t)xqc_monotonic_timestamp(), (uint64_t)xqc_realtime_timestamp(),
+        now, realtime,
         o->uid, o->attempt, o->attempt, o->endpoint, o->direction,
         o->invalid || o->dropped ? "false" : "true", o->dropped, o->overflow_count, body);
     if (n < 0 || (size_t)n >= sizeof(o->record) || o->sink(o->sink_data, event, record)) {
@@ -83,7 +95,15 @@ xqc_observer_attach(xqc_engine_t *engine, const xqc_cid_t *cid,
     snprintf(o->endpoint, sizeof(o->endpoint), "%s", endpoint);
     snprintf(o->attempt, sizeof(o->attempt), "%s", attempt ? attempt : "");
     o->sink = sink; o->sink_data = data;
-    o->attached_us = xqc_monotonic_timestamp();
+    o->attached_us = observer_now(o);
+    xqc_list_head_t *existing;
+    xqc_list_for_each(existing, &conn->conn_all_streams) {
+        xqc_stream_t *v = xqc_list_entry(existing, xqc_stream_t, all_stream_list);
+        if (v->stream_type == XQC_CLI_BID) {
+            if (!o->has_existing_streams || v->stream_id > o->existing_stream_max) { o->existing_stream_max = v->stream_id; }
+            o->has_existing_streams = 1;
+        }
+    }
     o->primary_id = o->secondary_id = o->first_request_id = UINT64_MAX;
     conn->observer = o;
     return 0;
@@ -124,11 +144,13 @@ observer_aggregate(xqc_connection_t *conn, xqc_observer_stream_t *v, uint64_t no
 static void
 observer_stream_record(xqc_stream_t *stream, const char *kind)
 {
+    xqc_connection_t *conn = stream->stream_conn;
     xqc_observer_stream_t *v = stream->observer;
     if (!v || !stream->stream_conn->observer) { return; }
     xqc_observer_state_t *s = &v->state;
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = observer_now(conn->observer);
     xqc_observer_settle(s, now);
+    if (s->invalid) { conn->observer->invalid = 1; }
     char body[2304];
     snprintf(body, sizeof(body),
         "\"stream_id\":%"PRIu64",\"bound\":%s,\"stream_valid\":%s,"
@@ -143,6 +165,8 @@ observer_stream_record(xqc_stream_t *stream, const char *kind)
         "\"stream_send_limit_bytes\":%"PRIu64",\"stream_send_offset_bytes\":%"PRIu64","
         "\"observed_from_us\":%"PRIu64",\"interval_start_us\":%"PRIu64",\"interval_end_us\":%"PRIu64","
         "\"transport_sample_seq\":%"PRIu64","
+        "\"interval_count\":%u,\"interval_capacity\":%u,\"interval_peak_count\":%u,"
+        "\"interval_limit\":%u,\"interval_error\":\"%s\","
         "\"hol_bytes_basis\":\"target_request_STREAM_bytes_including_H3_framing\"",
         v->id, v->bound ? "true" : "false", s->invalid ? "false" : "true",
         v->end_reason ? v->end_reason : "", s->ended && s->b ? "true" : "false",
@@ -152,9 +176,10 @@ observer_stream_record(xqc_stream_t *stream, const char *kind)
         v->request_index, v->file_offset, v->fragment_length,
         v->body_bytes, v->first_body_us, v->last_body_us,
         stream->stream_flow_ctl.fc_max_stream_data_can_send, stream->stream_send_offset,
-        (uint64_t)stream->stream_stats.create_time > stream->stream_conn->observer->attached_us
-            ? (uint64_t)stream->stream_stats.create_time : stream->stream_conn->observer->attached_us,
-        v->interval_start_us, now, stream->stream_conn->observer->seq);
+        v->observed_from_us,
+        v->interval_start_us, now, stream->stream_conn->observer->seq,
+        s->count, s->capacity, s->peak_count, XQC_OBSERVER_MAX_INTERVALS,
+        xqc_observer_state_error(s));
     xqc_observer_event(stream->stream_conn, kind, body);
     s->interval_peak = s->b;
     v->interval_start_us = now;
@@ -172,15 +197,16 @@ xqc_observer_stream_update(xqc_stream_t *stream, uint64_t begin, uint64_t end)
         stream->observer = calloc(1, sizeof(*stream->observer));
         if (!stream->observer) { conn->observer->invalid = 1; return; }
         stream->observer->id = stream->stream_id;
-        if ((uint64_t)stream->stream_stats.create_time < conn->observer->attached_us) {
+        stream->observer->observed_from_us = observer_now(conn->observer);
+        if (conn->observer->has_existing_streams && stream->stream_id <= conn->observer->existing_stream_max) {
             conn->observer->aggregate_prebind_unobserved = 1;
         }
         conn->observer->stream_count++;
         conn->observer->unbound_observed++;
-        stream->observer->interval_start_us = xqc_monotonic_timestamp();
+        stream->observer->interval_start_us = observer_now(conn->observer);
     }
     xqc_observer_state_t *s = &stream->observer->state;
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = observer_now(conn->observer);
     int transition = xqc_observer_update(s, begin, end,
         stream->stream_data_in.merged_offset_end,
         stream->stream_data_in.next_read_offset, now);
@@ -189,7 +215,14 @@ xqc_observer_stream_update(xqc_stream_t *stream, uint64_t begin, uint64_t end)
         stream->observer->invalid_reported = 1;
         conn->observer->overflow_count++;
         conn->observer->invalid = 1;
-        xqc_observer_event(conn, "observer_error", "\"reason\":\"interval_or_counter_overflow\"");
+        char detail[512];
+        snprintf(detail, sizeof(detail),
+            "\"reason\":\"%s\",\"stream_id\":%"PRIu64",\"interval_count\":%u,"
+            "\"interval_capacity\":%u,\"interval_required\":%u,\"interval_peak_count\":%u,"
+            "\"interval_limit\":%u,\"C\":%"PRIu64",\"N\":%"PRIu64,
+            xqc_observer_state_error(s), stream->stream_id, s->count, s->capacity,
+            s->required_count, s->peak_count, XQC_OBSERVER_MAX_INTERVALS, s->c, s->n);
+        xqc_observer_event(conn, "observer_error", detail);
     }
     if (transition) {
         char body[512];
@@ -205,9 +238,10 @@ xqc_observer_stream_update(xqc_stream_t *stream, uint64_t begin, uint64_t end)
 void
 xqc_observer_stream_end(xqc_stream_t *stream, const char *reason)
 {
+    xqc_connection_t *conn = stream->stream_conn;
     if (!stream->observer || stream->observer->state.ended) { return; }
     xqc_observer_state_t *s = &stream->observer->state;
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = observer_now(conn->observer);
     xqc_observer_settle(s, now);
     if (s->b) {
         char body[512];
@@ -240,6 +274,45 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
         return;
     }
     int task_start = !*o->direction || strcmp(o->attempt, attempt);
+    xqc_stream_t *stream = observer_stream(conn, id);
+    if (!stream) {
+        o->invalid = 1;
+        xqc_observer_event(conn, "observer_error", "\"reason\":\"binding_stream_not_found\"");
+        return;
+    }
+    xqc_observer_stream_t *v = stream->observer;
+    const char *conflict = NULL;
+    if (!task_start && strcmp(o->direction, direction == 1 ? "get" : "post")) {
+        conflict = "direction";
+    }
+    if (v && v->bound) {
+        if (task_start) { conflict = "attempt_id"; }
+        else if (v->direction != direction) { conflict = "direction"; }
+        else if (v->request_index != index) { conflict = "request_index"; }
+        else if (v->file_offset != offset) { conflict = "file_offset"; }
+        else if (v->fragment_length != length
+            && !(direction == 1 && index == 0 && offset == 0
+                 && v->fragment_length == 0 && length > 0 && !v->state.ended
+                 && !v->body_bytes && !v->first_body_us && !v->last_body_us)) {
+            conflict = "fragment_length";
+        }
+    }
+    if (conflict) {
+        char detail[1024];
+        snprintf(detail, sizeof(detail),
+            "\"reason\":\"stream_binding_conflict_%s\",\"stream_id\":%"PRIu64","
+            "\"requested_attempt_id\":\"%s\",\"requested_direction\":%d,"
+            "\"requested_index\":%"PRIu64",\"requested_offset\":%"PRIu64","
+            "\"requested_length\":%"PRIu64",\"previous_direction\":%d,"
+            "\"previous_index\":%"PRIu64",\"previous_offset\":%"PRIu64","
+            "\"previous_length\":%"PRIu64,
+            conflict, id, attempt, direction, index, offset, length,
+            v ? v->direction : 0, v ? v->request_index : 0,
+            v ? v->file_offset : 0, v ? v->fragment_length : 0);
+        o->invalid = 1;
+        xqc_observer_event(conn, "observer_error", detail);
+        return;
+    }
     if (task_start && *o->direction) {
         xqc_list_head_t *pos;
         xqc_list_for_each(pos, &conn->conn_all_streams) {
@@ -257,28 +330,26 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
         }
         o->aggregate_prebind_unobserved = 1;
         o->any_hol_us = o->sum_b_peak = o->sum_b_byte_us = 0;
-        o->aggregate_last_us = o->aggregate_from_us = xqc_monotonic_timestamp();
+        o->aggregate_last_us = o->aggregate_from_us = observer_now(conn->observer);
         o->write_cost_us = o->write_samples = o->write_bytes = 0;
     }
-    if (task_start) { o->first_request_id = UINT64_MAX; }
-    if (index == 0 && o->first_request_id != UINT64_MAX && o->first_request_id != id) {
+    if (!task_start && index == 0 && o->first_request_id != UINT64_MAX && o->first_request_id != id) {
         o->invalid = 1;
         xqc_observer_event(conn, "observer_error", "\"reason\":\"attempt_reused_for_multiple_transfers\"");
         return;
     }
+    if (task_start) { o->first_request_id = UINT64_MAX; }
     if (index == 0) { o->first_request_id = id; }
     snprintf(o->attempt, sizeof(o->attempt), "%s", attempt);
     snprintf(o->direction, sizeof(o->direction), "%s", direction == 1 ? "get" : "post");
-    xqc_stream_t *stream = observer_stream(conn, id);
-    if (!stream) { o->invalid = 1; return; }
     xqc_observer_stream_update(stream, 0, 0);
-    xqc_observer_stream_t *v = stream->observer;
+    v = stream->observer;
     if (!v) { return; }
     if (v->bound && v->fragment_length == length && v->file_offset == offset) { return; }
     if (!v->bound && o->unbound_observed) { o->unbound_observed--; }
     v->bound = 1; v->direction = direction; v->request_index = index;
     v->file_offset = offset; v->fragment_length = length;
-    v->bind_us = xqc_monotonic_timestamp();
+    v->bind_us = observer_now(conn->observer);
     observer_aggregate(conn, v, v->bind_us);
     char body[640], concurrent[32] = "null";
     if (concurrency) { snprintf(concurrent, sizeof(concurrent), "%"PRIu64, concurrency); }
@@ -287,7 +358,7 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
         "\"fragment_length\":%"PRIu64",\"actual_concurrency\":%s,\"range_bytes\":%"PRIu64","
         "\"bind_time_us\":%"PRIu64",\"payload_kind\":\"file\",\"prebind_unobserved\":%s",
         id, index, offset, length, concurrent, range_bytes, v->bind_us,
-        (uint64_t)stream->stream_stats.create_time < o->attached_us ? "true" : "false");
+        o->has_existing_streams && id <= o->existing_stream_max ? "true" : "false");
     xqc_observer_event(conn, "stream_bind", body);
     if (task_start) { xqc_observer_sample(engine, cid, "start", v->bind_us, 0, 0); }
 }
@@ -295,10 +366,11 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
 void
 xqc_observer_body(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id, uint64_t bytes)
 {
-    xqc_stream_t *stream = observer_stream(observer_conn(engine, cid), id);
+    xqc_connection_t *conn = observer_conn(engine, cid);
+    xqc_stream_t *stream = observer_stream(conn, id);
     if (!stream || !stream->observer || !stream->observer->bound || !bytes) { return; }
     xqc_observer_stream_t *v = stream->observer;
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = observer_now(conn->observer);
     if (!v->first_body_us) { v->first_body_us = now; }
     v->last_body_us = now;
     v->body_bytes = xqc_observer_add(v->body_bytes, bytes, &v->state.invalid);
@@ -308,10 +380,17 @@ static void
 observer_addr(const unsigned char *address, socklen_t len, char *out, size_t cap)
 {
     char host[NI_MAXHOST], service[NI_MAXSERV];
+    if (!cap) { return; }
     out[0] = 0;
     if (len && !getnameinfo((const struct sockaddr *)address, len, host, sizeof(host),
         service, sizeof(service), NI_NUMERICHOST | NI_NUMERICSERV)) {
-        snprintf(out, cap, "[%s]:%s", host, service);
+        size_t host_len = strlen(host), service_len = strlen(service);
+        if (host_len + service_len + 4 > cap) { return; }
+        out[0] = '[';
+        memcpy(out + 1, host, host_len);
+        out[host_len + 1] = ']';
+        out[host_len + 2] = ':';
+        memcpy(out + host_len + 3, service, service_len + 1);
     }
 }
 
@@ -444,7 +523,7 @@ xqc_observer_sample(xqc_engine_t *engine, const xqc_cid_t *cid, const char *kind
                 "\"adaptive_phase\":\"not_applicable\",\"role_epoch\":null");
         }
     }
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = observer_now(conn->observer);
     snprintf(body, sizeof(conn->observer->body_record),
         "\"scheduled_mono_us\":%"PRIu64",\"interval_us\":%"PRIu64",\"lateness_us\":%"PRIu64","
         "\"missed_intervals\":%"PRIu64",\"connection_send_limit_bytes\":%"PRIu64","
@@ -473,7 +552,7 @@ xqc_observer_sample(xqc_engine_t *engine, const xqc_cid_t *cid, const char *kind
     xqc_list_head_t *pos;
     xqc_list_for_each(pos, &conn->conn_all_streams) {
         xqc_stream_t *stream = xqc_list_entry(pos, xqc_stream_t, all_stream_list);
-        observer_stream_record(stream, "stream_snapshot");
+        if (stream->observer && !stream->observer->state.ended) { observer_stream_record(stream, "stream_snapshot"); }
     }
 }
 
@@ -515,6 +594,7 @@ xqc_observer_phase(xqc_engine_t *engine, const xqc_cid_t *cid, const char *phase
     xqc_connection_t *conn = observer_conn(engine, cid);
     if (!conn || !conn->observer) { return; }
     xqc_observer_t *o = conn->observer;
+    if (cost == UINT64_MAX) { o->invalid = 1; cost = 0; }
     if (!strcmp(phase, "task_end")) {
         xqc_list_head_t *pos;
         xqc_list_for_each(pos, &conn->conn_all_streams) {
@@ -554,4 +634,19 @@ void
 xqc_observer_detach(xqc_engine_t *engine, const xqc_cid_t *cid)
 {
     xqc_observer_destroy(observer_conn(engine, cid));
+}
+
+int
+xqc_observer_checkpoint_metadata(xqc_engine_t *engine, const xqc_cid_t *cid,
+    char *out, size_t capacity)
+{
+    xqc_connection_t *conn = observer_conn(engine, cid);
+    if (!conn || !conn->observer || !out || !capacity) { return -1; }
+    xqc_observer_t *o = conn->observer;
+    int n = snprintf(out, capacity,
+        "\"attempt_id\":\"%s\",\"conn_uid\":\"%s\",\"endpoint\":\"%s\","
+        "\"transport_seq\":%"PRIu64",\"event_seq\":%"PRIu64",\"observer_valid\":%s,\"task_complete\":true",
+        o->attempt, o->uid, o->endpoint, o->seq, o->event_seq,
+        o->invalid || o->dropped ? "false" : "true");
+    return n < 0 || (size_t)n >= capacity ? -1 : 0;
 }

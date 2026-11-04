@@ -1,3 +1,4 @@
+#include <xquic/xqc_observer_clock.h>
 /**
  * @file mini_server_cb.c contains callbacks definitions for mini_server, including:
  * 1. engine callbacks
@@ -220,7 +221,7 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     (void)h3_conn;
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)user_data;
-    if (user_conn == NULL) {
+    if (user_conn == NULL || user_conn->ctx == NULL || user_conn->ctx->args == NULL) {
         return;
     }
 
@@ -240,7 +241,7 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
         return;
     }
 
-    if (!user_conn->auto_start_requests) {
+    if (!user_conn->auto_start_requests || user_conn->ctx == NULL || user_conn->ctx->args == NULL) {
         return;
     }
 
@@ -425,12 +426,13 @@ xqc_mini_cli_finish_download_stream(
         xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
             user_conn->transfer_error_code ? "get_writer_failed" : "get_writer_drained",
             user_conn->download_total_bytes, 0, 0);
+        uint64_t observer_fsync_start = xqc_observer_clock_us();
         xqc_usec_t fsync_start_us = xqc_now();
         int fsync_ret = fsync(user_conn->download_fd);
         xqc_usec_t fsync_end_us = xqc_now();
         xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
             fsync_ret ? "get_fsync_failed" : "get_fsync_complete",
-            user_conn->download_total_bytes, 0, fsync_end_us - fsync_start_us);
+            user_conn->download_total_bytes, 0, xqc_observer_elapsed_us(observer_fsync_start, xqc_observer_clock_us()));
         xqc_mini_cli_diag_record_fsync(user_conn,
             fsync_end_us >= fsync_start_us
             ? fsync_end_us - fsync_start_us : 0);
@@ -578,13 +580,6 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
         }
         user_stream->expected_content_length = parsed_content_length;
 
-        xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
-            xqc_h3_stream_id(h3_request), user_conn->ctx->args->observer_config.attempt_id,
-            user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET ? 1 : 2,
-            user_stream->stream_index, user_stream->recv_offset, parsed_content_length,
-            user_conn->max_concurrent_requests,
-            user_conn->ctx->args->net_cfg.stream_range_size > 0
-                ? user_conn->ctx->args->net_cfg.stream_range_size : 4 * 1024 * 1024);
         user_stream->response_status = status_code;
         if (status_code < 200 || status_code >= 300) {
             xqc_mini_cli_set_transfer_error(user_conn,
@@ -636,6 +631,13 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
                 return XQC_ERROR;
             }
+
+            /* POST response length describes its acknowledgement, not the file.
+             * Resolve GET metadata only after all response range checks pass. */
+            xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
+                xqc_h3_stream_id(h3_request), user_conn->ctx->args->observer_config.attempt_id,
+                1, user_stream->stream_index, user_stream->recv_offset, parsed_content_length,
+                user_conn->max_concurrent_requests, stream_range_size);
 
             if (!user_conn->total_requests_known) {
                 user_conn->download_expected_bytes = parsed_total_length;

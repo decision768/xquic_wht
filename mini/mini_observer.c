@@ -1,6 +1,6 @@
 #include "mini_observer.h"
 #include "../demo/netins_udp_telemetry_json.h"
-#include "src/common/xqc_time.h"
+#include <xquic/xqc_observer_clock.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,17 +16,25 @@ struct mini_observer_s {
     void *extra_data;
 };
 
+static uint64_t
+mini_observer_now(mini_observer_t *o)
+{
+    uint64_t now = xqc_observer_clock_us();
+    if (!now) { xqc_observer_phase(o->engine, &o->cid, "observer_clock_failed", 0, 0, UINT64_MAX); }
+    return now;
+}
+
 static void
 mini_observer_tick(evutil_socket_t fd, short events, void *arg)
 {
     (void)fd; (void)events;
     mini_observer_t *o = arg;
-    uint64_t now = xqc_monotonic_timestamp();
+    uint64_t now = mini_observer_now(o);
     uint64_t missed = now > o->due_us ? (now - o->due_us) / o->interval_us : 0;
     if (o->extra) { o->extra(o->extra_data); }
     xqc_observer_sample(o->engine, &o->cid, "periodic", o->due_us, o->interval_us, missed);
     o->due_us += (missed + 1) * o->interval_us;
-    now = xqc_monotonic_timestamp();
+    now = mini_observer_now(o);
     uint64_t delay = o->due_us > now ? o->due_us - now : 1;
     struct timeval tv = {(long)(delay / 1000000), (long)(delay % 1000000)};
     if (event_add(o->timer, &tv)) {
@@ -53,7 +61,7 @@ mini_observer_start(xqc_engine_t *engine, const xqc_cid_t *cid,
     }
     o->timer = event_new(base, -1, EV_TIMEOUT, mini_observer_tick, o);
     if (!o->timer) { mini_observer_stop(&o); return NULL; }
-    o->due_us = xqc_monotonic_timestamp();
+    o->due_us = mini_observer_now(o);
     if (o->extra) { o->extra(o->extra_data); }
     xqc_observer_sample(engine, cid, "start", o->due_us, o->interval_us, 0);
     o->due_us += o->interval_us;
@@ -68,7 +76,12 @@ mini_observer_finish(mini_observer_t *o)
     if (!o || o->finished) { return; }
     if (o->extra) { o->extra(o->extra_data); }
     xqc_observer_phase(o->engine, &o->cid, "task_end", 0, 0, 0);
-    xqc_observer_sample(o->engine, &o->cid, "end", xqc_monotonic_timestamp(), o->interval_us, 0);
+    xqc_observer_sample(o->engine, &o->cid, "end", mini_observer_now(o), o->interval_us, 0);
+    char metadata[768];
+    if (xqc_observer_checkpoint_metadata(o->engine, &o->cid, metadata, sizeof(metadata))
+        || netins_telemetry_checkpoint(o->writer, metadata)) {
+        fprintf(stderr, "observer_error: cannot publish task checkpoint\n");
+    }
     o->finished = 1;
     if (o->timer) { event_del(o->timer); }
 }
@@ -89,7 +102,7 @@ void
 mini_observer_resume(mini_observer_t *o)
 {
     if (!o || !o->finished) { return; }
-    o->finished = 0; o->due_us = xqc_monotonic_timestamp() + o->interval_us;
+    o->finished = 0; o->due_us = mini_observer_now(o) + o->interval_us;
     struct timeval tv = {(long)(o->interval_us / 1000000), (long)(o->interval_us % 1000000)};
     if (event_add(o->timer, &tv)) { fprintf(stderr, "observer_error: cannot resume timer\n"); }
 }

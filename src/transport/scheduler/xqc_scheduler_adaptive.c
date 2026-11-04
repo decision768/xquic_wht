@@ -1,3 +1,4 @@
+#include <xquic/xqc_observer_clock.h>
 #include "src/transport/scheduler/xqc_scheduler_adaptive.h"
 #include "src/transport/scheduler/xqc_scheduler_common.h"
 #include "src/transport/xqc_multipath.h"
@@ -579,7 +580,8 @@ xqc_adaptive_collect_candidates(xqc_adaptive_scheduler_t *adaptive,
         xqc_scheduler_diag_record_evaluation(&adaptive->sched_diag, path,
             &candidate.cwnd_eval);
         if (adaptive->observer_enabled) {
-            state->observer_evaluation_us = now;
+            state->observer_evaluation_us = xqc_observer_clock_us();
+            if (!state->observer_evaluation_us) { conn->observer->invalid = 1; }
             state->observer_packet_bytes = candidate.cwnd_eval.packet_size;
             state->observer_block_reason = candidate.cwnd_eval.block_reason;
             state->observer_check_cwnd = check_cwnd;

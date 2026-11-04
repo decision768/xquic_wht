@@ -1,3 +1,4 @@
+#include <xquic/xqc_observer_clock.h>
 #include "mini_backend.h"
 
 #include <errno.h>
@@ -367,6 +368,7 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         return EINVAL;
     }
 
+    uint64_t observer_task_start_us = xqc_observer_clock_us();
     memset(result, 0, sizeof(*result));
     REQUEST_METHOD method = direction == MINI_BACKEND_TRANSFER_GET
         ? REQUEST_METHOD_GET : REQUEST_METHOD_POST;
@@ -476,7 +478,7 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     }
     xqc_observer_phase(client->ctx.engine, &client->connection->cid,
         ret == XQC_OK ? "client_confirmed" : "client_failed", 0, 0,
-        xqc_now() - client->connection->transfer_start_time);
+        xqc_observer_elapsed_us(observer_task_start_us, xqc_observer_clock_us()));
     mini_observer_finish(client->connection->observer);
     return ret == XQC_OK ? 0 : ret;
 }

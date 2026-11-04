@@ -1,3 +1,4 @@
+#include <xquic/xqc_observer_clock.h>
 /**
  * @file mini_server_cb.c contains callbacks definitions for mini_server, including:
  * 1. engine callbacks
@@ -2525,7 +2526,7 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             off_t write_off = (off_t)(user_stream->stream_offset + user_stream->recv_body_len);
             xqc_observer_body(user_conn->ctx->engine, &user_conn->cid,
                 xqc_h3_stream_id(h3_request), (uint64_t)read);
-            uint64_t observer_write_start = xqc_now();
+            uint64_t observer_write_start = xqc_observer_clock_us();
             size_t write_total = 0;
             while (write_total < (size_t)read) {
                 if (user_conn != NULL && user_conn->serve_cancelled) {
@@ -2545,7 +2546,7 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             }
 
             xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
-                "post_write", (uint64_t)read, 0, xqc_now() - observer_write_start);
+                "post_write", (uint64_t)read, 0, xqc_observer_elapsed_us(observer_write_start, xqc_observer_clock_us()));
             user_stream->recv_body_len += read;
             uint64_t aggregate_end_ns = xqc_mini_svr_monotonic_now_ns();
             if (read > 0) {
@@ -2578,16 +2579,16 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
     if (user_stream->fin_received) {
 
         if (user_stream->recv_body_fd >= 0) {
-            uint64_t observer_sync_start = xqc_now();
+            uint64_t observer_sync_start = xqc_observer_clock_us();
             if (fsync(user_stream->recv_body_fd) != 0) {
                 xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
-                    "post_fsync_failed", user_stream->recv_body_len, 0, xqc_now() - observer_sync_start);
+                    "post_fsync_failed", user_stream->recv_body_len, 0, xqc_observer_elapsed_us(observer_sync_start, xqc_observer_clock_us()));
                 perror("fsync");
                 return XQC_ERROR;
             }
             xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
                 "post_fsync_complete", user_stream->recv_body_len, 0,
-                xqc_now() - observer_sync_start);
+                xqc_observer_elapsed_us(observer_sync_start, xqc_observer_clock_us()));
             close(user_stream->recv_body_fd);
             user_stream->recv_body_fd = -1;
         }

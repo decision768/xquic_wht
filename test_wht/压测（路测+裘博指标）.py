@@ -44,6 +44,7 @@ import os
 import posixpath
 import re
 import shlex
+import signal
 import statistics
 import sys
 import time
@@ -53,9 +54,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-# Both maintained entry points share one observer implementation.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
-from roadtest_observability import add_arguments as add_observer_arguments, create_observer, observe
+# Runtime dependencies belong beside this entry point on the actual control machine.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from roadtest_observability import add_arguments as add_observer_arguments, create_observer, observe, recover_pending_cleanup
 
 try:
     import paramiko
@@ -640,13 +641,17 @@ def board_preflight(
         "if [ -n \"$conflict_pids\" ]; then "
         "printf 'existing benchmark process(es):%s\\n' \"$conflict_pids\" >&2; exit 8; fi"
     )
-    checks.append(
-        f"df -Pk {q(args.board_dir)} | "
-        "awk 'NR==2 {printf \"__MINI_FREE_BYTES__=%.0f\\n\", $4 * 1024}'"
-    )
     result = board.run(" && ".join(checks), timeout_s=30)
     if result.exit_code != 0:
         raise RuntimeError(f"板卡预检失败:\n{result.diagnostic_output}")
+    # Check for live clients before touching stale artifacts, then measure space
+    # after cleanup rather than rejecting the run before recovery can execute.
+    cleanup_stale_board_resource_files(board, args)
+    result = board.run(
+        f"df -Pk {q(args.board_dir)} | "
+        "awk 'NR==2 {printf \"__MINI_FREE_BYTES__=%.0f\\n\", $4 * 1024}'", timeout_s=10)
+    if result.exit_code or result.timed_out or result.truncated:
+        raise RuntimeError("板卡预检未能可靠读取剩余空间")
     free_match = re.search(r"__MINI_FREE_BYTES__=(\d+)", result.output)
     if not free_match:
         raise RuntimeError("板卡预检未能读取工作目录剩余空间")
@@ -700,8 +705,7 @@ def cleanup_stale_board_resource_files(board, args) -> None:
         f"find {board_dir} -maxdepth 1 -type f "
         "\\( -name 'get-rmnet-*.bin' -o -name 'get-usb-*.bin' "
         "-o -name 'get-agg-*.bin' \\) "
-        f"-mtime +{days} -delete; "
-        f"rm -f -- {q(posixpath.join(args.board_dir, 'clog.log'))}"
+        f"-mtime +{days} -delete"
     )
     result = board.run(command, timeout_s=30)
     if result.exit_code != 0 or result.timed_out:
@@ -1172,10 +1176,10 @@ def build_client_command(
         )
 
     if direction == "get":
-        prepare_path = f"rm -f -- {q(board_path)} clog.log \"$gate_file\""
+        prepare_path = f"rm -f -- {q(board_path)} \"$gate_file\""
     else:
         prepare_path = (
-            f"rm -f -- clog.log \"$gate_file\"; "
+            f"rm -f -- \"$gate_file\"; "
             f"if [ ! -r {q(board_path)} ]; then client_rc=92; fi"
         )
 
@@ -1240,7 +1244,6 @@ def build_client_command(
         + f"    local_size=$(wc -c < {q(board_path)})\n"
         + "    printf '__MINI_LOCAL_SIZE__=%s\\n' \"$local_size\"\n"
         + "  fi\n"
-        + "  rm -f -- clog.log\n"
         + "fi\n"
         + "stop_resource_monitor\n"
         + "trap - EXIT HUP INT TERM\n"
@@ -1326,10 +1329,10 @@ def cleanup_board_attempt(
         + "still_alive=''; for pid in $remaining; do "
         + "owned_mini_pid \"$pid\" && still_alive=\"$still_alive $pid\" || true; done; "
         + "[ -n \"$still_alive\" ] || break; sleep 0.1; i=$((i+1)); done; "
-        + remove_output
-        + remove_stop
         + "if [ -n \"${still_alive:-}\" ]; then "
         + "printf '__MINI_CLIENT_CLEANUP_FAILED__=%s\\n' \"$still_alive\"; exit 5; fi; "
+        + remove_output
+        + remove_stop
         + "printf '__MINI_CLIENT_CLEANUP_OK__\\n'"
     )
     result = board.run(command, timeout_s=30)
@@ -1783,6 +1786,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     if args.command_timeout_s <= args.client_timeout_ms / 1000.0:
         parser.error("--command-timeout-s必须大于客户端timeout")
     for value_name in (
+        "observer_checkpoint_timeout_s",
         "server_ready_timeout_s",
         "cooldown_s",
         "board_resource_interval_s",
@@ -1791,6 +1795,8 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         value = getattr(args, value_name)
         if not math.isfinite(value):
             parser.error(f"--{value_name.replace('_', '-')}必须是有限数值")
+    if args.observer_checkpoint_timeout_s <= 0:
+        parser.error("--observer-checkpoint-timeout-s必须大于0")
     if args.server_ready_timeout_s <= 0:
         parser.error("--server-ready-timeout-s必须大于0")
     if args.cooldown_s < 0:
@@ -1870,6 +1876,9 @@ def start_server_quiet(
         raise ValueError(f"不支持的服务端调度算法：{scheduler}")
     state_dir = posixpath.dirname(remote_pidfile)
     startup_file = posixpath.join(state_dir, f"server_startup_{scheduler}_{time.time_ns()}.log")
+    startup_error_file = posixpath.splitext(startup_file)[0] + ".stderr.log"
+    observe(args, "track_temporary", "server", None,
+            remote_pidfile, startup_file, startup_error_file)
     port_pattern = f":{int(args.quic_port)}([[:space:]]|$)"
     command = (
         f"cd -- {q(args.server_dir)} || exit 90; "
@@ -1888,7 +1897,7 @@ def start_server_quiet(
         f"--max-connections {int(max_connections)} "
         f"--scheduler {q(scheduler)} "
         + (observe(args, "server_arguments") or "")
-        + f"> {q(startup_file)} 2>&1 < /dev/null & "
+        + f"> {q(startup_file)} 2> {q(startup_error_file)} < /dev/null & "
         "server_pid=$!; "
         "server_start=$(awk '{print $22}' \"/proc/$server_pid/stat\" 2>/dev/null || true); "
         f"printf '%s %s\\n' \"$server_pid\" \"$server_start\" > {q(remote_pidfile)}; "
@@ -2476,9 +2485,15 @@ def cleanup_current_session_remote_artifacts(
     remote_state_dir: str,
     remove_server_state: bool,
     directions: Sequence[str] = ("get", "post"),
-) -> None:
-    """Remove controls/downloads; undownloaded resource CSVs are preserved."""
+) -> bool:
+    """Verify original session controls/downloads; never recursively delete state."""
     run_prefix = f"api_{session}_*"
+    control_patterns = (f"\\( -name {q(run_prefix + '_resource.stop')} "
+                        f"-o -name {q(run_prefix + '_resource_monitor.log')} "
+                        f"-o -name {q(run_prefix + '_client.start')} "
+                        f"-o -name {q(run_prefix + '_server_memory.stop')} "
+                        f"-o -name {q(run_prefix + '_server_memory.status')} \\)")
+    complete = True
 
     if board.is_connected():
         board_output_patterns = (
@@ -2488,17 +2503,16 @@ def cleanup_current_session_remote_artifacts(
         )
         board_command = (
             "set -e; "
-            f"find /tmp -maxdepth 1 -type f -name {q(run_prefix)} -delete; "
+            f"find /tmp -maxdepth 1 -type f {control_patterns} -delete; "
             f"find {q(args.board_dir)} -maxdepth 1 -type f {board_output_patterns} -delete; "
-            f"rm -f -- {q(posixpath.join(args.board_dir, 'clog.log'))}; "
-            f"test -z \"$(find /tmp -maxdepth 1 -type f -name {q(run_prefix)} -print -quit)\" && "
+            f"test -z \"$(find /tmp -maxdepth 1 -type f {control_patterns} -print -quit)\" && "
             f"test -z \"$(find {q(args.board_dir)} -maxdepth 1 -type f "
-            f"{board_output_patterns} -print -quit)\" && "
-            f"test ! -e {q(posixpath.join(args.board_dir, 'clog.log'))}"
+            f"{board_output_patterns} -print -quit)\""
         )
         try:
             result = board.run(board_command, timeout_s=30)
-            if result.exit_code != 0 or result.timed_out:
+            if result.exit_code != 0 or result.timed_out or result.truncated:
+                complete = False
                 LOG.warning(
                     "主板本次会话最终清理未确认: %s",
                     result.diagnostic_output.strip(),
@@ -2506,7 +2520,10 @@ def cleanup_current_session_remote_artifacts(
             else:
                 LOG.info("主板本次会话控制文件和GET下载文件已清空")
         except Exception as exc:
+            complete = False
             LOG.warning("主板本次会话最终清理异常: %s", exc)
+    else:
+        complete = False
 
     if server.is_connected():
         post_cleanup = ""
@@ -2520,19 +2537,21 @@ def cleanup_current_session_remote_artifacts(
             post_cleanup = "rm -f -- " + " ".join(q(item) for item in post_targets) + "; "
             post_verify = " && ".join(f"test ! -e {q(item)}" for item in post_targets)
         state_cleanup = (
-            f"rm -rf -- {q(remote_state_dir)}; test ! -e {q(remote_state_dir)}"
+            f"if test -d {q(remote_state_dir)}; then rmdir -- {q(remote_state_dir)}; fi; "
+            f"test ! -e {q(remote_state_dir)}"
             if remove_server_state else "true"
         )
         server_command = (
             "set -e; "
-            f"find /tmp -maxdepth 1 -type f -name {q(run_prefix)} -delete; "
+            f"find /tmp -maxdepth 1 -type f {control_patterns} -delete; "
             + post_cleanup
-            + f"test -z \"$(find /tmp -maxdepth 1 -type f -name {q(run_prefix)} -print -quit)\" && "
+            + f"test -z \"$(find /tmp -maxdepth 1 -type f {control_patterns} -print -quit)\" && "
             + post_verify + " && " + state_cleanup
         )
         try:
             result = server.run(server_command, timeout_s=30)
-            if result.exit_code != 0 or result.timed_out:
+            if result.exit_code != 0 or result.timed_out or result.truncated:
+                complete = False
                 LOG.warning(
                     "云服务器本次会话最终清理未确认: %s",
                     result.diagnostic_output.strip(),
@@ -2540,12 +2559,17 @@ def cleanup_current_session_remote_artifacts(
             elif remove_server_state:
                 LOG.info("云服务器POST文件、控制文件和状态目录已清空")
             else:
+                complete = False
                 LOG.warning(
                     "API服务端停止未确认，已清理POST文件但保留状态目录: %s",
                     remote_state_dir,
                 )
         except Exception as exc:
+            complete = False
             LOG.warning("云服务器本次会话最终清理异常: %s", exc)
+    else:
+        complete = False
+    return complete
 
 
 def write_speed_log(
@@ -3173,10 +3197,23 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
     active_board_stop_file = ""
     active_server_monitor: Optional[Dict[str, object]] = None
     server_stop_confirmed = False
+    termination_handlers = {}
+
+    def request_shutdown(signum, frame):
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                termination_handlers[number] = signal.signal(number, request_shutdown)
+            except ValueError:
+                pass
 
     try:
         connect_ssh_with_optional_prompt(server, "云端")
         connect_ssh_with_optional_prompt(board, "板卡")
+        recover_pending_cleanup(args, log_parent, board, server, session)
         source_path, get_expected_size = server_preflight(
             server,
             args.server_dir,
@@ -3194,7 +3231,6 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             "post" in directions,
         )
         validate_server_resource_monitor(server, args)
-        cleanup_stale_board_resource_files(board, args)
         cleanup_stale_server_resource_files(server, args)
         if "post" in directions:
             validate_server_post_targets(server, args)
@@ -3289,6 +3325,14 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 remote_board_stop = f"/tmp/{run_tag}_resource.stop"
                 remote_board_monitor_log = f"/tmp/{run_tag}_resource_monitor.log"
                 local_board_csv = board_resource_local_dir / f"{run_tag}_resource.csv"
+                board_temporary = [remote_board_csv, remote_board_stop, remote_board_monitor_log,
+                                   f"/tmp/{run_tag}_client.start"]
+                if direction == "get":
+                    board_temporary.append(posixpath.join(args.board_dir, board_path))
+                observe(args, "track_temporary", "board", run_tag, *board_temporary)
+                observe(args, "track_temporary", "server", run_tag,
+                        posixpath.join(args.server_resource_dir, f"{run_tag}_server_memory.csv"),
+                        f"/tmp/{run_tag}_server_memory.stop", f"/tmp/{run_tag}_server_memory.status")
 
                 if direction == "post" and not prepare_server_post_target(
                     server, args, remote_path
@@ -3500,7 +3544,12 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     "board_resource": board_resource, "server_resource": server_resource,
                 }
                 append_json_record(log_root / "attempts.jsonl", attempt_record)
-                observe(args, "end", run_tag, success, error)
+                observation_result = observe(args, "end", run_tag, success, error)
+                if observation_result is None:
+                    observation_result = {"status": "DISABLED" if args.disable_observer else "INVALID",
+                                          "errors": [] if args.disable_observer else ["观测验收未返回结果"]}
+                append_json_record(log_root / "observability" / "attempt_validation.jsonl",
+                                   {"attempt_id": run_tag, "business_success": success, **observation_result})
                 if success:
                     successful_row = {
                         "iter": round_index,
@@ -3545,6 +3594,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     raise RuntimeError("无法确认旧API客户端已终止，停止测试")
                 if direction == "post" and not post_cleanup_ok:
                     raise RuntimeError("无法确认服务器POST文件已删除，停止测试")
+                if observation_result["status"] not in ("OK", "DISABLED"):
+                    break
                 if attempt <= args.retries and args.cooldown_s > 0:
                     time.sleep(args.cooldown_s)
 
@@ -3565,8 +3616,12 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             }
             record.update(case_metadata(case, session))
             record["error"] = "" if record["success"] else error
+            record["observation"] = observation_result
             records.append(record)
             append_json_record(log_root / "results.jsonl", record)
+            if observation_result["status"] not in ("OK", "DISABLED"):
+                raise RuntimeError("当前业务结果已保存，P0观测验收失败，停止后续测试："
+                                   + "; ".join(observation_result["errors"]))
             if args.cooldown_s > 0:
                 time.sleep(args.cooldown_s)
 
@@ -3577,69 +3632,71 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
         fatal_error = str(exc)
         LOG.exception("API压测终止: %s", exc)
     finally:
-        if active_server_monitor is not None:
-            try:
-                stop_server_resource_monitor(server, active_server_monitor)
-            except Exception:
-                pass
-        if active_attempt_token and active_board_path:
-            try:
-                cleanup_board_attempt(
-                    board,
-                    active_attempt_token,
-                    args.board_dir,
-                    active_board_path,
-                    not active_board_remove_file,
-                    active_board_stop_file,
-                )
-            except Exception:
-                pass
-        if server_started and server_pid:
-            try:
-                if not server.is_connected():
-                    connect_ssh_with_optional_prompt(server, "云端")
-                server_stop_confirmed = stop_server(
-                    server,
-                    server_pid,
-                    args.server_executable,
-                    remote_pidfile,
-                    session,
-                )
-            except Exception as exc:
-                LOG.warning("清理云端API服务端失败: %s", exc)
+        cleanup_errors = []
 
-        try:
-            if not board.is_connected():
-                connect_ssh_with_optional_prompt(board, "板卡")
-        except Exception as exc:
-            LOG.warning("最终清理前无法重连主板: %s", exc)
-        try:
-            if not server.is_connected():
-                connect_ssh_with_optional_prompt(server, "云端")
-        except Exception as exc:
-            LOG.warning("最终清理前无法重连云服务器: %s", exc)
-        observe(args, "archive_server_log", remote_state_dir)
-        observe(args, "finish")
-        if remote_activity_started:
-            cleanup_current_session_remote_artifacts(
-                board,
-                server,
-                args,
-                session,
-                remote_state_dir,
-                (server_stop_confirmed or not server_started)
-                and not observe(args, "needs_server_state"),
-                directions,
-            )
+        def cleanup_step(label, action):
+            try:
+                if action() is False:
+                    raise RuntimeError("未确认完成")
+            except (Exception, KeyboardInterrupt) as exc:
+                cleanup_errors.append(label + ": " + str(exc))
+                LOG.error("收尾步骤失败，继续其他回收步骤 %s: %s", label, exc)
 
+        # A second Ctrl+C must not interrupt the cleanup started by the first.
+        cleanup_handlers = {}
+        for number in (signal.SIGINT, *termination_handlers):
+            try:
+                cleanup_handlers[number] = signal.signal(number, signal.SIG_IGN)
+            except ValueError:  # gx_main may run in a non-main test thread.
+                pass
         try:
-            board.close()
-        except Exception:
-            pass
-        try:
-            server.close()
-        except Exception:
-            pass
+            for remote, label in ((board, "板卡"), (server, "云端")):
+                if not remote.is_connected():
+                    cleanup_step(label + "重连", lambda r=remote, text=label: connect_ssh_with_optional_prompt(r, text))
+            if active_server_monitor is not None:
+                cleanup_step("停止服务端资源监控", lambda: stop_server_resource_monitor(server, active_server_monitor))
+            if active_attempt_token and active_board_path:
+                cleanup_step("停止当前客户端", lambda: cleanup_board_attempt(
+                    board, active_attempt_token, args.board_dir, active_board_path,
+                    not active_board_remove_file, active_board_stop_file))
+            if server_started and server_pid:
+                def stop_current_server():
+                    nonlocal server_stop_confirmed
+                    server_stop_confirmed = stop_server(
+                        server, server_pid, args.server_executable, remote_pidfile, session)
+                    return server_stop_confirmed
+                cleanup_step("停止API服务端", stop_current_server)
+            cleanup_step("归档服务端日志", lambda: observe(args, "archive_server_log", remote_state_dir))
+            cleanup_step("导出观测结果", lambda: observe(args, "finish"))
+            # Retry independently even if finish/export or an earlier cleanup
+            # step failed. The durable journal is recovered on the next launch.
+            cleanup_step("回收会话临时文件", lambda: args._observer.cleanup_temporary(final=True))
+            if remote_activity_started:
+                def cleanup_original_artifacts():
+                    if not all(args._observer._cleanup_idle(ep) for ep in ("board", "server")):
+                        return False
+                    return cleanup_current_session_remote_artifacts(
+                        board, server, args, session, remote_state_dir,
+                        (server_stop_confirmed or not server_started)
+                        and not observe(args, "needs_server_state"), directions)
+                cleanup_step("回收原有控制和下载文件", cleanup_original_artifacts)
+            state = args._observer.manifest["cleanup"]
+            if not state.get("complete"):
+                cleanup_errors.append("仍有待回收产物，详见 observability/manifest.json 的 cleanup 字段")
+            status = {"complete": not cleanup_errors, "errors": cleanup_errors,
+                      "discarded_unarchived": state.get("discarded_unarchived", [])}
+            cleanup_step("保存回收状态", lambda: (log_root / "cleanup_status.json").write_text(
+                json.dumps(status, ensure_ascii=False, indent=2), encoding="utf-8"))
+            if cleanup_errors:
+                fatal_error = fatal_error or "临时文件回收未全部确认"
+            else:
+                LOG.info("本次临时文件回收已核验完成")
+        finally:
+            cleanup_step("关闭板卡SSH", board.close)
+            cleanup_step("关闭云端SSH", server.close)
+            cleanup_step("释放回收清单锁", args._observer.release_cleanup_lock)
+            for number, previous in cleanup_handlers.items():
+                signal.signal(number, termination_handlers.get(number, previous))
 
     server_temp_dir.mkdir(parents=True, exist_ok=True)
     try:

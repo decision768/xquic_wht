@@ -1,3 +1,4 @@
+#include <xquic/xqc_observer_clock.h>
 #include <xquic/netins_udp.h>
 
 #include <errno.h>
@@ -330,19 +331,18 @@ main(int argc, char **argv)
         __DATE__, __TIME__);
     fflush(stdout);
     if (argc == 2 && strcmp(argv[1], "--observer-clock") == 0) {
-        struct timespec mono; struct timeval real;
+        uint64_t mono = xqc_observer_clock_us(), real = xqc_observer_realtime_us();
         char boot[80] = "unknown";
         FILE *boot_file = fopen("/proc/sys/kernel/random/boot_id", "r");
         if (boot_file) { if (!fgets(boot, sizeof(boot), boot_file)) { strcpy(boot, "unknown"); } fclose(boot_file); }
         boot[strcspn(boot, "\r\n")] = 0;
-        if (clock_gettime(CLOCK_MONOTONIC, &mono) || gettimeofday(&real, NULL)) { return EXIT_FAILURE; }
-        printf("{\"monotonic_us\":%"PRIu64",\"realtime_us\":%"PRIu64",\"boot_id\":\"%s\"}\n",
-            (uint64_t)mono.tv_sec * 1000000 + (uint64_t)mono.tv_nsec / 1000,
-            (uint64_t)real.tv_sec * 1000000 + (uint64_t)real.tv_usec, boot);
+        if (!mono || !real) { return EXIT_FAILURE; }
+        printf("{\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"monotonic_us\":%"PRIu64",\"realtime_us\":%"PRIu64",\"boot_id\":\"%s\"}\n",
+            mono, real, boot);
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--telemetry-capabilities") == 0) {
-        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true}");
+        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true}");
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
