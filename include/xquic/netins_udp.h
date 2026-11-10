@@ -216,8 +216,17 @@ typedef struct netins_udp_transfer_result_s {
     /* Mini-compatible transfer interval; see netins_udp_transfer(). */
     uint64_t elapsed_us;
     double throughput_mbps;
+    /* GET timing metadata, indexed by NETINS_UDP_GET_FCT_* below. */
     uint64_t reserved[4];
 } netins_udp_transfer_result_t;
+
+/* The timestamp slots use the client's monotonic clock, with 0 for missing. */
+typedef enum netins_udp_get_fct_slot_e {
+    NETINS_UDP_GET_FCT_FIRST_SUBMIT_US = 0,
+    NETINS_UDP_GET_FCT_LAST_BODY_US,
+    NETINS_UDP_GET_FCT_RECEIVED_BYTES,
+    NETINS_UDP_GET_FCT_EXPECTED_BYTES
+} netins_udp_get_fct_slot_t;
 
 #define NETINS_UDP_TRANSFER_RESULT_INITIALIZER \
     { sizeof(netins_udp_transfer_result_t), NETINS_UDP_API_VERSION, \

@@ -752,6 +752,9 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
                 xqc_mini_cli_set_transfer_error(user_conn, EPROTO);
                 return XQC_ERROR;
             }
+            if (read > 0) {
+                user_conn->download_last_body_us = xqc_observer_clock_us();
+            }
             user_conn->download_received_bytes += (size_t)read;
             xqc_observer_body(user_conn->ctx->engine, &user_conn->cid,
                 xqc_h3_stream_id(h3_request), (uint64_t)read);

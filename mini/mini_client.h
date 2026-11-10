@@ -372,6 +372,9 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     download_finished_streams;
     xqc_usec_t              download_first_body_time;
     xqc_usec_t              download_last_body_time;
+    int                     download_get_submitted;
+    uint64_t                download_first_get_submit_us;
+    uint64_t                download_last_body_us;
 
     int                     next_fallback_path_index;
     int                     handshake_finished;

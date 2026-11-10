@@ -1,5 +1,6 @@
 #include "mini_client.h"
 #include "mini_stream_backend.h"
+#include <xquic/xqc_observer_clock.h>
 #include <inttypes.h>
 #include <stdint.h>
 #include <netdb.h>
@@ -13,10 +14,10 @@
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_BATCH_CAPACITY       512
-#define CLIENT_RX_SINGLE_PATH_PACKETS  512
-#define CLIENT_RX_DUAL_PATH_PACKETS    512
-#define CLIENT_RX_MULTI_PATH_PACKETS   512
+#define CLIENT_RX_BATCH_CAPACITY       64
+#define CLIENT_RX_SINGLE_PATH_PACKETS  64
+#define CLIENT_RX_DUAL_PATH_PACKETS    64
+#define CLIENT_RX_MULTI_PATH_PACKETS   64
 #define CLIENT_PATH_FAILOVER_PTO        3
 
 struct xqc_mini_cli_rx_batch_s {
@@ -1497,8 +1498,8 @@ xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream)
     }
 
     xqc_http_header_t headers[H3_HDR_CNT + 1];
-    xqc_mini_cli_req_config_t *req_cfg =
-        &user_stream->user_conn->ctx->args->req_cfg;
+    xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    xqc_mini_cli_req_config_t *req_cfg = &user_conn->ctx->args->req_cfg;
     int header_count = xqc_mini_cli_format_h3_req(headers, req_cfg,
         user_stream->file_size, user_stream);
     if (header_count <= 0) {
@@ -1510,6 +1511,9 @@ xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream)
         .count = (size_t)header_count,
     };
     uint8_t fin = req_cfg->method == REQUEST_METHOD_GET ? 1 : 0;
+    int first_get = req_cfg->method == REQUEST_METHOD_GET
+        && !user_conn->download_get_submitted;
+    uint64_t submit_us = first_get ? xqc_observer_clock_us() : 0;
     ssize_t ret = xqc_h3_request_send_headers(user_stream->h3_request,
         &header_list, fin);
     if (ret == -XQC_EAGAIN) {
@@ -1518,6 +1522,10 @@ xqc_mini_cli_send_h3_headers(xqc_mini_cli_user_stream_t *user_stream)
     if (ret < 0) {
         printf("[error] xqc_mini_cli_h3_request_send error %zd\n", ret);
         return XQC_ERROR;
+    }
+    if (first_get) {
+        user_conn->download_get_submitted = 1;
+        user_conn->download_first_get_submit_us = submit_us;
     }
     user_stream->hdr_sent = 1;
     printf("[stats] xqc_mini_cli_h3_request_send success \n");
@@ -3402,6 +3410,9 @@ xqc_mini_cli_prepare_transfer(xqc_mini_cli_user_conn_t *user_conn,
     user_conn->download_finished_streams = 0;
     user_conn->download_first_body_time = 0;
     user_conn->download_last_body_time = 0;
+    user_conn->download_get_submitted = 0;
+    user_conn->download_first_get_submit_us = 0;
+    user_conn->download_last_body_us = 0;
     user_conn->download_write_error = 0;
     user_conn->transfer_finished = 0;
     user_conn->transfer_io_complete = 0;

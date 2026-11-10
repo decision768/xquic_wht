@@ -454,6 +454,10 @@ mini_backend_client_transfer(mini_backend_client_t *client,
      *   POST - first body submission to completion of all body submissions.
      */
     if (method == REQUEST_METHOD_GET) {
+        result->first_get_submit_us = client->connection->download_first_get_submit_us;
+        result->last_body_us = client->connection->download_last_body_us;
+        result->get_received_bytes = client->connection->download_received_bytes;
+        result->get_expected_bytes = client->connection->download_expected_bytes;
         result->elapsed_us =
             client->connection->download_first_body_time > 0
             && client->connection->download_last_body_time

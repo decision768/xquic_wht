@@ -1024,6 +1024,13 @@ netins_udp_transfer(netins_udp_t *client,
         ? (double)result->total_bytes * 8.0 / (double)result->elapsed_us
         : 0.0;
 
+    if (task->direction == NETINS_UDP_TRANSFER_GET) {
+        result->reserved[NETINS_UDP_GET_FCT_FIRST_SUBMIT_US] = backend_result.first_get_submit_us;
+        result->reserved[NETINS_UDP_GET_FCT_LAST_BODY_US] = backend_result.last_body_us;
+        result->reserved[NETINS_UDP_GET_FCT_RECEIVED_BYTES] = backend_result.get_received_bytes;
+        result->reserved[NETINS_UDP_GET_FCT_EXPECTED_BYTES] = backend_result.get_expected_bytes;
+    }
+
     if (ret != 0) {
         if (ret == ETIMEDOUT || ret == EIO || ret == EPROTO
             || mini_backend_client_is_closed(client->client_backend))

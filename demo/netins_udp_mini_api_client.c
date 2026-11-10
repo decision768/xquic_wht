@@ -405,13 +405,63 @@ print_snapshot(netins_udp_t *client)
     }
 }
 
+static void
+print_get_fct(const client_options_t *options, uint32_t iteration,
+    const netins_udp_transfer_result_t *result, const char *reason)
+{
+    uint64_t first = result->reserved[NETINS_UDP_GET_FCT_FIRST_SUBMIT_US];
+    uint64_t last = result->reserved[NETINS_UDP_GET_FCT_LAST_BODY_US];
+    uint64_t received = result->reserved[NETINS_UDP_GET_FCT_RECEIVED_BYTES];
+    uint64_t expected = result->reserved[NETINS_UDP_GET_FCT_EXPECTED_BYTES];
+
+    if (reason == NULL) {
+        if (received != expected || received != result->total_bytes) {
+            reason = "byte_count_mismatch";
+        } else if (first == 0 || last == 0) {
+            reason = "missing_timestamp";
+        } else if (last < first) {
+            reason = "invalid_timestamp_order";
+        }
+    }
+
+    const char *attempt = options->observer.attempt_id;
+    printf("[get_fct] {\"iteration\":%" PRIu32 ",\"iterations\":%" PRIu32
+           ",\"attempt_id\":", iteration, options->repeat_count);
+    if (*attempt && attempt[strspn(attempt,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")] == '\0') {
+        printf("\"%s\"", attempt);
+    } else {
+        printf("null");
+    }
+    printf(",\"received_bytes\":%" PRIu64 ",\"expected_bytes\":%" PRIu64,
+        received, expected);
+    printf(",\"first_get_submit_us\":");
+    if (first != 0) {
+        printf("%" PRIu64, first);
+    } else {
+        printf("null");
+    }
+    printf(",\"last_body_us\":");
+    if (last != 0) {
+        printf("%" PRIu64, last);
+    } else {
+        printf("null");
+    }
+    if (reason == NULL) {
+        printf(",\"get_fct_us\":%" PRIu64 ",\"status\":\"ok\"}\n", last - first);
+    } else {
+        printf(",\"get_fct_us\":null,\"status\":\"%s\"}\n", reason);
+    }
+}
+
 int
 main(int argc, char **argv)
 {
     client_options_t options;
     netins_udp_t *client = NULL;
     netins_udp_transfer_t task = NETINS_UDP_TRANSFER_INITIALIZER;
-    uint32_t iteration;
+    uint32_t iteration = 0;
+    const char *setup_failure = "setup_failed";
     int initialized = 0;
     int exit_code = EXIT_FAILURE;
 
@@ -458,6 +508,7 @@ main(int argc, char **argv)
         goto done;
     }
     if (netins_udp_connect(client, options.host, options.port) != 0) {
+        setup_failure = "connect_failed";
         print_handle_error(client, "connect");
         goto done;
     }
@@ -470,7 +521,16 @@ main(int argc, char **argv)
         netins_udp_transfer_result_t result =
             NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
 
-        if (netins_udp_transfer(client, &task, &result) != 0) {
+        int transfer_ret = netins_udp_transfer(client, &task, &result);
+        if (task.direction == NETINS_UDP_TRANSFER_GET) {
+            const char *reason = NULL;
+            if (transfer_ret != 0) {
+                reason = netins_udp_get_last_error_code(client) == ETIMEDOUT
+                    ? "transfer_timeout" : "transfer_failed";
+            }
+            print_get_fct(&options, iteration, &result, reason);
+        }
+        if (transfer_ret != 0) {
             print_handle_error(client, "transfer");
             goto done;
         }
@@ -493,6 +553,10 @@ main(int argc, char **argv)
     exit_code = EXIT_SUCCESS;
 
 done:
+    if (iteration == 0 && options.direction == NETINS_UDP_TRANSFER_GET) {
+        netins_udp_transfer_result_t empty = NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
+        print_get_fct(&options, 1, &empty, setup_failure);
+    }
     if (client != NULL) {
         (void)netins_udp_shutdown(client);
         netins_udp_close(client);

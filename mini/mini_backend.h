@@ -38,6 +38,10 @@ typedef struct mini_backend_transfer_result_s {
     uint32_t total_fragments;
     uint32_t completed_fragments;
     uint64_t elapsed_us;
+    uint64_t first_get_submit_us;
+    uint64_t last_body_us;
+    uint64_t get_received_bytes;
+    uint64_t get_expected_bytes;
 } mini_backend_transfer_result_t;
 
 typedef struct mini_backend_path_snapshot_s {
