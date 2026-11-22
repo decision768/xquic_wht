@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <strings.h>
 
-#define SERVER_PATH_FAILOVER_PTO 3
+#define SERVER_PATH_QUALITY_PTO_THRESHOLD 3
 // 去除字符串首尾空白字符
 static char *
 xqc_mini_svr_trim_space(char *text)
@@ -605,8 +605,6 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
     xqc_cong_ctrl_callback_t ccc = xqc_mini_svr_get_cc_cb(args);
     printf("[diag_server_cc] selected=%s\n",
         xqc_mini_svr_get_cc_name(args->quic_cfg.cc));
-    printf("[diag_path_failover_config] role=server enabled=1 pto_threshold=%u\n",
-        SERVER_PATH_FAILOVER_PTO);
     /* parse mp scheduler callback */
     xqc_scheduler_callback_t sched = xqc_mini_svr_get_sched_cb(args);
     const char *resolved_sched = xqc_mini_svr_resolve_sched_name(args);
@@ -634,7 +632,7 @@ xqc_mini_svr_init_conn_settings(xqc_engine_t *engine, xqc_mini_svr_args_t *args)
         .enable_multipath = args->quic_cfg.multipath,
         .scheduler_callback = sched,
         .scheduler_params = {
-            .pto_cnt_thr = SERVER_PATH_FAILOVER_PTO,
+            .pto_cnt_thr = SERVER_PATH_QUALITY_PTO_THRESHOLD,
             .mp_diag_enabled = args->quic_cfg.mp_diag,
             .mp_diag_interval_ms = args->quic_cfg.mp_diag_interval_ms,
         },
@@ -852,15 +850,7 @@ xqc_mini_svr_socket_read_handler(xqc_mini_svr_user_conn_t *user_conn, int fd)
         }
 
         packet_cnt++;
-        if (xqc_mini_recovery_probe_is_valid(packet_buf, (size_t)recv_size)) {
-            ssize_t sent = sendto(fd, packet_buf, (size_t)recv_size, 0,
-                (struct sockaddr *)&peer_addr, peer_addrlen);
-            if (sent < 0 && get_sys_errno() != EAGAIN && get_sys_errno() != EWOULDBLOCK) {
-                perror("[server recovery probe] sendto error");
-            }
-            continue;
-        }
-        
+
         struct sockaddr_in *pa = (struct sockaddr_in*)&peer_addr;
          
         char peer_ip[INET_ADDRSTRLEN];

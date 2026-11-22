@@ -65,7 +65,6 @@
 #define XQC_MINI_PATH_RETRY_INTERVAL_USEC 200000
 #define XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC 20000
 #define XQC_MINI_PATH_PROBE_PING_INTERVAL_USEC 200000
-#define XQC_MINI_PATH_RECOVER_PROBE_INTERVAL_USEC 200000
 #define XQC_MINI_PATH_WAIT_MAX_ROUNDS 5
 #define XQC_MINI_TRANSPORT_PATH_STATE_ACTIVE 2
 #define XQC_MINI_TIMEOUT_DEFER_CHECK_USEC 200000
@@ -277,11 +276,7 @@ typedef struct xqc_mini_cli_user_path_s {
     char                    interface_name[XQC_MINI_INTERFACE_NAME_MAX_LEN];
     //用于测试路径是否失效
     int                     consecutive_write_failures;
-    int                     disabled_for_session;
-    xqc_usec_t              last_recover_probe_time;
-    int                     recovery_probe_pending;
-    uint64_t                recovery_probe_nonce;
-    xqc_usec_t              recovery_probe_start_time;
+    int                     disabled_for_session; /* Sticky until the next connection. */
     xqc_mini_cli_rx_batch_t *rx_batch;
     int                     rx_release_pending;
     xqc_mini_cli_rx_path_diag_t rx_diag;
@@ -479,7 +474,7 @@ typedef struct xqc_mini_cli_user_stream_s {
 
 
 void xqc_mini_cli_init_engine_ssl_config(xqc_engine_ssl_config_t *ssl_cfg, xqc_mini_cli_args_t *args);
-void xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn);
+void xqc_mini_cli_try_create_paths(xqc_mini_cli_user_conn_t *user_conn);
 
 void xqc_mini_cli_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *tcb, xqc_mini_cli_args_t *args);
 
@@ -538,6 +533,8 @@ int xqc_mini_cli_get_configured_path_slot_count(
     xqc_mini_cli_user_conn_t *user_conn);
 /* Dynamic non-disabled path cardinality; do not use this as a paths[] bound. */
 int xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_has_pending_path(xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_get_required_get_path_count(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_get_ready_path_count(xqc_mini_cli_user_conn_t *user_conn);
 int xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn);
 

@@ -11,7 +11,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
-#define QUEUE_CAP 64U
+#define QUEUE_CAP 512U
 #define RECORD_CAP 32768U
 #define SEGMENT_BYTES (4U * 1024U * 1024U)
 #define FLUSH_BYTES (256U * 1024U)

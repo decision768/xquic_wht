@@ -14,11 +14,11 @@
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_BATCH_CAPACITY       64
-#define CLIENT_RX_SINGLE_PATH_PACKETS  64
-#define CLIENT_RX_DUAL_PATH_PACKETS    64
-#define CLIENT_RX_MULTI_PATH_PACKETS   64
-#define CLIENT_PATH_FAILOVER_PTO        3
+#define CLIENT_RX_BATCH_CAPACITY       16
+#define CLIENT_RX_SINGLE_PATH_PACKETS  16
+#define CLIENT_RX_DUAL_PATH_PACKETS    16
+#define CLIENT_RX_MULTI_PATH_PACKETS   16
+#define CLIENT_PATH_QUALITY_PTO_THRESHOLD        3
 
 struct xqc_mini_cli_rx_batch_s {
     size_t                  slot_capacity;
@@ -49,7 +49,6 @@ static void xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, vo
 static void xqc_mini_cli_dump_path_bindings(xqc_mini_cli_user_conn_t *user_conn);
 static int xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn,
     xqc_mini_cli_user_path_t *path);
-static xqc_mini_cli_user_path_t *xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn);
 
 static int xqc_mini_cli_bind_to_interface(int fd, const char *interface_name, int family);
 static int xqc_mini_cli_query_interface_addr(const char *interface_name, int desired_family,
@@ -62,11 +61,7 @@ static void xqc_mini_cli_socket_event_callback(int fd, short what, void *arg);
 static void xqc_mini_cli_run_rx_arbiter(xqc_mini_cli_user_conn_t *user_conn);
 static void xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path,
     const char *reason);
-static void xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn);
-static int xqc_mini_cli_send_recovery_probe(xqc_mini_cli_user_conn_t *user_conn,
-    xqc_mini_cli_user_path_t *path);
-static int xqc_mini_cli_handle_recovery_probe_response(
-    xqc_mini_cli_user_path_t *path, int fd);
+
 
 
 static uint64_t
@@ -582,180 +577,6 @@ xqc_mini_cli_get_stream_range_size(const xqc_mini_cli_user_conn_t *user_conn)
 }
 
 
-static int
-xqc_mini_cli_requires_recovery_probe(const char *interface_name)
-{
-    /* Preserve rmnet's existing address-transition recovery behavior. */
-    return interface_name != NULL
-        && strncmp(interface_name, "usb", 3) == 0;
-}
-
-
-static int
-xqc_mini_cli_send_recovery_probe(xqc_mini_cli_user_conn_t *user_conn,
-    xqc_mini_cli_user_path_t *path)
-{
-    if (user_conn == NULL || path == NULL) {
-        return XQC_ERROR;
-    }
-
-    if (!path->prepared
-        && xqc_mini_cli_prepare_user_path(user_conn, path) != XQC_OK)
-    {
-        return XQC_ERROR;
-    }
-
-    if (!path->recovery_probe_pending) {
-        path->recovery_probe_nonce =
-            (uint64_t)xqc_now() ^ (uint64_t)(uintptr_t)path;
-        path->recovery_probe_start_time = xqc_now();
-        path->recovery_probe_pending = 1;
-
-        if (path->ev_socket == NULL || event_add(path->ev_socket, NULL) != 0) {
-            printf("[warn] recovery probe event_add failed for interface %s\n",
-                path->interface_name);
-            xqc_mini_cli_release_path_io(path, "recovery_probe_event_failed");
-            return XQC_ERROR;
-        }
-
-        printf("[diag_path_recovery_probe] action=start interface=%s fd=%d\n",
-            path->interface_name, path->fd);
-    }
-
-    xqc_mini_recovery_probe_t probe;
-    xqc_mini_recovery_probe_init(&probe, path->recovery_probe_nonce);
-    ssize_t sent = send(path->fd, &probe, sizeof(probe), 0);
-    if (sent == (ssize_t)sizeof(probe)) {
-        return XQC_OK;
-    }
-
-    int err = get_sys_errno();
-    if (sent < 0 && (err == EAGAIN
-        || err == EWOULDBLOCK
-        || err == ENETUNREACH
-        || err == EHOSTUNREACH))
-    {
-        return XQC_OK;
-    }
-
-    printf("[warn] recovery probe send failed for interface %s: %s\n",
-        path->interface_name, strerror(err));
-    xqc_mini_cli_release_path_io(path, "recovery_probe_send_failed");
-    return XQC_ERROR;
-}
-
-
-static int
-xqc_mini_cli_handle_recovery_probe_response(xqc_mini_cli_user_path_t *path,
-    int fd)
-{
-    if (path == NULL || !path->recovery_probe_pending) {
-        return 0;
-    }
-
-    int consumed = 0;
-    for (;;) {
-        xqc_mini_recovery_probe_t probe;
-        ssize_t recv_size = recv(fd, &probe, sizeof(probe), 0);
-        if (recv_size < 0) {
-            if (get_sys_errno() == EAGAIN || get_sys_errno() == EWOULDBLOCK) {
-                break;
-            }
-            printf("[warn] recovery probe recv failed for interface %s: %s\n",
-                path->interface_name, strerror(get_sys_errno()));
-            break;
-        }
-
-        consumed = 1;
-        if (!xqc_mini_recovery_probe_is_valid(&probe, (size_t)recv_size)
-            || probe.nonce != path->recovery_probe_nonce)
-        {
-            continue;
-        }
-
-        xqc_usec_t now = xqc_now();
-        xqc_usec_t elapsed = path->recovery_probe_start_time > 0
-            && now >= path->recovery_probe_start_time
-            ? now - path->recovery_probe_start_time : 0;
-
-        path->recovery_probe_pending = 0;
-        path->recovery_probe_nonce = 0;
-        path->recovery_probe_start_time = 0;
-        path->disabled_for_session = 0;
-        path->consecutive_write_failures = 0;
-        event_del(path->ev_socket);
-
-        /*
-         * Do not reuse the probe socket for QUIC. Other echo responses may
-         * still be in flight after the first confirmation; closing this fd
-         * keeps those non-QUIC datagrams out of the rebuilt path.
-         */
-        if (path->fd >= 0) {
-            close(path->fd);
-            path->fd = -1;
-        }
-        path->prepared = 0;
-
-        printf("[diag_path_recovery_probe] action=confirmed interface=%s"
-               " elapsed_us=%" PRIu64 "\n",
-            path->interface_name, (uint64_t)elapsed);
-        printf("[stats] interface %s is available again, path[%d] can be rebuilt\n",
-            path->interface_name, (int)(path - path->user_conn->paths));
-
-        /* The retry path will create and bind a fresh QUIC socket. */
-        xqc_mini_cli_schedule_path_retry(path->user_conn, 1);
-        return 1;
-    }
-
-    return consumed;
-}
-
-static void
-xqc_mini_cli_refresh_disabled_paths(xqc_mini_cli_user_conn_t *user_conn)
-{
-    if (user_conn == NULL || user_conn->ctx == NULL) {
-        return;
-    }
-
-    xqc_usec_t now = xqc_now();
-    int path_slot_count =
-        xqc_mini_cli_get_configured_path_slot_count(user_conn);
-    for (int i = 0; i < path_slot_count; i++) {
-        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
-        if (!path->disabled_for_session || path->interface_name[0] == '\0') {
-            continue;
-        }
-
-        if (path->last_recover_probe_time != 0
-            && now - path->last_recover_probe_time < XQC_MINI_PATH_RECOVER_PROBE_INTERVAL_USEC) {
-            continue;
-        }
-        path->last_recover_probe_time = now;
-
-        struct sockaddr_storage storage = {0};
-        socklen_t addrlen = 0;
-        int desired_family = path->peer_addr != NULL ? path->peer_addr->sa_family : AF_INET;
-        if (xqc_mini_cli_query_interface_addr(path->interface_name, desired_family,
-                &storage, &addrlen) != XQC_OK) {
-            if (path->recovery_probe_pending || path->prepared) {
-                xqc_mini_cli_release_path_io(path, "recovery_probe_interface_unavailable");
-            }
-            continue;
-        }
-
-        if (xqc_mini_cli_requires_recovery_probe(path->interface_name)) {
-            (void)xqc_mini_cli_send_recovery_probe(user_conn, path);
-            continue;
-        }
-
-        path->disabled_for_session = 0;
-        path->prepared = 0;
-        path->consecutive_write_failures = 0;
-        printf("[stats] interface %s is available again, path[%d] can be rebuilt\n",
-            path->interface_name, i);
-    }
-}
-
 void
 xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us)
 {
@@ -1238,7 +1059,7 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     settings->proto_version = XQC_VERSION_V1;
     settings->spurious_loss_detect_on = 1;
     settings->scheduler_callback = sched;
-    settings->scheduler_params.pto_cnt_thr = CLIENT_PATH_FAILOVER_PTO;
+    settings->scheduler_params.pto_cnt_thr = CLIENT_PATH_QUALITY_PTO_THRESHOLD;
     settings->scheduler_params.mp_diag_enabled = args->quic_cfg.mp_diag;
     settings->scheduler_params.mp_diag_interval_ms =
         args->quic_cfg.mp_diag_interval_ms;
@@ -1259,8 +1080,6 @@ xqc_mini_cli_init_conn_settings(xqc_conn_settings_t *settings, xqc_mini_cli_args
     printf("[diag_mp_config] enabled=%d interval_ms=%u scheduler=%s\n",
         args->quic_cfg.mp_diag, args->quic_cfg.mp_diag_interval_ms,
         args->quic_cfg.mp_sched);
-    printf("[diag_path_failover_config] role=client enabled=1 pto_threshold=%u\n",
-        settings->scheduler_params.pto_cnt_thr);
 }
 // 初始化 HTTP3 回调与上下文
 int
@@ -1840,7 +1659,36 @@ xqc_mini_cli_get_target_path_count(xqc_mini_cli_user_conn_t *user_conn)
     }
     return target;
 }
-// 查找一个未激活的路径槽位
+
+int
+xqc_mini_cli_has_pending_path(xqc_mini_cli_user_conn_t *user_conn)
+{
+    if (!user_conn->ctx->args->quic_cfg.multipath) {
+        return 0;
+    }
+
+    int configured = xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    for (int i = 0; i < configured; i++) {
+        const xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (!path->disabled_for_session && !path->is_active) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int
+xqc_mini_cli_get_required_get_path_count(xqc_mini_cli_user_conn_t *user_conn)
+{
+    const xqc_mini_cli_args_t *args = user_conn->ctx->args;
+    if (args->defer_transfer_setup && args->quic_cfg.multipath
+        && args->net_cfg.multi_interface_cnt > 1)
+    {
+        return xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    }
+    return 0;
+}
+
 int
 xqc_mini_cli_get_ready_path_count(xqc_mini_cli_user_conn_t *user_conn)
 {
@@ -1853,15 +1701,24 @@ xqc_mini_cli_get_ready_path_count(xqc_mini_cli_user_conn_t *user_conn)
     xqc_conn_stats_t stats = xqc_conn_get_stats(user_conn->ctx->engine,
                                                  &user_conn->cid);
     int ready = 0;
-
-    for (size_t i = 0; i < XQC_MAX_PATHS_COUNT; i++) {
-        if (stats.paths_info[i].path_id == UINT64_MAX) {
+    int configured = xqc_mini_cli_get_configured_path_slot_count(user_conn);
+    for (int i = 0; i < configured; i++) {
+        const xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (!path->is_active || path->disabled_for_session || path->fd < 0
+            || path->path_id == XQC_MINI_PATH_ID_INVALID)
+        {
             continue;
         }
-        if (stats.paths_info[i].path_state == XQC_MINI_TRANSPORT_PATH_STATE_ACTIVE
-            && stats.paths_info[i].path_app_status == XQC_APP_PATH_STATUS_AVAILABLE)
-        {
-            ready++;
+
+        for (size_t j = 0; j < XQC_MAX_PATHS_COUNT; j++) {
+            const xqc_path_metrics_t *metrics = &stats.paths_info[j];
+            if (metrics->path_id == path->path_id
+                && metrics->path_state == XQC_MINI_TRANSPORT_PATH_STATE_ACTIVE
+                && metrics->path_app_status == XQC_APP_PATH_STATUS_AVAILABLE)
+            {
+                ready++;
+                break;
+            }
         }
     }
 
@@ -1875,6 +1732,11 @@ xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn)
         return 0;
     }
 
+    int required = xqc_mini_cli_get_required_get_path_count(user_conn);
+    if (required > 0) {
+        return xqc_mini_cli_get_ready_path_count(user_conn) >= required;
+    }
+
     int target = xqc_mini_cli_get_target_path_count(user_conn);
     if (!user_conn->ctx->args->quic_cfg.multipath || target <= 1) {
         return 1;
@@ -1884,15 +1746,17 @@ xqc_mini_cli_paths_ready_for_requests(xqc_mini_cli_user_conn_t *user_conn)
 }
 
 static xqc_mini_cli_user_path_t *
-xqc_mini_cli_find_inactive_path(xqc_mini_cli_user_conn_t *user_conn)
+xqc_mini_cli_prepare_next_path(xqc_mini_cli_user_conn_t *user_conn)
 {
     int path_slot_count =
         xqc_mini_cli_get_configured_path_slot_count(user_conn);
     for (int i = 0; i < path_slot_count; i++) {
-        if (!user_conn->paths[i].is_active
-            && !user_conn->paths[i].disabled_for_session
-            && !user_conn->paths[i].rx_release_pending) {
-            return &user_conn->paths[i];
+        xqc_mini_cli_user_path_t *path = &user_conn->paths[i];
+        if (!path->is_active && !path->disabled_for_session
+            && !path->rx_release_pending
+            && xqc_mini_cli_prepare_user_path(user_conn, path) == XQC_OK)
+        {
+            return path;
         }
     }
 
@@ -1971,9 +1835,6 @@ xqc_mini_cli_release_path_io_now(xqc_mini_cli_user_path_t *path, const char *rea
     path->path_id = XQC_MINI_PATH_ID_INVALID;
     path->rx_release_pending = 0;
     path->consecutive_write_failures = 0;
-    path->recovery_probe_pending = 0;
-    path->recovery_probe_nonce = 0;
-    path->recovery_probe_start_time = 0;
 
     if (had_io) {
         printf("[diag_rx_path_state] action=release idx=%d id=%" PRIu64
@@ -2047,9 +1908,7 @@ xqc_mini_cli_prepare_user_path(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli
 
     if (xqc_mini_cli_set_local_addr(path) != XQC_OK) {
         if (path->interface_name[0] != '\0') {
-            path->disabled_for_session = 1;
-            printf("[warn] path[%d] interface %s unavailable, disable it for this session\n",
-                path_index, path->interface_name);
+            /* An interface without an address can still be bound on a later retry. */
             return XQC_ERROR;
         }
         printf("[warn] set local address for path[%d] failed, fallback to wildcard\n", path_index);
@@ -2294,6 +2153,7 @@ xqc_mini_cli_handle_rx_error(xqc_mini_cli_user_path_t *path, int err)
            path->interface_name[0] != '\0' ? path->interface_name : "(default)",
            err);
 
+    path->disabled_for_session = 1;
     xqc_int_t close_ret = XQC_ERROR;
     if (path_id != XQC_MINI_PATH_ID_INVALID
         && user_conn->ctx != NULL && user_conn->ctx->engine != NULL)
@@ -2870,10 +2730,8 @@ xqc_mini_cli_socket_event_callback(int fd, short what, void *arg)
     if (what & EV_READ) {
         handled = 1;
         xqc_mini_cli_diag_inc_u64(&user_path->user_conn->diag_stats.socket_ev_read_count);
-        if (!xqc_mini_cli_handle_recovery_probe_response(user_path, fd)) {
-            user_path->rx_diag.event_count++;
-            xqc_mini_cli_socket_read_handler(user_path, fd);
-        }
+        user_path->rx_diag.event_count++;
+        xqc_mini_cli_socket_read_handler(user_path, fd);
     }
     if (!handled) {
         printf("[diag_rx_path_state] action=unexpected_event fd=%d what=%d\n",
@@ -3200,9 +3058,8 @@ xqc_mini_cli_create_new_path(xqc_mini_cli_user_conn_t *user_conn)
         return XQC_ERROR;
     }
 
-    xqc_mini_cli_user_path_t *path = xqc_mini_cli_find_inactive_path(user_conn);
+    xqc_mini_cli_user_path_t *path = xqc_mini_cli_prepare_next_path(user_conn);
     if (path == NULL) {
-        printf("[warn] no inactive path slot available for new path\n");
         return XQC_ERROR;
     }
 
@@ -3218,15 +3075,6 @@ xqc_mini_cli_create_new_path(xqc_mini_cli_user_conn_t *user_conn)
         }
         return ret;
     }
-    if (!path->prepared) {
-        ret = xqc_mini_cli_prepare_user_path(user_conn, path);
-        if (ret != XQC_OK) {
-            printf("[error] prepare new path socket failed, ret:%d\n", ret);
-            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, new_path_id);
-            return ret;
-        }
-    }
-
     ret = xqc_mini_cli_init_user_path(user_conn, path, new_path_id);
     if (ret != XQC_OK) {
         printf("[error] init new path failed, ret:%d\n", ret);
@@ -3264,13 +3112,17 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
             if (user_conn->active_path_cnt > 0 && path->is_active) {
                 user_conn->active_path_cnt--;
             }
+            path->disabled_for_session = 1;
             if (path->interface_name[0] != '\0') {
-                path->disabled_for_session = 1;
-                path->last_recover_probe_time = 0;
-                printf("[warn] temporarily disable interface %s until it is available again\n",
+                printf("[warn] disable interface %s for the rest of this connection\n",
                     path->interface_name);
             }
             xqc_mini_cli_release_path_io(path, "path_removed");
+            if (user_conn->transfer_active && user_conn->active_path_cnt == 0
+                && !xqc_mini_cli_has_pending_path(user_conn))
+            {
+                xqc_mini_cli_set_transfer_error(user_conn, ENETUNREACH);
+            }
             printf("[stats] path removed, path_id=%"PRIu64"\n", path_id);
             xqc_mini_cli_dump_path_bindings(user_conn);
             xqc_engine_main_logic(user_conn->ctx->engine);
@@ -3280,7 +3132,7 @@ xqc_mini_cli_path_removed(const xqc_cid_t *cid, uint64_t path_id, void *conn_use
 }
 
 void
-xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
+xqc_mini_cli_try_create_paths(xqc_mini_cli_user_conn_t *user_conn)
 {
     if (user_conn == NULL || user_conn->ctx == NULL) {
         return;
@@ -3290,11 +3142,7 @@ xqc_mini_cli_try_rebuild_paths(xqc_mini_cli_user_conn_t *user_conn)
         return;
     }
 
-    xqc_mini_cli_refresh_disabled_paths(user_conn);
-
     int target_cnt = xqc_mini_cli_get_target_path_count(user_conn);
-    // printf("[stats] try to rebuild paths, current cnt: %d, target cnt: %d\n",
-    //     user_conn->active_path_cnt, target_cnt);
     while (user_conn->active_path_cnt < target_cnt) {
         int ret = xqc_mini_cli_create_new_path(user_conn);
         if (ret != XQC_OK) {
@@ -3567,10 +3415,6 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         user_conn->paths[i].rx_batch = NULL;
         user_conn->paths[i].rx_release_pending = 0;
         user_conn->paths[i].disabled_for_session = 0;
-        user_conn->paths[i].last_recover_probe_time = 0;
-        user_conn->paths[i].recovery_probe_pending = 0;
-        user_conn->paths[i].recovery_probe_nonce = 0;
-        user_conn->paths[i].recovery_probe_start_time = 0;
     }
 
     printf("[resolved-rx] mode=%s single_per_path=%d dual_per_path=%d"
@@ -3689,7 +3533,8 @@ xqc_mini_cli_user_conn_create(xqc_mini_cli_ctx_t *ctx)
         ret = xqc_mini_cli_prepare_user_path(user_conn, path);
         //ret = xqc_mini_cli_init_user_path(user_conn, path, i);
         if (ret != XQC_OK) {
-            printf("[warn] pre-bind for path[%d] failed, ret:%d\n", i, ret);
+            printf("[warn] pre-bind for path[%d] interface=%s failed, ret:%d\n",
+                i, path->interface_name, ret);
         }
     }
 

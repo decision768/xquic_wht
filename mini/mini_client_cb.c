@@ -225,7 +225,7 @@ xqc_mini_cli_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
         return;
     }
 
-    xqc_mini_cli_try_rebuild_paths(user_conn);
+    xqc_mini_cli_try_create_paths(user_conn);
     user_conn->handshake_finished = 1;
     user_conn->path_wait_rounds_after_handshake = 0;
     printf("[stats] active paths after handshake: %d\n", user_conn->active_path_cnt);
@@ -924,7 +924,13 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
     }
 
     if (user_path == NULL || !user_path->is_active || user_path->fd < 0) {
-        xqc_mini_cli_try_rebuild_paths(user_conn);
+        if (!xqc_mini_cli_has_pending_path(user_conn)) {
+            if (user_conn->transfer_active) {
+                xqc_mini_cli_set_transfer_error(user_conn, ENETUNREACH);
+            }
+            return XQC_SOCKET_ERROR;
+        }
+        xqc_mini_cli_try_create_paths(user_conn);
         xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
         return XQC_SOCKET_EAGAIN;
     }
@@ -960,8 +966,9 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
         user_conn->ctx->args->net_cfg.last_socket_time = xqc_now();
     }
     else if (res != XQC_SOCKET_EAGAIN) {
+        int send_error = get_sys_errno();
         printf("[error] xqc_mini_cli_write_socket_ex failed, path_id=%"PRIu64", err=%s\n",
-            user_path->path_id, strerror(get_sys_errno()));
+            user_path->path_id, strerror(send_error));
         user_path->consecutive_write_failures++;
         if (user_path->consecutive_write_failures >= max_write_failures
             && user_path->path_id != XQC_MINI_PATH_ID_INVALID)
@@ -971,13 +978,28 @@ xqc_mini_cli_write_socket_ex(uint64_t path_id, const unsigned char *buf, size_t 
                 dead_path_id);
             user_path->is_active = 0;
             user_path->consecutive_write_failures = 0;
+            user_path->disabled_for_session = 1;
             xqc_mini_cli_release_path_io(user_path, "write_failure_threshold");
 
             if (user_conn->active_path_cnt > 0) {
                 user_conn->active_path_cnt--;
             }
-            xqc_conn_close_path(user_conn->ctx->engine, &user_conn->cid, dead_path_id);
-            xqc_mini_cli_try_rebuild_paths(user_conn);
+            if (user_conn->active_path_cnt == 0
+                && !xqc_mini_cli_has_pending_path(user_conn))
+            {
+                if (user_conn->transfer_active) {
+                    xqc_mini_cli_set_transfer_error(user_conn, send_error);
+                }
+                return XQC_SOCKET_ERROR;
+            }
+
+            xqc_int_t close_ret = xqc_conn_close_path(user_conn->ctx->engine,
+                &user_conn->cid, dead_path_id);
+            if (close_ret != XQC_OK) {
+                printf("[warn] closing path_id=%"PRIu64" failed, ret=%d\n",
+                    dead_path_id, close_ret);
+            }
+            xqc_mini_cli_try_create_paths(user_conn);
             xqc_mini_cli_schedule_path_retry(user_conn, XQC_MINI_PATH_RETRY_FAST_INTERVAL_USEC);
 
             xqc_engine_main_logic(user_conn->ctx->engine);
@@ -1195,9 +1217,10 @@ void
 xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 {
     xqc_mini_cli_user_conn_t *user_conn = (xqc_mini_cli_user_conn_t *)arg;
-    struct timeval tv;
 
-    if (user_conn == NULL || user_conn->ctx == NULL) {
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->connection_closed || user_conn->transfer_error_code != 0)
+    {
         return;
     }
     if (!user_conn->handshake_finished) {
@@ -1206,7 +1229,7 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
     }
 
 
-    xqc_mini_cli_try_rebuild_paths(user_conn);
+    xqc_mini_cli_try_create_paths(user_conn);
 
     xqc_usec_t now = xqc_now();
     if (user_conn->handshake_finished
@@ -1226,36 +1249,42 @@ xqc_mini_cli_path_retry_callback(int fd, short what, void *arg)
 
 
 
-    if (user_conn->auto_start_requests && user_conn->handshake_finished
-        && !user_conn->requests_launched)
+    if (user_conn->auto_start_requests && !user_conn->requests_launched
+        && user_conn->transfer_error_code == 0)
     {
-        int should_wait = user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET
-            && !xqc_mini_cli_paths_ready_for_requests(user_conn)
-            && user_conn->path_wait_rounds_after_handshake
-                < XQC_MINI_PATH_WAIT_MAX_ROUNDS;
-
-        if (should_wait) {
-            user_conn->path_wait_rounds_after_handshake++;
-            if (user_conn->path_wait_rounds_after_handshake
-                < XQC_MINI_PATH_WAIT_MAX_ROUNDS)
-            {
-                printf("[diag_path_gate] waiting ready=%d target=%d round=%d/%d\n",
-                    xqc_mini_cli_get_ready_path_count(user_conn),
-                    xqc_mini_cli_get_target_path_count(user_conn),
-                    user_conn->path_wait_rounds_after_handshake,
-                    XQC_MINI_PATH_WAIT_MAX_ROUNDS);
-                xqc_mini_cli_schedule_path_retry(user_conn,
-                    XQC_MINI_PATH_RETRY_INTERVAL_USEC);
-                return;
-            }
-        }
-
         if (user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET) {
+            int required = xqc_mini_cli_get_required_get_path_count(user_conn);
+            int target = required > 0
+                ? required : xqc_mini_cli_get_target_path_count(user_conn);
+            int ready = xqc_mini_cli_get_ready_path_count(user_conn);
+            int paths_ready = xqc_mini_cli_paths_ready_for_requests(user_conn);
+            if (!paths_ready) {
+                if (user_conn->path_wait_rounds_after_handshake
+                    < XQC_MINI_PATH_WAIT_MAX_ROUNDS)
+                {
+                    user_conn->path_wait_rounds_after_handshake++;
+                }
+                if (user_conn->path_wait_rounds_after_handshake
+                    < XQC_MINI_PATH_WAIT_MAX_ROUNDS)
+                {
+                    printf("[diag_path_gate] waiting ready=%d target=%d round=%d/%d\n",
+                        ready, target, user_conn->path_wait_rounds_after_handshake,
+                        XQC_MINI_PATH_WAIT_MAX_ROUNDS);
+                    xqc_mini_cli_schedule_path_retry(user_conn,
+                        XQC_MINI_PATH_RETRY_INTERVAL_USEC);
+                    return;
+                }
+                if (required > 0) {
+                    printf("[diag_path_gate] failed ready=%d target=%d waited_rounds=%d"
+                           " reason=aggregate_paths_not_ready\n",
+                        ready, target, user_conn->path_wait_rounds_after_handshake);
+                    xqc_mini_cli_set_transfer_error(user_conn, ENETUNREACH);
+                    return;
+                }
+            }
+
             printf("[diag_path_gate] launch ready=%d target=%d waited_rounds=%d fallback=%d\n",
-                xqc_mini_cli_get_ready_path_count(user_conn),
-                xqc_mini_cli_get_target_path_count(user_conn),
-                user_conn->path_wait_rounds_after_handshake,
-                xqc_mini_cli_paths_ready_for_requests(user_conn) ? 0 : 1);
+                ready, target, user_conn->path_wait_rounds_after_handshake, !paths_ready);
         }
         if (xqc_mini_cli_launch_requests(user_conn) != XQC_OK) {
             printf("[error] launch requests in path retry callback failed\n");
