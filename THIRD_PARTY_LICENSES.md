@@ -2,9 +2,9 @@
 
 ## Peekaboo public source artifact
 
-`src/transport/scheduler/xqc_scheduler_peekaboo.c` adapts the deployment-stage
-scheduling logic and model parameters from the public Peekaboo artifact built
-on quic-go.
+The Peekaboo, BLEST and ECF implementations in `src/transport/scheduler/`
+adapt scheduling logic and the Peekaboo model parameters from the public
+Peekaboo artifact built on quic-go.
 
 Copyright (c) 2016 the quic-go authors & Google, Inc.
 

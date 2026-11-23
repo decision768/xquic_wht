@@ -13,6 +13,8 @@
 #include <netdb.h>
 #include <string.h>
 #include "src/common/xqc_id_hash.h"
+#include "src/transport/scheduler/xqc_scheduler_blest.h"
+#include "src/transport/scheduler/xqc_scheduler_ecf.h"
 #include "src/transport/scheduler/xqc_scheduler_minrtt.h"
 #include "src/transport/scheduler/xqc_scheduler_peekaboo.h"
 
@@ -519,6 +521,10 @@ xqc_observer_sample(xqc_engine_t *engine, const xqc_cid_t *cid, const char *kind
                 name = "minrtt";
             } else if (callback->xqc_scheduler_get_path == xqc_peekaboo_scheduler_cb.xqc_scheduler_get_path) {
                 name = "peekaboo";
+            } else if (callback->xqc_scheduler_get_path == xqc_blest_scheduler_cb.xqc_scheduler_get_path) {
+                name = "blest";
+            } else if (callback->xqc_scheduler_get_path == xqc_ecf_scheduler_cb.xqc_scheduler_get_path) {
+                name = "ecf";
             }
         }
         snprintf(scheduler, sizeof(conn->observer->scheduler_record), "\"scheduler_name\":\"%s\",\"primary_valid\":false,"

@@ -43,7 +43,7 @@ usage(const char *program)
         "  --server-name NAME      TLS SNI name\n"
         "  --scheduler NAME        POST scheduler: default|minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
-        "                          fastprobe20|fastonly|adaptive|peekaboo;\n"
+        "                          fastprobe20|fastonly|adaptive|peekaboo|blest|ecf;\n"
         "                          default balanced;\n"
         "                          GET uses adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
@@ -93,6 +93,8 @@ parse_scheduler(const char *name, int *out)
         {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
         {"peekaboo", NETINS_UDP_SCHEDULER_PEEKABOO},
+        {"blest", NETINS_UDP_SCHEDULER_BLEST},
+        {"ecf", NETINS_UDP_SCHEDULER_ECF},
     };
     size_t i;
 

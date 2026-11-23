@@ -3,6 +3,7 @@
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_conn.h"
 #include "src/transport/xqc_send_ctl.h"
+#include "src/transport/xqc_stream.h"
 #include "src/common/xqc_time.h"
 
 #include <inttypes.h>
@@ -32,6 +33,18 @@ xqc_scheduler_classify_cwnd_block(uint64_t effective_cwnd,
     return XQC_SCHED_BLOCK_NONE;
 }
 
+uint64_t
+xqc_scheduler_get_cwnd(const xqc_path_ctx_t *path)
+{
+    const xqc_send_ctl_t *ctl = path ? path->path_send_ctl : NULL;
+    if (ctl && ctl->ctl_cong_callback
+        && ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd)
+    {
+        return ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(ctl->ctl_cong);
+    }
+    return 0;
+}
+
 xqc_bool_t
 xqc_scheduler_evaluate_path(xqc_path_ctx_t *path,
     xqc_packet_out_t *packet_out, int check_cwnd,
@@ -40,12 +53,7 @@ xqc_scheduler_evaluate_path(xqc_path_ctx_t *path,
     xqc_sched_path_eval_t local;
     memset(&local, 0, sizeof(local));
     xqc_send_ctl_t *ctl = path ? path->path_send_ctl : NULL;
-    if (ctl && ctl->ctl_cong_callback
-        && ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd)
-    {
-        local.raw_cwnd = ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(
-            ctl->ctl_cong);
-    }
+    local.raw_cwnd = xqc_scheduler_get_cwnd(path);
     local.effective_cwnd = xqc_send_ctl_calc_effective_cwnd(local.raw_cwnd,
         ctl && ctl->ctl_conn && ctl->ctl_conn->conn_settings.so_sndbuf > 0
             ? (uint64_t)ctl->ctl_conn->conn_settings.so_sndbuf : 0);
@@ -80,6 +88,92 @@ xqc_scheduler_evaluate_path(xqc_path_ctx_t *path,
         *evaluation = local;
     }
     return local.can_send;
+}
+
+xqc_bool_t
+xqc_scheduler_path_eligible(const xqc_path_ctx_t *path,
+    const xqc_packet_out_t *packet_out, int reinject)
+{
+    return path->path_state == XQC_PATH_STATE_ACTIVE
+           && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
+           && !(reinject && packet_out->po_path_id == path->path_id);
+}
+
+uint64_t
+xqc_scheduler_get_send_window(xqc_connection_t *conn,
+    const xqc_packet_out_t *packet_out)
+{
+    const xqc_conn_flow_ctl_t *flow = &conn->conn_flow_ctl;
+    uint64_t conn_window = flow->fc_max_data_can_send > flow->fc_data_sent
+        ? flow->fc_max_data_can_send - flow->fc_data_sent : 0;
+
+    for (size_t i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
+        const xqc_po_stream_frame_t *frame = &packet_out->po_stream_frames[i];
+        if (!frame->ps_is_used) {
+            break;
+        }
+
+        const xqc_stream_t *stream = xqc_find_stream_by_id(
+            frame->ps_stream_id, conn->streams_hash);
+        if (stream == NULL) {
+            continue;
+        }
+
+        uint64_t stream_limit = stream->stream_flow_ctl.fc_max_stream_data_can_send;
+        uint64_t stream_window = stream_limit > stream->stream_send_offset
+            ? stream_limit - stream->stream_send_offset : 0;
+        return xqc_min(conn_window, stream_window);
+    }
+
+    return conn_window;
+}
+
+xqc_bool_t
+xqc_scheduler_select_path_pair(xqc_connection_t *conn,
+    xqc_packet_out_t *packet_out, int check_cwnd, int reinject,
+    xqc_path_ctx_t **fast_path, xqc_path_ctx_t **slow_path)
+{
+    xqc_list_head_t *pos;
+    uint64_t fast_rtt = 0;
+    uint64_t slow_rtt = 0;
+    *fast_path = NULL;
+    *slow_path = NULL;
+
+    xqc_list_for_each(pos, &conn->conn_paths_list) {
+        xqc_path_ctx_t *path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (!xqc_scheduler_path_eligible(path, packet_out, reinject)) {
+            continue;
+        }
+
+        uint64_t rtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
+        if (*fast_path == NULL || rtt < fast_rtt) {
+            *fast_path = path;
+            fast_rtt = rtt;
+        }
+    }
+
+    if (*fast_path == NULL) {
+        return XQC_FALSE;
+    }
+    if (xqc_scheduler_check_path_can_send(*fast_path, packet_out, check_cwnd)) {
+        return XQC_TRUE;
+    }
+
+    xqc_list_for_each(pos, &conn->conn_paths_list) {
+        xqc_path_ctx_t *path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        if (path == *fast_path || !xqc_scheduler_path_eligible(path, packet_out, reinject)) {
+            continue;
+        }
+
+        uint64_t rtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
+        if ((*slow_path == NULL || rtt < slow_rtt)
+            && xqc_scheduler_check_path_can_send(path, packet_out, check_cwnd))
+        {
+            *slow_path = path;
+            slow_rtt = rtt;
+        }
+    }
+    return XQC_FALSE;
 }
 
 static xqc_sched_diag_path_t *

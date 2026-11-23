@@ -22,10 +22,10 @@ Active GX-style outputs (each algorithm has its own directory):
     aggregation_summary_get_<session>.csv
     aggregation_summary_post_<session>.csv
 
-Warmup logs live under <scheduler>/warmup/ and are excluded from summaries.
-算法按完整周期轮流执行：adaptive 一轮 → minrtt 一轮 → adaptive 下一轮。
-每轮仍按原配置执行 GET/POST 和三种链路，算法分别保存结果。
-GET 轮换云端发送算法，板卡接收端固定 adaptive；POST 轮换板卡发送算法，
+Single-link baselines are recorded under single_link/. Warmup logs are excluded from summaries.
+每轮每个方向测两次 minrtt 单链路和每种算法各一次双卡聚合。
+默认把聚合放在两次单链路之间，并在各轮轮换聚合算法和首尾网卡。
+GET 轮换云端发送算法，板卡接收端固定 adaptive。POST 轮换板卡发送算法，
 云端接收端固定 adaptive。服务端需要先部署支持 --scheduler 的配套版本。
 仅在所需服务端算法变化时重启，核对启动输出中的实际算法后才开始传输。
 The controller persists each client's stdout/stderr separately for audit.
@@ -71,7 +71,7 @@ LOG = logging.getLogger("mini_api_get_post_benchmark")
 # 用户常用配置区
 # =============================================================================
 # 直接在这里修改即可。命令行参数仍然有效，并且会覆盖这里的默认值。
-# 例如：python 副本改进版.py --iterations 10
+# 例如：python 压测_100MB_FCT.py --iterations 10
 
 # 主板和云服务器地址
 DEFAULT_BOARD_SSH_HOST = "192.168.11.1"
@@ -90,11 +90,11 @@ DEFAULT_COMMAND_TIMEOUT_S = 690.0
 
 
 # 多算法实验配置：直接修改这里，然后在编辑器里运行本文件，无须命令行参数。
-# 留空 ()：兼容原脚本，GET/POST分别使用DEFAULT_GET/POST_SCHEDULER。
-# 可选算法见SUPPORTED_SCHEDULERS；算法名称不得重复。
-DEFAULT_SCHEDULERS = ("adaptive", "minrtt")
-DEFAULT_EXECUTION_MODE = "round-robin"  # round-robin=周期轮换；sequential=整批执行
-DEFAULT_SEQUENCE = "fixed"  # 固定按算法列表轮流执行：A→B→A→B
+# 这里设置聚合算法。留空 () 时聚合使用 DEFAULT_GET/POST_SCHEDULER。
+# 单链路发送算法统一使用 minrtt。
+DEFAULT_SCHEDULERS = ("adaptive", "minrtt", "balanced", "blest", "ecf")
+DEFAULT_EXECUTION_MODE = "round-robin"
+DEFAULT_SEQUENCE = "balanced"  # 多轮轮换聚合位置和首尾网卡，fixed 保持固定顺序。
 DEFAULT_DRY_RUN = False  # True=只保存计划，不连接SSH；False=实际测试
 DEFAULT_WARMUP_CYCLES = 0  # 每个算法的预热周期数；预热数据不进入正式汇总
 DEFAULT_ALGORITHM_COOLDOWN_S = 2.0  # 算法周期之间的额外冷却时间
@@ -133,7 +133,7 @@ DEFAULT_SERVER_RESOURCE_RETENTION_DAYS = 0
 DEFAULT_OUTPUT_ROOT = ""  # 留空：本文件同目录下的log/<月日_时分秒_算法名称组合>/
 
 # 压测参数
-DEFAULT_ITERATIONS = 500  # 每个算法各跑多少个正式完整周期；正式对比建议覆盖均衡周期
+DEFAULT_ITERATIONS = 500  # 正式轮数，每轮每个方向只测一对单链路基线。
 DEFAULT_RUN_GET = 1
 DEFAULT_RUN_POST = 0
 DEFAULT_GET_SCHEDULER = "adaptive"
@@ -163,6 +163,10 @@ MODE_INTERFACES = {
     "usb": ("usb0",),
     "agg": ("rmnet_data0", "usb0"),
 }
+
+SINGLE_LINK_PROFILE = "single_link"
+SINGLE_LINK_SCHEDULER = "minrtt"
+
 TRANSFER_RECORD_RE = re.compile(r"transfer\s+iteration=", re.IGNORECASE)
 TRANSFER_FIELD_RE = re.compile(
     r"\b(?P<key>direction|bytes|fragments|elapsed_us|throughput_mbps|metric)="
@@ -1726,8 +1730,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     scheduler_group = parser.add_mutually_exclusive_group()
     scheduler_group.add_argument("--scheduler", default=None)
     scheduler_group.add_argument("--schedulers", type=validate_schedulers, default=None)
-    parser.add_argument("--execution-mode", choices=("round-robin", "sequential"), default=DEFAULT_EXECUTION_MODE)
-    parser.add_argument("--sequence", choices=("balanced", "fixed"), default=DEFAULT_SEQUENCE)
+    parser.add_argument("--execution-mode", choices=("round-robin", "sequential"),
+                        default=DEFAULT_EXECUTION_MODE,
+                        help="多个聚合算法按轮执行，共用同一轮的单链路基线")
+    parser.add_argument("--sequence", choices=("balanced", "fixed"), default=DEFAULT_SEQUENCE,
+                        help="balanced 轮换聚合算法位置和首尾网卡，fixed 保持配置顺序")
     parser.add_argument("--dry-run", action="store_true", default=DEFAULT_DRY_RUN)
     parser.add_argument("--warmup-cycles", type=int, default=DEFAULT_WARMUP_CYCLES)
     parser.add_argument("--algorithm-cooldown-s", type=float, default=DEFAULT_ALGORITHM_COOLDOWN_S)
@@ -1755,6 +1762,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--order",
         type=validate_order,
         default=validate_order(DEFAULT_MODE_ORDER),
+        help="每轮模式的位置，rmnet 和 usb 各测一次，agg 展开为全部所选聚合算法",
     )
     parser.add_argument(
         "--retries",
@@ -1854,6 +1862,8 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         parser.error("DEFAULT_EXECUTION_MODE配置无效")
     if args.sequence not in ("balanced", "fixed"):
         parser.error("DEFAULT_SEQUENCE配置无效")
+    if args.execution_mode == "sequential" and len(args.schedulers) > 1:
+        parser.error("多个聚合算法共用每轮单链路基线时，请使用 --execution-mode round-robin")
     if args.warmup_cycles < 0:
         parser.error("预热周期数不能小于0")
     if not math.isfinite(args.algorithm_cooldown_s) or args.algorithm_cooldown_s < 0:
@@ -2861,9 +2871,9 @@ def write_gx_final_summary(
     log_root: Path,
     session: str,
     records: Sequence[Dict[str, object]],
-    planned_iterations: int,
-    directions: Sequence[str] = ("get", "post"),
+    planned_cases: Sequence[TestCase],
 ) -> Path:
+    planned_counts = Counter((case.direction, case.mode) for case in planned_cases)
     fieldnames = [
         "mode", "direction", "planned", "successful", "first_attempt_successes", "first_attempt_success_rate", "retried_successes",
         "failed", "unfinished", "success_rate", "median_mbps", "stdev_mbps", "average_filesize", "average_time_ms",
@@ -2889,8 +2899,11 @@ def write_gx_final_summary(
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        for direction in (item for item in ("post", "get") if item in directions):
+        for direction in ("post", "get"):
             for internal_mode in ("agg", "usb", "rmnet"):
+                planned_iterations = planned_counts[(direction, internal_mode)]
+                if not planned_iterations:
+                    continue
                 mode_records = [
                     record
                     for record in records
@@ -3044,6 +3057,7 @@ def write_aggregation_summary(
 SUPPORTED_SCHEDULERS = (
     "default", "minrtt", "backup", "balanced", "rap", "act", "bandwidth",
     "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive", "peekaboo",
+    "blest", "ecf",
 )
 SUPPORTED_CC = ("default", "cubic", "bbr")
 
@@ -3092,32 +3106,30 @@ def build_test_plan(args) -> List[TestCase]:
     profiles = list(args.schedulers) if args.schedulers else ["legacy"]
     plan: List[TestCase] = []
     for phase, cycles in (("warmup", args.warmup_cycles), ("measured", args.iterations)):
-        blocks = []
-        if args.execution_mode == "sequential":
-            blocks = [(p, r) for p in profiles for r in range(1, cycles + 1)]
-        else:
-            for r in range(1, cycles + 1):
-                order = balanced_algorithm_order(profiles, r) if args.sequence == "balanced" else profiles
-                blocks.extend((p, r) for p in order)
-        for profile, cycle in blocks:
-            reverse = args.sequence == "balanced" and cycle % 2 == 0
+        for cycle in range(1, cycles + 1):
+            rotate = args.sequence == "balanced"
+            reverse = rotate and cycle % 2 == 0
             direction_order = tuple(reversed(directions)) if reverse else directions
             mode_order = list(reversed(args.order)) if reverse else args.order
-            block_id = f"{phase}_{profile}_r{cycle:04d}"
+            aggregate_order = balanced_algorithm_order(profiles, cycle) if rotate else profiles
             for direction in direction_order:
-                scheduler, cc = transfer_algorithms_for_direction(args, direction)
+                default_scheduler, cc = transfer_algorithms_for_direction(args, direction)
                 if args.schedulers:
-                    scheduler, cc = profile, args.cc or DEFAULT_CC
-                client_scheduler = "adaptive" if direction == "get" else scheduler
-                client_cc = cc
-                server_scheduler = scheduler if direction == "get" else "adaptive"
-                server_cc = "unchanged"  # 不增加或改变服务端拥塞控制参数。
+                    cc = args.cc or DEFAULT_CC
                 for mode in mode_order:
-                    plan.append(TestCase(
-                        f"{block_id}_{direction}_{mode}", profile, phase, block_id,
-                        cycle, scheduler, cc, direction, mode,
-                        client_scheduler, client_cc, server_scheduler, server_cc,
-                    ))
+                    if mode == "agg":
+                        cases = [(p, p if args.schedulers else default_scheduler) for p in aggregate_order]
+                    else:
+                        cases = [(SINGLE_LINK_PROFILE, SINGLE_LINK_SCHEDULER)]
+                    for profile, scheduler in cases:
+                        block_id = f"{phase}_{profile}_r{cycle:04d}"
+                        client_scheduler = "adaptive" if direction == "get" else scheduler
+                        server_scheduler = scheduler if direction == "get" else "adaptive"
+                        plan.append(TestCase(
+                            f"{block_id}_{direction}_{mode}", profile, phase, block_id,
+                            cycle, scheduler, cc, direction, mode,
+                            client_scheduler, cc, server_scheduler, "unchanged",
+                        ))
     return plan
 
 
@@ -3134,13 +3146,13 @@ def append_json_record(path: Path, record: Dict[str, object]) -> None:
 
 def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCase]) -> None:
     # 白名单快照：不序列化argparse整个对象，避免输出密码和私钥路径。
-    profiles = list(dict.fromkeys(c.profile for c in plan))
+    profiles = list(dict.fromkeys(c.profile for c in plan if c.mode == "agg"))
     position_counts = {p: [0] * len(profiles) for p in profiles}
     if args.execution_mode == "round-robin":
         cycle_orders: Dict[int, List[str]] = {}
         seen_blocks = set()
         for case in plan:
-            if case.phase == "measured" and case.block_id not in seen_blocks:
+            if case.phase == "measured" and case.mode == "agg" and case.block_id not in seen_blocks:
                 seen_blocks.add(case.block_id)
                 cycle_orders.setdefault(case.round, []).append(case.profile)
         for order in cycle_orders.values():
@@ -3153,6 +3165,8 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "execution_mode": args.execution_mode, "sequence": args.sequence,
         "iterations_per_algorithm": args.iterations, "warmup_cycles": args.warmup_cycles,
         "direction": args.direction, "base_mode_order": args.order,
+        "single_link_scheduler": SINGLE_LINK_SCHEDULER,
+        "single_link_scope": "one sample per interface, direction and round, shared across aggregate profiles",
         "retries": args.retries, "cooldown_s": args.cooldown_s,
         "algorithm_cooldown_s": args.algorithm_cooldown_s,
         "verify_sha256": args.verify_sha256, "dry_run": args.dry_run,
@@ -3202,18 +3216,20 @@ def write_experiment_results(root, session, args, plan, records, started_cases):
                 row["status"] = "ABORTED" if case.case_id in started_cases else "NOT_RUN"
             writer.writerow(row)
     global_rows = []
+    shared_baselines = [r for r in records if r["profile"] == SINGLE_LINK_PROFILE and r["phase"] == "measured"]
     for profile in dict.fromkeys(c.profile for c in plan):
         profile_root = root / profile
         profile_root.mkdir(exist_ok=True)
+        planned = [c for c in plan if c.profile == profile and c.phase == "measured"]
         measured = [r for r in records if r["profile"] == profile and r["phase"] == "measured"]
-        directions = list(dict.fromkeys(c.direction for c in plan if c.profile == profile))
-        summary = write_gx_final_summary(profile_root, session, measured, args.iterations, directions)
-        for direction in directions:
-            write_aggregation_summary(profile_root, session, measured, args.iterations, direction)
+        summary = write_gx_final_summary(profile_root, session, measured, planned)
+        for direction in dict.fromkeys(c.direction for c in planned if c.mode == "agg"):
+            write_aggregation_summary(
+                profile_root, session, [*measured, *shared_baselines], args.iterations, direction)
         with summary.open(encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
-                matching = [c for c in plan if c.profile == profile and c.phase == "measured"
-                            and c.direction == row["direction"] and DISPLAY_MODE_NAMES[c.mode] == row["mode"]]
+                matching = [c for c in planned if c.direction == row["direction"]
+                            and DISPLAY_MODE_NAMES[c.mode] == row["mode"]]
                 sample = matching[0]
                 row.update(experiment_id=session, profile=profile, scheduler=sample.scheduler, cc=sample.cc)
                 row["aborted"] = sum(c.case_id in started_cases and c.case_id not in by_id for c in matching)
@@ -3233,7 +3249,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
     started_at = datetime.now()
     session = f"{started_at:%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}"
     plan = build_test_plan(args)
-    algorithm_names = "_".join(dict.fromkeys(case.scheduler for case in plan))
+    algorithm_names = "_".join(dict.fromkeys(case.scheduler for case in plan if case.mode == "agg"))
     dirname = f"{started_at:%m%d_%H%M%S}_{algorithm_names}"
     log_parent = Path(args.output_root).expanduser().resolve()
     log_parent.mkdir(parents=True, exist_ok=True)
@@ -3366,7 +3382,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 LOG.info("========== %s 周期 %s/%s 算法=%s ==========",
                          case.phase, round_index,
                          args.warmup_cycles if case.phase == "warmup" else args.iterations,
-                         case.profile)
+                         case.scheduler)
             if new_block and last_block is not None and args.algorithm_cooldown_s > 0:
                 time.sleep(args.algorithm_cooldown_s)
             if server_started and current_server_scheduler != case.server_scheduler:

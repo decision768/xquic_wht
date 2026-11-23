@@ -43,7 +43,7 @@ usage(const char *program)
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
         "  --max-connections N     Connections to serve (default 1)\n"
         "  --version               Print experiment version and exit\n"
-        "  --scheduler NAME        Sender scheduler, including peekaboo (default adaptive)\n"
+        "  --scheduler NAME        Sender scheduler, including peekaboo, blest and ecf (default adaptive)\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
         "  --zlog-category NAME    zlog category (default xquic_mini_api_server)\n",
@@ -86,6 +86,8 @@ parse_scheduler(const char *name, int *out)
         {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
         {"peekaboo", NETINS_UDP_SCHEDULER_PEEKABOO},
+        {"blest", NETINS_UDP_SCHEDULER_BLEST},
+        {"ecf", NETINS_UDP_SCHEDULER_ECF},
     };
     size_t i;
 

@@ -300,6 +300,10 @@ netins_udp_scheduler_name(int scheduler)
         return "fastonly";
     case NETINS_UDP_SCHEDULER_PEEKABOO:
         return "peekaboo";
+    case NETINS_UDP_SCHEDULER_BLEST:
+        return "blest";
+    case NETINS_UDP_SCHEDULER_ECF:
+        return "ecf";
     default:
         return NULL;
     }

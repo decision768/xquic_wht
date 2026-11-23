@@ -65,6 +65,15 @@ void xqc_scheduler_diag_maybe_tick(xqc_sched_diag_t *diag,
 void xqc_scheduler_diag_close(xqc_sched_diag_t *diag,
     xqc_connection_t *conn);
 
+uint64_t xqc_scheduler_get_cwnd(const xqc_path_ctx_t *path);
+uint64_t xqc_scheduler_get_send_window(xqc_connection_t *conn,
+    const xqc_packet_out_t *packet_out);
+xqc_bool_t xqc_scheduler_path_eligible(const xqc_path_ctx_t *path,
+    const xqc_packet_out_t *packet_out, int reinject);
+/* Return true when the lowest-RTT path can send. Otherwise also find a sendable alternate. */
+xqc_bool_t xqc_scheduler_select_path_pair(xqc_connection_t *conn,
+    xqc_packet_out_t *packet_out, int check_cwnd, int reinject,
+    xqc_path_ctx_t **fast_path, xqc_path_ctx_t **slow_path);
 xqc_bool_t xqc_scheduler_check_path_can_send(xqc_path_ctx_t *path, xqc_packet_out_t *packet_out, int check_cwnd);
 void xqc_scheduler_handle_path_probe(xqc_connection_t *conn);
 

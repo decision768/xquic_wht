@@ -103,7 +103,9 @@ typedef enum netins_udp_scheduler_e {
     NETINS_UDP_SCHEDULER_FASTPROBE10 = 10,
     NETINS_UDP_SCHEDULER_FASTPROBE20 = 11,
     NETINS_UDP_SCHEDULER_FASTONLY = 12,
-    NETINS_UDP_SCHEDULER_PEEKABOO = 13
+    NETINS_UDP_SCHEDULER_PEEKABOO = 13,
+    NETINS_UDP_SCHEDULER_BLEST = 14,
+    NETINS_UDP_SCHEDULER_ECF = 15
 } netins_udp_scheduler_t;
 
 typedef enum netins_udp_congestion_control_e {

@@ -1,5 +1,7 @@
 #include "mini_server.h"
 #include "mini_stream_backend.h"
+#include "src/transport/scheduler/xqc_scheduler_blest.h"
+#include "src/transport/scheduler/xqc_scheduler_ecf.h"
 #include "src/transport/scheduler/xqc_scheduler_peekaboo.h"
 #include <stdint.h>
 #include <strings.h>
@@ -548,7 +550,9 @@ xqc_mini_svr_resolve_sched_name(xqc_mini_svr_args_t *args)
         || strcmp(requested, "fastprobe20") == 0
         || strcmp(requested, "fastonly") == 0
         || strcmp(requested, "adaptive") == 0
-        || strcmp(requested, "peekaboo") == 0) {
+        || strcmp(requested, "peekaboo") == 0
+        || strcmp(requested, "blest") == 0
+        || strcmp(requested, "ecf") == 0) {
         return requested;
     }
 
@@ -598,6 +602,10 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
         sched = xqc_adaptive_scheduler_cb;
     } else if (strcmp(resolved, "peekaboo") == 0) {
         sched = xqc_peekaboo_scheduler_cb;
+    } else if (strcmp(resolved, "blest") == 0) {
+        sched = xqc_blest_scheduler_cb;
+    } else if (strcmp(resolved, "ecf") == 0) {
+        sched = xqc_ecf_scheduler_cb;
     }
     return sched;
 }

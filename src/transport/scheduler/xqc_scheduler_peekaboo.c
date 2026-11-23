@@ -9,7 +9,6 @@
 #include "src/transport/scheduler/xqc_scheduler_common.h"
 #include "src/transport/scheduler/xqc_scheduler_go_rand.h"
 #include "src/transport/xqc_send_ctl.h"
-#include "src/transport/xqc_stream.h"
 
 #define XQC_PEEKABOO_SEED                 2020
 #define XQC_PEEKABOO_WAIT_FOLLOW_PERCENT  70
@@ -56,44 +55,6 @@ xqc_peekaboo_scheduler_init(void *scheduler, xqc_log_t *log,
 }
 
 static xqc_bool_t
-xqc_peekaboo_path_eligible(const xqc_path_ctx_t *path,
-    const xqc_packet_out_t *packet_out, int reinject)
-{
-    return path->path_state == XQC_PATH_STATE_ACTIVE
-           && path->app_path_status != XQC_APP_PATH_STATUS_FROZEN
-           && !(reinject && packet_out->po_path_id == path->path_id);
-}
-
-static uint64_t
-xqc_peekaboo_send_window(xqc_connection_t *conn,
-    const xqc_packet_out_t *packet_out)
-{
-    const xqc_conn_flow_ctl_t *flow = &conn->conn_flow_ctl;
-    uint64_t conn_window = flow->fc_max_data_can_send > flow->fc_data_sent
-        ? flow->fc_max_data_can_send - flow->fc_data_sent : 0;
-
-    for (size_t i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
-        const xqc_po_stream_frame_t *frame = &packet_out->po_stream_frames[i];
-        if (!frame->ps_is_used) {
-            break;
-        }
-
-        const xqc_stream_t *stream = xqc_find_stream_by_id(
-            frame->ps_stream_id, conn->streams_hash);
-        if (stream == NULL) {
-            continue;
-        }
-
-        uint64_t stream_limit = stream->stream_flow_ctl.fc_max_stream_data_can_send;
-        uint64_t stream_window = stream_limit > stream->stream_send_offset
-            ? stream_limit - stream->stream_send_offset : 0;
-        return xqc_min(conn_window, stream_window);
-    }
-
-    return conn_window;
-}
-
-static xqc_bool_t
 xqc_peekaboo_model_prefers_wait(xqc_connection_t *conn,
     const xqc_packet_out_t *packet_out, const xqc_send_ctl_t *fast_ctl,
     const xqc_send_ctl_t *slow_ctl, const xqc_sched_path_eval_t *fast_eval,
@@ -110,7 +71,7 @@ xqc_peekaboo_model_prefers_wait(xqc_connection_t *conn,
     /* The upstream model was fitted with RTTs expressed in nanoseconds. */
     double fast_rtt_ns = (double) fast_rtt * 1000.0;
     double slow_rtt_ns = (double) slow_rtt * 1000.0;
-    double window = (double) xqc_peekaboo_send_window(conn, packet_out);
+    double window = (double) xqc_scheduler_get_send_window(conn, packet_out);
     const double feature[XQC_PEEKABOO_MODEL_DIMENSION] = {
         fast_eval->raw_cwnd / fast_rtt_ns,
         slow_eval->bytes_in_flight / slow_rtt_ns,
@@ -147,7 +108,7 @@ xqc_peekaboo_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
 
     xqc_list_for_each(pos, &conn->conn_paths_list) {
         xqc_path_ctx_t *path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (!xqc_peekaboo_path_eligible(path, packet_out, reinject)) {
+        if (!xqc_scheduler_path_eligible(path, packet_out, reinject)) {
             continue;
         }
 
@@ -170,7 +131,7 @@ xqc_peekaboo_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
     xqc_sched_path_eval_t slow_eval;
     xqc_list_for_each(pos, &conn->conn_paths_list) {
         xqc_path_ctx_t *path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path == fast_path || !xqc_peekaboo_path_eligible(path, packet_out, reinject)) {
+        if (path == fast_path || !xqc_scheduler_path_eligible(path, packet_out, reinject)) {
             continue;
         }
 
