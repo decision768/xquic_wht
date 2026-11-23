@@ -14,6 +14,7 @@
 #include <string.h>
 #include "src/common/xqc_id_hash.h"
 #include "src/transport/scheduler/xqc_scheduler_minrtt.h"
+#include "src/transport/scheduler/xqc_scheduler_peekaboo.h"
 
 static xqc_connection_t *
 observer_conn(xqc_engine_t *engine, const xqc_cid_t *cid)
@@ -511,17 +512,18 @@ xqc_observer_sample(xqc_engine_t *engine, const xqc_cid_t *cid, const char *kind
     paths[0] = scheduler[0] = body[0] = 0;
     observer_paths(conn, paths, sizeof(conn->observer->paths_record));
     if (!xqc_adaptive_observer_json(conn, scheduler, sizeof(conn->observer->scheduler_record))) {
-        snprintf(scheduler, sizeof(conn->observer->scheduler_record), "\"scheduler_name\":\"other\",\"primary_valid\":false,"
-            "\"primary_path_id\":null,\"secondary_path_id\":null,\"target_secondary_pct\":null,"
-            "\"adaptive_phase\":\"not_applicable\",\"role_epoch\":null");
-    }
-    if (conn->scheduler_callback && conn->scheduler_callback->xqc_scheduler_get_path == xqc_minrtt_scheduler_cb.xqc_scheduler_get_path) {
-        char *name = strstr(scheduler, "other");
-        if (name) { /* same-sized JSON rebuild avoids overwriting adjacent text */
-            snprintf(scheduler, sizeof(conn->observer->scheduler_record), "\"scheduler_name\":\"minrtt\",\"primary_valid\":false,"
-                "\"primary_path_id\":null,\"secondary_path_id\":null,\"target_secondary_pct\":null,"
-                "\"adaptive_phase\":\"not_applicable\",\"role_epoch\":null");
+        const char *name = "other";
+        const xqc_scheduler_callback_t *callback = conn->scheduler_callback;
+        if (callback != NULL) {
+            if (callback->xqc_scheduler_get_path == xqc_minrtt_scheduler_cb.xqc_scheduler_get_path) {
+                name = "minrtt";
+            } else if (callback->xqc_scheduler_get_path == xqc_peekaboo_scheduler_cb.xqc_scheduler_get_path) {
+                name = "peekaboo";
+            }
         }
+        snprintf(scheduler, sizeof(conn->observer->scheduler_record), "\"scheduler_name\":\"%s\",\"primary_valid\":false,"
+            "\"primary_path_id\":null,\"secondary_path_id\":null,\"target_secondary_pct\":null,"
+            "\"adaptive_phase\":\"not_applicable\",\"role_epoch\":null", name);
     }
     uint64_t now = observer_now(conn->observer);
     snprintf(body, sizeof(conn->observer->body_record),

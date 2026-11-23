@@ -49,6 +49,7 @@ import statistics
 import sys
 import time
 import uuid
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -56,7 +57,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 # Runtime dependencies belong beside this entry point on the actual control machine.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from roadtest_observability import add_arguments as add_observer_arguments, create_observer, observe, recover_pending_cleanup
+from new_roadtest_observability_fct import add_arguments as add_observer_arguments, create_observer, observe, recover_pending_cleanup
 
 try:
     import paramiko
@@ -118,7 +119,10 @@ DEFAULT_SERVE_TIMEOUT_MS = 600000
 DEFAULT_SERVER_READY_TIMEOUT_S = 15.0
 DEFAULT_BOARD_DIR = "/oemdata/gx/xquic_file"
 DEFAULT_CLIENT_EXECUTABLE = "./netins_udp_mini_api_client"
-DEFAULT_REMOTE_PATH = "/upload/1"
+DEFAULT_GET_ORIGINAL_PATH = "/upload/1"
+DEFAULT_GET_MIB = 100
+DEFAULT_GET_BYTES = DEFAULT_GET_MIB * 1024 * 1024
+DEFAULT_REMOTE_PATH = f"{DEFAULT_GET_ORIGINAL_PATH}-{DEFAULT_GET_MIB}MiB"
 DEFAULT_POST_REMOTE_RMNET = "/upload/post-rmnet-kkk.txt"
 DEFAULT_POST_REMOTE_USB = "/upload/post-usb-kkk.txt"
 DEFAULT_POST_REMOTE_AGG = "/upload/post-agg-kkk.txt"
@@ -129,9 +133,9 @@ DEFAULT_SERVER_RESOURCE_RETENTION_DAYS = 0
 DEFAULT_OUTPUT_ROOT = ""  # 留空：本文件同目录下的log/<月日_时分秒_算法名称组合>/
 
 # 压测参数
-DEFAULT_ITERATIONS = 1  # 每个算法各跑多少个正式完整周期；正式对比建议覆盖均衡周期
+DEFAULT_ITERATIONS = 500  # 每个算法各跑多少个正式完整周期；正式对比建议覆盖均衡周期
 DEFAULT_RUN_GET = 1
-DEFAULT_RUN_POST = 1
+DEFAULT_RUN_POST = 0
 DEFAULT_GET_SCHEDULER = "adaptive"
 DEFAULT_GET_CC = "bbr"
 DEFAULT_POST_SCHEDULER = "minrtt"
@@ -175,6 +179,17 @@ EXPECTED_B_METRIC = {
     "get": "first_body_to_last_body",
     "post": "app_submit_not_remote_receive",
 }
+GET_FCT_METRIC = "first_get_submit_to_last_body"
+GET_FCT_PREFIX = "[get_fct] "
+GET_FCT_FIELDS = (
+    "first_get_submit_us", "last_body_us", "get_fct_us", "get_fct_mbps",
+    "get_fct_received_bytes", "get_fct_expected_bytes", "get_fct_status",
+)
+GET_LOG_METRIC_FIELDS = (*GET_FCT_FIELDS, "body_time_ms", "body_mbps")
+GET_FCT_BOARD_FAILURES = (
+    "setup_failed", "connect_failed", "transfer_timeout", "transfer_failed",
+    "byte_count_mismatch", "missing_timestamp", "invalid_timestamp_order",
+)
 
 
 def extract_transfer_records(stdout: str) -> List[Dict[str, str]]:
@@ -278,6 +293,7 @@ class SSHRemote:
         self.strict_host_key = strict_host_key
         self.label = label
         self.client = None
+        self._sftp = None
 
     def connect(self) -> None:
         if paramiko is None:
@@ -453,21 +469,29 @@ class SSHRemote:
             raise RuntimeError(f"{self.label} SSH未连接")
         local_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = local_path.with_suffix(local_path.suffix + ".part")
-        sftp = self.client.open_sftp()
         try:
-            sftp.get_channel().settimeout(socket_timeout_s)
-            sftp.get(remote_path, str(temporary))
+            if self._sftp is not None and self._sftp.get_channel().closed:
+                self._close_sftp()
+            if self._sftp is None:
+                self._sftp = self.client.open_sftp()
+            self._sftp.get_channel().settimeout(socket_timeout_s)
+            self._sftp.get(remote_path, str(temporary))
             os.replace(temporary, local_path)
-        except Exception:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+        except BaseException:
+            self._close_sftp()
+            temporary.unlink(missing_ok=True)
             raise
-        finally:
-            sftp.close()
+
+    def _close_sftp(self) -> None:
+        sftp, self._sftp = self._sftp, None
+        if sftp is not None:
+            try:
+                sftp.close()
+            except Exception:
+                pass
 
     def close(self) -> None:
+        self._close_sftp()
         client = self.client
         self.client = None
         if client is not None:
@@ -527,6 +551,25 @@ def validate_remote_path(path: str) -> str:
     return path
 
 
+def default_get_source_preparation(original_path: str, source_path: str) -> str:
+    """Publish an exact-size copy without replacing either file."""
+    return (
+        "( "
+        f"original={q(original_path)}; source={q(source_path)}; "
+        'if [ ! -e "$source" ] && [ ! -L "$source" ]; then '
+        'test -f "$original" && test -r "$original" || exit 1; '
+        'tmp=$(mktemp "${source}.tmp.XXXXXXXX") || exit 1; '
+        "trap 'rm -f -- \"$tmp\"' 0; "
+        f'head -c {DEFAULT_GET_BYTES} -- "$original" > "$tmp" || exit 1; '
+        f'test "$(wc -c < "$tmp")" -eq {DEFAULT_GET_BYTES} || exit 1; '
+        # A concurrent run may have published its copy first.
+        'ln -T -- "$tmp" "$source" || test -f "$source" || exit 1; '
+        'fi; '
+        'test -f "$source" && test ! -L "$source" '
+        ")"
+    )
+
+
 def server_preflight(
     server: SSHRemote,
     server_dir: str,
@@ -537,7 +580,10 @@ def server_preflight(
     source_path = posixpath.join(server_dir, remote_path.lstrip("/"))
     source_check = ""
     if require_get_source:
-        source_check = (
+        if remote_path == DEFAULT_REMOTE_PATH:
+            original_path = posixpath.join(server_dir, DEFAULT_GET_ORIGINAL_PATH.lstrip("/"))
+            source_check = " && " + default_get_source_preparation(original_path, source_path)
+        source_check += (
             f" && test -r {q(source_path)}"
             f" && printf '__MINI_SOURCE_SIZE__=%s\\n' "
             f"\"$(wc -c < {q(source_path)})\""
@@ -558,7 +604,13 @@ def server_preflight(
     )
     result = server.run(command, timeout_s=20)
     if result.exit_code != 0:
-        raise RuntimeError(f"云端服务端预检失败:\n{result.diagnostic_output}")
+        hint = (
+            f"；若 {source_path} 尚未生成，请确认 {original_path} 可读、"
+            f"大小至少为 {DEFAULT_GET_BYTES} 字节，且目标目录可写"
+            if require_get_source and remote_path == DEFAULT_REMOTE_PATH
+            else ""
+        )
+        raise RuntimeError(f"云端服务端预检失败{hint}:\n{result.diagnostic_output}")
     if not require_get_source:
         return source_path, 0
     size_match = re.search(r"__MINI_SOURCE_SIZE__=(\d+)", result.output)
@@ -567,6 +619,11 @@ def server_preflight(
     source_size = int(size_match.group(1))
     if source_size <= 0:
         raise RuntimeError("云端GET源文件为空，拒绝进行无效吞吐测试")
+    if remote_path == DEFAULT_REMOTE_PATH and source_size != DEFAULT_GET_BYTES:
+        raise RuntimeError(
+            f"默认GET文件大小不符: {source_path} 为 {source_size} 字节，"
+            f"需要 {DEFAULT_GET_BYTES} 字节；请重命名该文件后重新运行以生成副本"
+        )
     LOG.info("云端GET源文件: %s bytes=%s", source_path, source_size)
     return source_path, source_size
 
@@ -593,6 +650,9 @@ def board_preflight(
         "command -v df >/dev/null",
         "command -v ip >/dev/null",
         "command -v wc >/dev/null",
+        "command -v bash >/dev/null",
+        "command -v sleep >/dev/null",
+        "command -v find >/dev/null",
         "test -r /proc/uptime",
     ]
     if require_post_source:
@@ -615,14 +675,11 @@ def board_preflight(
         )
     if verify_sha256:
         checks.append("command -v sha256sum >/dev/null")
-    if isinstance(board, SSHRemote) and not args.disable_board_resource_monitor:
+    if isinstance(board, SSHRemote) and args.resource_monitor:
         checks.extend(
             [
                 f"test -x {q(args.board_resource_monitor)}",
-                "command -v bash >/dev/null",
-                "command -v sleep >/dev/null",
                 "command -v date >/dev/null",
-                "command -v find >/dev/null",
                 "command -v getconf >/dev/null",
                 f"mkdir -p {q(args.board_resource_dir)}",
                 f"test -w {q(args.board_resource_dir)}",
@@ -666,7 +723,7 @@ def board_preflight(
             f"keep_downloads={args.keep_downloads}"
         )
     LOG.info(
-        "板卡客户端、双接口路由、资源监控和写入空间预检通过: "
+        "板卡客户端、双接口路由和写入空间预检通过: "
         "free=%s required=%s",
         free_bytes,
         required_bytes,
@@ -1483,6 +1540,82 @@ def parse_client_result(
     return not errors, parsed, "; ".join(errors)
 
 
+def parse_get_fct(
+    command_result: CommandResult,
+    attempt_id: str,
+    expected_size: int,
+    success: bool,
+    *,
+    observer_enabled: bool,
+) -> Dict[str, object]:
+    """Validate the board's file-level timing independently of body throughput."""
+    fct = dict.fromkeys(GET_FCT_FIELDS)
+    lines = [
+        line[len(GET_FCT_PREFIX):] for line in command_result.output.splitlines()
+        if line.startswith(GET_FCT_PREFIX)
+    ]
+    if not lines:
+        fct["get_fct_status"] = (
+            "controller_timeout" if command_result.timed_out else "missing_fct_record"
+        )
+        return fct
+    if len(lines) != 1:
+        fct["get_fct_status"] = "multiple_fct_records"
+        return fct
+
+    try:
+        record = json.loads(lines[0])
+    except ValueError:
+        record = None
+    if (
+        not isinstance(record, dict)
+        or type(record.get("iteration")) is not int
+        or type(record.get("iterations")) is not int
+        or (record["iteration"], record["iterations"]) != (1, 1)
+    ):
+        fct["get_fct_status"] = "invalid_fct_record"
+        return fct
+
+    board_attempt_id = record.get("attempt_id")
+    if board_attempt_id != attempt_id and (observer_enabled or board_attempt_id is not None):
+        fct["get_fct_status"] = "attempt_id_mismatch"
+        return fct
+
+    for field, source in (
+        ("first_get_submit_us", "first_get_submit_us"),
+        ("last_body_us", "last_body_us"),
+        ("get_fct_received_bytes", "received_bytes"),
+        ("get_fct_expected_bytes", "expected_bytes"),
+    ):
+        value = record.get(source)
+        if type(value) is int and value >= 0:
+            fct[field] = value
+
+    first = fct["first_get_submit_us"]
+    last = fct["last_body_us"]
+    board_status = record.get("status")
+    if board_status != "ok":
+        status = board_status if board_status in GET_FCT_BOARD_FAILURES else "invalid_fct_record"
+    elif fct["get_fct_received_bytes"] != expected_size or fct["get_fct_expected_bytes"] != expected_size:
+        status = "byte_count_mismatch"
+    elif not success:
+        status = "controller_timeout" if command_result.timed_out else "attempt_failed"
+    elif not first or not last:
+        status = "missing_timestamp"
+    elif last < first:
+        status = "invalid_timestamp_order"
+    elif last == first:
+        status = "zero_fct_duration"
+    elif type(record.get("get_fct_us")) is not int or record["get_fct_us"] != last - first:
+        status = "fct_duration_mismatch"
+    else:
+        status = "ok"
+        fct["get_fct_us"] = last - first
+        fct["get_fct_mbps"] = expected_size * 8 / fct["get_fct_us"]
+    fct["get_fct_status"] = status
+    return fct
+
+
 # ---------------------------------------------------------------------------
 # GX-style API Demo benchmark entry point
 # ---------------------------------------------------------------------------
@@ -1568,6 +1701,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--remote-path",
         type=validate_remote_path,
         default=DEFAULT_REMOTE_PATH,
+        help=f"GET源文件URL路径；默认 {DEFAULT_REMOTE_PATH}，缺失时从 {DEFAULT_GET_ORIGINAL_PATH} 自动生成",
     )
     parser.add_argument(
         "--post-local",
@@ -1645,6 +1779,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.set_defaults(verify_sha256=DEFAULT_VERIFY_SHA256)
 
     parser.add_argument(
+        "--resource-monitor",
+        action="store_true",
+        help="启用板卡和云端 CPU/内存监控（默认关闭）",
+    )
+    parser.add_argument(
         "--board-resource-monitor",
         default=DEFAULT_BOARD_RESOURCE_MONITOR,
     )
@@ -1691,6 +1830,8 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     )
 
     add_observer_arguments(parser)
+    # 高延迟链路的发送端可能在文件收完后继续收尾。
+    parser.set_defaults(observer_checkpoint_timeout_s=120.0)
     args = parser.parse_args(argv)
     if not 1 <= args.observer_interval_ms <= 60000:
         parser.error("--observer-interval-ms 必须在 1 到 60000 之间")
@@ -1795,7 +1936,6 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
                 local_path = script_dir / local_path
             setattr(args, name, str(local_path.resolve()))
     args.board_transport = "ssh"
-    args.disable_board_resource_monitor = False
     args.keep_downloads = False
     return args
 
@@ -2510,6 +2650,7 @@ def write_speed_log(
     speed_row: Optional[Dict[str, object]],
     fallback_start: str,
     fallback_end: str,
+    get_metrics: Dict[str, object],
 ) -> Path:
     timestamp = datetime.now().strftime("%H%M%S_%f")
     path = log_root / (
@@ -2528,12 +2669,17 @@ def write_speed_log(
     else:
         row = dict(speed_row)
         row["filesize"] = str(int(row["filesize"]))
-        row["time_ms"] = f"{float(row['time_ms']):.3f}"
-        row["mbps"] = f"{float(row['mbps']):.3f}"
+        for field in ("time_ms", "mbps"):
+            if row[field] is not None:
+                row[field] = f"{float(row[field]):.3f}"
+    fields = SPEED_FIELDS
+    if direction == "get":
+        fields = [*SPEED_FIELDS, *GET_LOG_METRIC_FIELDS]
+        row.update(get_metrics)
     average_row = dict(row)
     average_row["iter"] = "AVERAGE"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=SPEED_FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         writer.writerow(row)
         writer.writerow(average_row)
@@ -2541,6 +2687,7 @@ def write_speed_log(
 
 
 def aggregate_board_run_dicts(runs: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    runs = [run for run in runs if run.get("resource_status") != "DISABLED"]
     valid = [
         run
         for run in runs
@@ -2600,6 +2747,7 @@ def aggregate_board_run_dicts(runs: Sequence[Dict[str, object]]) -> Dict[str, ob
 
 
 def aggregate_server_run_dicts(runs: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    runs = [run for run in runs if run.get("server_memory_status") != "DISABLED"]
     valid = [
         run
         for run in runs
@@ -2692,6 +2840,23 @@ def aggregate_server_run_dicts(runs: Sequence[Dict[str, object]]) -> Dict[str, o
     }
 
 
+def summarize_get_fct(records: Sequence[Dict[str, object]]) -> Dict[str, object]:
+    valid = [
+        record["get_fct_us"] for record in records if record.get("get_fct_status") == "ok"
+    ]
+    excluded = Counter(
+        record.get("get_fct_status", "missing_fct_record")
+        for record in records if record.get("get_fct_status") != "ok"
+    )
+    return {
+        "get_fct_valid_count": len(valid),
+        "get_fct_excluded_count": sum(excluded.values()),
+        "get_fct_exclusion_reasons": json.dumps(excluded, sort_keys=True),
+        "get_fct_mean_ms": statistics.mean(valid) / 1000 if valid else "",
+        "get_fct_median_ms": statistics.median(valid) / 1000 if valid else "",
+    }
+
+
 def write_gx_final_summary(
     log_root: Path,
     session: str,
@@ -2717,6 +2882,8 @@ def write_gx_final_summary(
         "server_process_rss_delta_avg_kb", "server_process_hwm_max_kb",
         "server_process_vmsize_max_kb", "server_memory_samples",
         "server_cpu_samples",
+        "get_fct_valid_count", "get_fct_excluded_count", "get_fct_exclusion_reasons",
+        "get_fct_mean_ms", "get_fct_median_ms",
     ]
     path = log_root / f"stress_summary_{session}.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -2731,6 +2898,8 @@ def write_gx_final_summary(
                     and record["direction"] == direction
                 ]
                 successful = [record for record in mode_records if record["success"]]
+                rated = [record for record in successful if record["mbps"] is not None]
+                rates = [float(record["mbps"]) for record in rated]
                 board = aggregate_board_run_dicts(
                     [record["board_resource"] for record in successful]
                 )
@@ -2751,23 +2920,21 @@ def write_gx_final_summary(
                         "unfinished": planned_iterations - len(mode_records),
                         "first_attempt_successes": sum(int(r["attempt"]) == 1 for r in successful),
                         "first_attempt_success_rate": f"{sum(int(r['attempt']) == 1 for r in successful) / planned_iterations:.4f}",
-                        "median_mbps": statistics.median(float(r["mbps"]) for r in successful) if successful else "",
-                        "stdev_mbps": statistics.stdev(float(r["mbps"]) for r in successful) if len(successful) > 1 else "",
+                        "median_mbps": statistics.median(rates) if rates else "",
+                        "stdev_mbps": statistics.stdev(rates) if len(rates) > 1 else "",
                         "success_rate": f"{success_count / planned_iterations:.4f}",
                         "average_filesize": (
                             sum(int(record["filesize"]) for record in successful)
                             / success_count if successful else ""
                         ),
                         "average_time_ms": (
-                            sum(float(record["time_ms"]) for record in successful)
-                            / success_count if successful else ""
+                            statistics.mean(float(record["time_ms"]) for record in rated)
+                            if rated else ""
                         ),
-                        "average_mbps": (
-                            sum(float(record["mbps"]) for record in successful)
-                            / success_count if successful else ""
-                        ),
+                        "average_mbps": statistics.mean(rates) if rates else "",
                         **board,
                         **server,
+                        **(summarize_get_fct(mode_records) if direction == "get" else {}),
                     }
                 )
     return path
@@ -2785,13 +2952,15 @@ def write_aggregation_summary(
         "best_single_mbps", "sum_single_mbps", "gain_vs_best_single_pct",
         "aggregation_efficiency_pct", "status", "missing_modes",
     ]
+    fct_columns = ("5G1_fct_ms", "5G2_fct_ms", "Agg_fct_ms") if direction == "get" else ()
+    fields.extend(fct_columns)
     path = log_root / f"aggregation_summary_{direction}_{session}.csv"
     rows: List[Dict[str, object]] = []
     complete_rows: List[Dict[str, object]] = []
     successful = {
         (int(record["round"]), str(record["mode"])): record
         for record in records
-        if record["success"] and record["direction"] == direction
+        if record["success"] and record["direction"] == direction and record["mbps"] is not None
     }
     labels = (("rmnet", "5G1"), ("usb", "5G2"), ("agg", "Agg"))
     for round_index in range(1, planned_iterations + 1):
@@ -2821,6 +2990,9 @@ def write_aggregation_summary(
             "status": "INCOMPLETE" if missing else "COMPLETE",
             "missing_modes": ";".join(missing),
         }
+        for mode, label in labels:
+            if fct_columns and samples[mode] is not None:
+                row[f"{label}_fct_ms"] = f"{samples[mode]['time_ms']:.3f}"
         if not missing:
             rmnet_mbps = float(samples["rmnet"]["mbps"])
             usb_mbps = float(samples["usb"]["mbps"])
@@ -2852,7 +3024,7 @@ def write_aggregation_summary(
             numeric_fields = [
                 "5G1_mbps", "5G2_mbps", "Agg_mbps",
                 "best_single_mbps", "sum_single_mbps",
-                "gain_vs_best_single_pct", "aggregation_efficiency_pct",
+                "gain_vs_best_single_pct", "aggregation_efficiency_pct", *fct_columns,
             ]
             average_row: Dict[str, object] = {
                 "round": "AVERAGE",
@@ -2871,7 +3043,7 @@ def write_aggregation_summary(
 # =============================================================================
 SUPPORTED_SCHEDULERS = (
     "default", "minrtt", "backup", "balanced", "rap", "act", "bandwidth",
-    "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive",
+    "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive", "peekaboo",
 )
 SUPPORTED_CC = ("default", "cubic", "bbr")
 
@@ -2987,12 +3159,16 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "scheduler_scope": "sender algorithm; GET server / POST client; receiver scheduler=adaptive",
         "client_timeout_ms": args.client_timeout_ms,
         "command_timeout_s": args.command_timeout_s,
+        "resource_monitor_enabled": args.resource_monitor,
         "board_resource_interval_s": args.board_resource_interval_s,
         "server_resource_interval_s": args.server_resource_interval_s,
         "server_hwm_scope": "server process lifetime; use RSS samples for per-case comparison",
-        "metrics": EXPECTED_B_METRIC,
+        "metrics": {**EXPECTED_B_METRIC, "get": GET_FCT_METRIC},
+        "get_fct_metric": GET_FCT_METRIC,
+        "get_body_metric": EXPECTED_B_METRIC["get"],
         "observer_enabled": not args.disable_observer,
         "observer_interval_ms": args.observer_interval_ms,
+        "observer_checkpoint_timeout_s": args.observer_checkpoint_timeout_s,
         "measured_cases": sum(c.phase == "measured" for c in plan),
         "warmup_cases": sum(c.phase == "warmup" for c in plan),
         "maximum_attempts": len(plan) * (args.retries + 1),
@@ -3012,7 +3188,7 @@ def write_experiment_results(root, session, args, plan, records, started_cases):
     """显式保留未执行/中止项；按profile过滤后才调用原来的GX汇总。"""
     by_id = {r["case_id"]: r for r in records}
     fields = ["experiment_id", *TestCase.__dataclass_fields__, "status", "attempt",
-              "success", "filesize", "time_ms", "mbps", "error"]
+              "success", "filesize", "time_ms", "mbps", "error", "attempt_id", *GET_LOG_METRIC_FIELDS]
     with (root / "case_results.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()
@@ -3070,10 +3246,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
         except FileExistsError:
             log_root = log_parent / f"{dirname}_{suffix:02d}"
             suffix += 1
-    board_resource_local_dir = log_root / "resources" / session
-    raw_client_dir = log_root / "raw_client" / session
     server_temp_dir = log_root / ".server_resource_tmp" / session
-    server_memory_csv = log_root / f"server_memory_{session}.csv"
 
     board = SSHRemote(
         hostname=args.board_ssh_host,
@@ -3104,6 +3277,9 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
     post_expected_sha = ""
     args.planned_get_attempts = sum(c.direction == "get" for c in plan) * (args.retries + 1)
     write_experiment_plan(log_root, session, args, plan)
+    LOG.info("板卡和云端 CPU/内存监控: %s", "开启" if args.resource_monitor else "关闭")
+    if not args.disable_observer:
+        LOG.info("P0 观测: 逐用例验收，整场结束后汇总")
     LOG.info("实验计划: 正式=%s 预热=%s 最大尝试=%s，目录=%s",
              sum(c.phase == "measured" for c in plan),
              sum(c.phase == "warmup" for c in plan), len(plan) * (args.retries + 1), log_root)
@@ -3160,7 +3336,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             args.verify_sha256,
             "post" in directions,
         )
-        validate_server_resource_monitor(server, args)
+        if args.resource_monitor:
+            validate_server_resource_monitor(server, args)
         if "post" in directions:
             validate_server_post_targets(server, args)
             post_expected_size, post_expected_sha = get_board_post_source_info(
@@ -3181,7 +3358,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             board_resource_local_dir = profile_root / "resources" / session
             raw_client_dir = profile_root / "raw_client" / session
             server_memory_csv = profile_root / f"server_memory_{session}.csv"
-            board_resource_local_dir.mkdir(parents=True, exist_ok=True)
+            if args.resource_monitor:
+                board_resource_local_dir.mkdir(parents=True, exist_ok=True)
             raw_client_dir.mkdir(parents=True, exist_ok=True)
             new_block = last_block != case.block_id
             if new_block:
@@ -3251,17 +3429,19 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     args.board_resource_dir,
                     f"{run_tag}_resource.csv",
                 )
-                remote_board_stop = f"/tmp/{run_tag}_resource.stop"
+                remote_board_stop = f"/tmp/{run_tag}_resource.stop" if args.resource_monitor else ""
                 remote_board_monitor_log = f"/tmp/{run_tag}_resource_monitor.log"
                 local_board_csv = board_resource_local_dir / f"{run_tag}_resource.csv"
-                board_temporary = [remote_board_csv, remote_board_stop, remote_board_monitor_log,
-                                   f"/tmp/{run_tag}_client.start"]
+                board_temporary = [f"/tmp/{run_tag}_client.start"]
+                if args.resource_monitor:
+                    board_temporary.extend((remote_board_csv, remote_board_stop, remote_board_monitor_log))
                 if direction == "get":
                     board_temporary.append(posixpath.join(args.board_dir, board_path))
                 observe(args, "track_temporary", "board", run_tag, *board_temporary)
-                observe(args, "track_temporary", "server", run_tag,
-                        posixpath.join(args.server_resource_dir, f"{run_tag}_server_memory.csv"),
-                        f"/tmp/{run_tag}_server_memory.stop", f"/tmp/{run_tag}_server_memory.status")
+                if args.resource_monitor:
+                    observe(args, "track_temporary", "server", run_tag,
+                            posixpath.join(args.server_resource_dir, f"{run_tag}_server_memory.csv"),
+                            f"/tmp/{run_tag}_server_memory.stop", f"/tmp/{run_tag}_server_memory.status")
 
                 if direction == "post" and not prepare_server_post_target(
                     server, args, remote_path
@@ -3290,12 +3470,13 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 if not first_start:
                     first_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-                active_server_monitor = start_server_resource_monitor(
-                    server,
-                    args,
-                    run_tag,
-                    remote_pidfile,
-                )
+                if args.resource_monitor:
+                    active_server_monitor = start_server_resource_monitor(
+                        server,
+                        args,
+                        run_tag,
+                        remote_pidfile,
+                    )
                 execution_error = ""
                 post_cleanup_ok = True
                 command_started = time.monotonic()
@@ -3307,7 +3488,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         board_path,
                         remote_path,
                         attempt_token,
-                        True,
+                        args.resource_monitor,
                         remote_board_csv,
                         remote_board_stop,
                         remote_board_monitor_log,
@@ -3333,24 +3514,26 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 end_dt = datetime.now()
                 last_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-                server_stop_status = stop_server_resource_monitor(
-                    server,
-                    active_server_monitor,
-                )
-                server_resource = collect_server_resource(
-                    server,
-                    active_server_monitor,
-                    server_stop_status,
-                    server_memory_csv,
-                    server_temp_dir,
-                    run_tag,
-                    mode,
-                    direction,
-                    round_index,
-                    round_index,
-                    attempt,
-                )
-                active_server_monitor = None
+                server_resource = empty_server_resource_result("DISABLED")
+                if active_server_monitor is not None:
+                    server_stop_status = stop_server_resource_monitor(
+                        server,
+                        active_server_monitor,
+                    )
+                    server_resource = collect_server_resource(
+                        server,
+                        active_server_monitor,
+                        server_stop_status,
+                        server_memory_csv,
+                        server_temp_dir,
+                        run_tag,
+                        mode,
+                        direction,
+                        round_index,
+                        round_index,
+                        attempt,
+                    )
+                    active_server_monitor = None
 
                 if direction == "get" and args.verify_sha256:
                     try:
@@ -3438,18 +3621,20 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     except Exception:
                         cleanup_ok = False
 
-                board_monitor_state = extract_resource_status(
-                    command_result.output,
-                    True,
-                )
-                board_resource = collect_board_resource_gx(
-                    board,
-                    board_monitor_state,
-                    remote_board_csv,
-                    remote_board_stop,
-                    remote_board_monitor_log,
-                    local_board_csv,
-                )
+                board_resource = empty_resource_result("DISABLED")
+                if args.resource_monitor:
+                    board_monitor_state = extract_resource_status(
+                        command_result.output,
+                        True,
+                    )
+                    board_resource = collect_board_resource_gx(
+                        board,
+                        board_monitor_state,
+                        remote_board_csv,
+                        remote_board_stop,
+                        remote_board_monitor_log,
+                        local_board_csv,
+                    )
 
                 if cleanup_ok:
                     active_attempt_token = None
@@ -3465,14 +3650,39 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         ) if item
                     )
 
+                get_metrics = {}
+                if direction == "get":
+                    get_metrics = parse_get_fct(
+                        command_result, run_tag, expected_size, success,
+                        observer_enabled=not args.disable_observer,
+                    )
+                    get_metrics["body_time_ms"] = (
+                        parsed["transfer_elapsed_s"] * 1000 if parsed["metric"] else None
+                    )
+                    get_metrics["body_mbps"] = parsed["throughput_mbps"] if parsed["metric"] else None
+                    fct_us = get_metrics["get_fct_us"]
+                    parsed.update(
+                        transfer_elapsed_s=fct_us / 1_000_000 if fct_us is not None else None,
+                        throughput_mbps=get_metrics["get_fct_mbps"],
+                        metric=GET_FCT_METRIC,
+                        **get_metrics,
+                    )
                 attempt_record = {
-                    **case_metadata(case, session), "attempt": attempt,
+                    **case_metadata(case, session), "attempt": attempt, "attempt_id": run_tag,
                     "success": success, "error": error, "start_time": start_dt.isoformat(),
                     "end_time": end_dt.isoformat(), "raw_stdout": str(raw_stdout_path),
                     "raw_stderr": str(raw_stderr_path), "parsed": parsed,
                     "board_resource": board_resource, "server_resource": server_resource,
                 }
                 append_json_record(log_root / "attempts.jsonl", attempt_record)
+                if direction == "get":
+                    fct_rate = get_metrics["get_fct_mbps"]
+                    LOG.info(
+                        "GET FCT: mode=%s round=%s attempt=%s get_fct_us=%s get_fct_mbps=%s status=%s",
+                        display_mode, round_index, attempt, get_metrics["get_fct_us"],
+                        f"{fct_rate:.3f}" if fct_rate is not None else None,
+                        get_metrics["get_fct_status"],
+                    )
                 observation_result = observe(args, "end", run_tag, success, error)
                 if observation_result is None:
                     observation_result = {"status": "DISABLED" if args.disable_observer else "INVALID",
@@ -3480,11 +3690,16 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 append_json_record(log_root / "observability" / "attempt_validation.jsonl",
                                    {"attempt_id": run_tag, "business_success": success, **observation_result})
                 if success:
+                    if direction == "get":
+                        fct_us = get_metrics["get_fct_us"]
+                        time_ms = fct_us / 1000 if fct_us is not None else None
+                    else:
+                        time_ms = parsed["transfer_elapsed_s"] * 1000
                     successful_row = {
                         "iter": round_index,
                         "filesize": int(parsed["total_bytes"]),
-                        "time_ms": float(parsed["transfer_elapsed_s"]) * 1000.0,
-                        "mbps": float(parsed["throughput_mbps"]),
+                        "time_ms": time_ms,
+                        "mbps": parsed["throughput_mbps"],
                         "mode": direction,
                         "start_time": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
                         "end_time": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -3496,18 +3711,19 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         "attempt": attempt,
                         "success": True,
                         "filesize": int(parsed["total_bytes"]),
-                        "time_ms": float(parsed["transfer_elapsed_s"]) * 1000.0,
-                        "mbps": float(parsed["throughput_mbps"]),
+                        "time_ms": time_ms,
+                        "mbps": parsed["throughput_mbps"],
                         "board_resource": board_resource,
                         "server_resource": server_resource,
                     }
                     LOG.info(
-                        "测试成功: mode=%s direction=%s filesize=%s time_ms=%.3f mbps=%.3f",
+                        "测试成功: mode=%s direction=%s filesize=%s time_ms=%s mbps=%s metric=%s",
                         display_mode,
                         direction,
                         successful_row["filesize"],
-                        successful_row["time_ms"],
-                        successful_row["mbps"],
+                        f"{time_ms:.3f}" if time_ms is not None else None,
+                        f"{parsed['throughput_mbps']:.3f}" if parsed["throughput_mbps"] is not None else None,
+                        parsed["metric"],
                     )
                     break
 
@@ -3536,14 +3752,17 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 successful_row,
                 first_start,
                 last_end,
+                get_metrics,
             )
             record = successful_record or {
                 "round": round_index, "mode": mode, "direction": direction,
                 "attempt": attempt, "success": False, "filesize": "", "time_ms": "", "mbps": "",
-                "board_resource": empty_resource_result("MISSING"),
-                "server_resource": empty_server_resource_result("MISSING"),
+                "board_resource": empty_resource_result("MISSING" if args.resource_monitor else "DISABLED"),
+                "server_resource": empty_server_resource_result("MISSING" if args.resource_monitor else "DISABLED"),
             }
             record.update(case_metadata(case, session))
+            record.update(get_metrics)
+            record["attempt_id"] = run_tag
             record["error"] = "" if record["success"] else error
             record["observation"] = observation_result
             records.append(record)
@@ -3627,14 +3846,14 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             for number, previous in cleanup_handlers.items():
                 signal.signal(number, termination_handlers.get(number, previous))
 
-    server_temp_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        for temp_file in server_temp_dir.glob("*"):
-            temp_file.unlink(missing_ok=True)
-        server_temp_dir.rmdir()
-        server_temp_dir.parent.rmdir()
-    except OSError:
-        pass
+    if server_temp_dir.is_dir():
+        try:
+            for temp_file in server_temp_dir.glob("*"):
+                temp_file.unlink(missing_ok=True)
+            server_temp_dir.rmdir()
+            server_temp_dir.parent.rmdir()
+        except OSError:
+            pass
 
     write_experiment_results(log_root, session, args, plan, records, started_cases)
     LOG.info("实验结果: %s", log_root)

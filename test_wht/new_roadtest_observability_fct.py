@@ -1,7 +1,7 @@
 """P0 passive observations for 副本改进版.py. No transfer verdicts are changed.
 
 Re-export retained raw observations without SSH:
-    python roadtest_observability.py OBSERVATION_DIRECTORY
+    python new_roadtest_observability_fct.py OBSERVATION_DIRECTORY
 """
 from __future__ import annotations
 
@@ -85,6 +85,8 @@ class RoadtestObserver:
                          "files": {}, "errors": [], "interval_ms": args.observer_interval_ms}
         self.active = set()
         self.collected = set()
+        self.writer_files = defaultdict(set)
+        self.checkpoint_files = defaultdict(set)
         self.archive_index = 0
         self.server_log_uncollected = False
         self.optional_collectors = None
@@ -447,25 +449,31 @@ class RoadtestObserver:
             self.save()
             return {"status": "DISABLED", "errors": []}
         deadline = time.monotonic() + getattr(self.args, "observer_checkpoint_timeout_s", 15.0)
-        found = set()
+        paths = set()
         while True:
-            self.collect(checkpoints_only=True)
-            found.clear()
-            for meta in self.manifest["files"].values():
-                if ".checkpoint." not in meta.get("local_path", ""):
-                    continue
-                receipt = json.loads((self.root / meta["local_path"]).read_text(encoding="utf-8"))
-                if receipt.get("attempt_id") == attempt:
-                    found.add(meta["endpoint"])
+            paths.update(self.collect(checkpoints_only=True))
+            receipts = self.checkpoint_files.get(attempt, ())
+            found = {path.parent.name for path in receipts}
             if found == set(self.remotes) or time.monotonic() >= deadline:
                 break
             time.sleep(min(0.25, max(0, deadline-time.monotonic())))
-        # Receipts are published after sealing; fetch data only after receipt polling.
-        # Download duration is separate from the checkpoint publication timeout.
-        self.collect()
-        self.save()
-        tables = export(self.root)
-        summary = next((r for r in tables["transfer_observability_summary"] if r["attempt_id"] == attempt), {})
+        # Receipts are published after sealing. Include all files of their
+        # writers, including segments archived before this call.
+        paths.update(self.collect())
+        for path in self.checkpoint_files.get(attempt, ()):
+            paths.update(self.writer_files[_writer_prefix(str(path))])
+        paths = {path for path in paths if path.is_file()}
+        relative_paths = {path.relative_to(self.root).as_posix() for path in paths}
+        current = {
+            **self.manifest,
+            "attempts": {attempt: entry},
+            "files": {
+                key: meta for key, meta in self.manifest["files"].items()
+                if meta["local_path"].replace("\\", "/") in relative_paths
+            },
+        }
+        tables = _summarize(self.root, current, paths)
+        summary, = tables["transfer_observability_summary"]
         reasons = list(summary.get("integrity_errors" if success is False else "validation_errors", []))
         if found != set(self.remotes):
             reasons.append("双端任务检查点等待超时：" + ",".join(sorted(set(self.remotes)-found)))
@@ -484,14 +492,16 @@ class RoadtestObserver:
         return result
 
     def collect(self, final=False, checkpoints_only=False):
-        """Copy and verify sealed segments; cleanup is a separate archive-only step.
+        """Copy and verify sealed segments; return local paths touched by this pass.
 
         On final shutdown, also salvage .active files as incomplete evidence.
         """
+        paths = set()
         for endpoint, remote in self.remotes.items():
             if not self.supported[endpoint]:
                 continue
             directory = self.paths[endpoint]
+            changed = False
             try:
                 listing = remote.run("find " + shlex.quote(directory) + " -maxdepth 1 -type f -print",
                                      timeout_s=15)
@@ -514,19 +524,31 @@ class RoadtestObserver:
                     archive_name = hashlib.sha256(prefix.encode()).hexdigest()[:24] + basename[len(prefix):]
                     local = self.root / "raw" / endpoint / archive_name
                     local.parent.mkdir(parents=True, exist_ok=True)
+                    paths.add(local)
                     remote.download(source, local)
                     digest = hashlib.sha256(local.read_bytes()).hexdigest()
                     check = remote.run("sha256sum -- " + shlex.quote(source), timeout_s=15)
                     parts = check.output.strip().split()
-                    if check.exit_code or not parts or parts[0].lower() != digest:
-                        raise OSError("日志 SHA256 不匹配，保留本地和远端副本：" + source)
+                    if check.exit_code or check.timed_out or check.truncated or not parts or parts[0].lower() != digest:
+                        raise OSError("日志 SHA256 未通过校验，保留本地和远端副本：" + source)
                     self.manifest["files"][key] = dict(endpoint=endpoint, remote_path=source,
                         local_path=str(local.relative_to(self.root)), sha256=digest,
                         size=local.stat().st_size, incomplete=source.endswith(".active"))
                     self.collected.add(key)
-                self.save()
+                    changed = True
+                    self.writer_files[_writer_prefix(str(local))].add(local)
+                    if ".checkpoint." in local.name and local.suffix == ".json":
+                        try:
+                            receipt = json.loads(local.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            continue  # The validator will report the malformed receipt.
+                        if isinstance(receipt, dict) and isinstance(receipt.get("attempt_id"), str):
+                            self.checkpoint_files[receipt["attempt_id"]].add(local)
+                if changed:
+                    self.save()
             except Exception as exc:
                 self.error(endpoint, exc, remote_recovery_directory=directory)
+        return paths
 
     def cleanup_archived_logs(self):
         """Unlink exact immutable writer files, only after a durable local archive.
@@ -1067,16 +1089,13 @@ def _mapping_completed(earlier, later):
     return True
 
 
-def export(root, artifacts=False):
-    root = Path(root)
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+def _summarize(root, manifest, paths):
     records = []
     checkpoints = []
     health = [dict(status="PARTIAL", **r) if "status" not in r else dict(r)
               for r in manifest.get("errors", [])]
     file_metadata = {v["local_path"].replace("\\", "/"): v for v in manifest.get("files", {}).values()}
-    for path in sorted((root / "raw").glob("*/*")):
+    for path in sorted(paths):
         rel = path.relative_to(root).as_posix()
         meta = file_metadata.get(rel, {})
         endpoint = meta.get("endpoint", path.parent.name)
@@ -1525,6 +1544,14 @@ def export(root, artifacts=False):
         summary["integrity_errors"] = list(dict.fromkeys(integrity_errors))
         summary["integrity_valid"] = not integrity_errors
         tables["transfer_observability_summary"].append(summary)
+    return tables
+
+
+def export(root, artifacts=False):
+    root = Path(root)
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
+    tables = _summarize(root, manifest, (root / "raw").glob("*/*"))
     for name, rows in tables.items():
         _write_csv(root / (name+".csv"), rows, ["attempt_id", "endpoint"])
     if artifacts:

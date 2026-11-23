@@ -36,6 +36,7 @@ if(XQC_ENABLE_MINI_API)
 
     install(FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_LICENSES.md"
         DESTINATION "."
         COMPONENT mini_api)
 

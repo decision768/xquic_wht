@@ -298,6 +298,8 @@ netins_udp_scheduler_name(int scheduler)
         return "fastprobe20";
     case NETINS_UDP_SCHEDULER_FASTONLY:
         return "fastonly";
+    case NETINS_UDP_SCHEDULER_PEEKABOO:
+        return "peekaboo";
     default:
         return NULL;
     }

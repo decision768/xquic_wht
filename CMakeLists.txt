@@ -282,6 +282,8 @@ set(
     "src/transport/scheduler/xqc_scheduler_bandwidth.c"
     "src/transport/scheduler/xqc_scheduler_fastprobe.c"
     "src/transport/scheduler/xqc_scheduler_adaptive.c"
+    "src/transport/scheduler/xqc_scheduler_go_rand.c"
+    "src/transport/scheduler/xqc_scheduler_peekaboo.c"
 )
 
 if(XQC_ENABLE_MP_INTEROP)

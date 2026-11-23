@@ -1,5 +1,6 @@
 #include "mini_client.h"
 #include "mini_stream_backend.h"
+#include "src/transport/scheduler/xqc_scheduler_peekaboo.h"
 #include <xquic/xqc_observer_clock.h>
 #include <inttypes.h>
 #include <stdint.h>
@@ -1017,6 +1018,8 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     }
     else if (strcmp(args->quic_cfg.mp_sched, "adaptive") == 0) {
         sched = xqc_adaptive_scheduler_cb;
+    } else if (strcmp(args->quic_cfg.mp_sched, "peekaboo") == 0) {
+        sched = xqc_peekaboo_scheduler_cb;
     }
     return sched;
 }
