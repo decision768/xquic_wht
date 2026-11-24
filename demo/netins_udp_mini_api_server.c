@@ -345,7 +345,7 @@ main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--telemetry-capabilities") == 0) {
-        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true}");
+        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true,\"get_task_confirmation\":true}");
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {

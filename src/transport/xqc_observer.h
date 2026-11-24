@@ -29,6 +29,7 @@ struct xqc_observer_s {
     } mappings[8];
     unsigned stream_count;
     int aggregate_prebind_unobserved;
+    int task_complete;
     int invalid, role_valid, role_initialized, phase;
     double target_pct;
 };

@@ -20,6 +20,7 @@ typedef struct client_options_s {
     uint32_t interface_count;
     uint32_t timeout_ms;
     uint32_t repeat_count;
+    uint32_t get_confirm_timeout_ms;
     uint16_t port;
     int direction;
     int scheduler;
@@ -48,7 +49,8 @@ usage(const char *program)
         "                          GET uses adaptive\n"
         "  --cc NAME               default|cubic|bbr\n"
         "  --timeout-ms MS         Transfer timeout; nonzero also sets connect timeout\n"
-        "  --repeat N              Sequential tasks on one connection (default 1)\n"
+        "  --repeat N              Sequential tasks on one connection (default 1); repeated GET waits for peer confirmation\n"
+        "  --get-confirm-timeout-ms MS  Wait budget per repeated GET (default 15000)\n"
         "  --version               Print experiment version and exit\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
@@ -143,6 +145,7 @@ parse_args(int argc, char **argv, client_options_t *options)
     options->port = 8443;
     options->observer = (netins_udp_observer_config_t)NETINS_UDP_OBSERVER_CONFIG_INITIALIZER;
     options->repeat_count = 1;
+    options->get_confirm_timeout_ms = 15000;
     options->direction = 0;
     options->scheduler = NETINS_UDP_SCHEDULER_BALANCED;
     options->congestion_control = NETINS_UDP_CC_DEFAULT;
@@ -202,6 +205,13 @@ parse_args(int argc, char **argv, client_options_t *options)
         } else if (strcmp(argv[i], "--timeout-ms") == 0) {
             if (need_value(argc, argv, &i, &value) != 0
                 || parse_u32(value, UINT32_MAX, &options->timeout_ms) != 0)
+            {
+                return -1;
+            }
+        } else if (strcmp(argv[i], "--get-confirm-timeout-ms") == 0) {
+            if (need_value(argc, argv, &i, &value) != 0
+                || parse_u32(value, UINT32_MAX, &options->get_confirm_timeout_ms) != 0
+                || options->get_confirm_timeout_ms == 0)
             {
                 return -1;
             }
@@ -411,7 +421,7 @@ print_snapshot(netins_udp_t *client)
 
 static void
 print_get_fct(const client_options_t *options, uint32_t iteration,
-    const netins_udp_transfer_result_t *result, const char *reason)
+    const netins_udp_transfer_result_t *result, const char *attempt, const char *reason)
 {
     uint64_t first = result->reserved[NETINS_UDP_GET_FCT_FIRST_SUBMIT_US];
     uint64_t last = result->reserved[NETINS_UDP_GET_FCT_LAST_BODY_US];
@@ -428,7 +438,6 @@ print_get_fct(const client_options_t *options, uint32_t iteration,
         }
     }
 
-    const char *attempt = options->observer.attempt_id;
     printf("[get_fct] {\"iteration\":%" PRIu32 ",\"iterations\":%" PRIu32
            ",\"attempt_id\":", iteration, options->repeat_count);
     if (*attempt && attempt[strspn(attempt,
@@ -484,7 +493,7 @@ main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--telemetry-capabilities") == 0) {
-        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true}");
+        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true,\"get_task_confirmation\":true}");
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -493,6 +502,21 @@ main(int argc, char **argv)
 
     if (parse_args(argc, argv, &options) != 0) {
         usage(argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    int confirmed_get = options.direction == NETINS_UDP_TRANSFER_GET && options.repeat_count > 1;
+    char attempt[sizeof(options.observer.attempt_id)] = {0};
+    char default_attempt[40];
+    snprintf(default_attempt, sizeof(default_attempt), "get-%" PRIu64, xqc_observer_realtime_us());
+    const char *base_attempt = options.observer.attempt_id[0]
+        ? options.observer.attempt_id : default_attempt;
+    if (confirmed_get && (base_attempt[strspn(base_attempt,
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")] != '\0'
+        || snprintf(attempt, sizeof(attempt), "%s.%" PRIu32,
+                    base_attempt, options.repeat_count) >= (int)sizeof(attempt)))
+    {
+        fprintf(stderr, "invalid attempt ID for repeated GET\n");
         return EXIT_FAILURE;
     }
 
@@ -521,18 +545,24 @@ main(int argc, char **argv)
     task.timeout_ms = options.timeout_ms;
     task.local_path = options.local_path;
     task.remote_path = options.remote_path;
-    for (iteration = 1; iteration <= options.repeat_count; ++iteration) {
+    for (iteration = 1; ; ++iteration) {
         netins_udp_transfer_result_t result =
             NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
 
-        int transfer_ret = netins_udp_transfer(client, &task, &result);
+        if (confirmed_get) {
+            snprintf(attempt, sizeof(attempt), "%s.%" PRIu32, base_attempt, iteration);
+        }
+        const char *task_attempt = confirmed_get ? attempt : options.observer.attempt_id;
+        int transfer_ret = confirmed_get
+            ? netins_udp_transfer_get_task(client, &task, &result, task_attempt)
+            : netins_udp_transfer(client, &task, &result);
         if (task.direction == NETINS_UDP_TRANSFER_GET) {
             const char *reason = NULL;
             if (transfer_ret != 0) {
                 reason = netins_udp_get_last_error_code(client) == ETIMEDOUT
                     ? "transfer_timeout" : "transfer_failed";
             }
-            print_get_fct(&options, iteration, &result, reason);
+            print_get_fct(&options, iteration, &result, task_attempt, reason);
         }
         if (transfer_ret != 0) {
             print_handle_error(client, "transfer");
@@ -552,6 +582,22 @@ main(int argc, char **argv)
             options.direction == NETINS_UDP_TRANSFER_GET
                 ? "first_body_to_last_body"
                 : "app_submit_not_remote_receive");
+        if (confirmed_get) {
+            fflush(stdout);
+            uint64_t start_us = xqc_observer_clock_us();
+            int ret = netins_udp_wait_get_task(client, options.get_confirm_timeout_ms);
+            uint64_t wait_us = xqc_observer_elapsed_us(start_us, xqc_observer_clock_us());
+            printf("[get_checkpoint] {\"iteration\":%" PRIu32 ",\"attempt_id\":\"%s\","
+                   "\"wait_us\":%" PRIu64 ",\"status\":\"%s\"}\n",
+                iteration, task_attempt, wait_us, ret == 0 ? "ok" : "failed");
+            if (ret != 0) {
+                print_handle_error(client, "GET task confirmation");
+                goto done;
+            }
+        }
+        if (iteration == options.repeat_count) {
+            break;
+        }
     }
     print_snapshot(client);
     exit_code = EXIT_SUCCESS;
@@ -559,7 +605,11 @@ main(int argc, char **argv)
 done:
     if (iteration == 0 && options.direction == NETINS_UDP_TRANSFER_GET) {
         netins_udp_transfer_result_t empty = NETINS_UDP_TRANSFER_RESULT_INITIALIZER;
-        print_get_fct(&options, 1, &empty, setup_failure);
+        if (confirmed_get) {
+            snprintf(attempt, sizeof(attempt), "%s.1", base_attempt);
+        }
+        print_get_fct(&options, 1, &empty,
+            confirmed_get ? attempt : options.observer.attempt_id, setup_failure);
     }
     if (client != NULL) {
         (void)netins_udp_shutdown(client);

@@ -11,7 +11,7 @@ struct mini_observer_s {
     struct event *timer;
     netins_telemetry_writer_t *writer;
     uint64_t interval_us, due_us;
-    int finished;
+    int finished, finish_error;
     void (*extra)(void *);
     void *extra_data;
 };
@@ -70,20 +70,23 @@ mini_observer_start(xqc_engine_t *engine, const xqc_cid_t *cid,
     return o;
 }
 
-void
+int
 mini_observer_finish(mini_observer_t *o)
 {
-    if (!o || o->finished) { return; }
+    if (!o) { return 0; }
+    if (o->finished) { return o->finish_error; }
     if (o->extra) { o->extra(o->extra_data); }
     xqc_observer_phase(o->engine, &o->cid, "task_end", 0, 0, 0);
     xqc_observer_sample(o->engine, &o->cid, "end", mini_observer_now(o), o->interval_us, 0);
     char metadata[768];
-    if (xqc_observer_checkpoint_metadata(o->engine, &o->cid, metadata, sizeof(metadata))
-        || netins_telemetry_checkpoint(o->writer, metadata)) {
+    o->finish_error = xqc_observer_checkpoint_metadata(o->engine, &o->cid, metadata, sizeof(metadata))
+        || netins_telemetry_checkpoint(o->writer, metadata);
+    if (o->finish_error) {
         fprintf(stderr, "observer_error: cannot publish task checkpoint\n");
     }
     o->finished = 1;
     if (o->timer) { event_del(o->timer); }
+    return o->finish_error;
 }
 
 void

@@ -66,6 +66,8 @@ typedef struct xqc_mini_svr_user_stream_s {
     int                          fin_received;
 
     int                          metadata_parsed;
+    int                          get_task_file;
+    int                          get_confirmation;
     int                          stream_index;
     int                          stream_count;
     size_t                       stream_offset;

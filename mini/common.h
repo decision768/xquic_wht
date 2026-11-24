@@ -13,6 +13,16 @@
 #include <xquic/xquic_typedef.h>
 #include <zlog.h>
 
+#define MINI_GET_TASK_HEADER "x-netins-get-task"
+#define MINI_GET_CHECKPOINT_HEADER "x-netins-get-checkpoint"
+
+static inline int
+mini_get_task_id_valid(const char *id)
+{
+    return id && *id && strlen(id) < 192
+        && id[strspn(id, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-")] == '\0';
+}
+
 /* definition for connection */
 #define DEFAULT_SERVER_ADDR "127.0.0.1"
 #define DEFAULT_SERVER_PORT 8443

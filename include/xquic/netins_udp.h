@@ -521,6 +521,22 @@ NETINS_UDP_PUBLIC netins_udp_t *netins_udp_accept(netins_udp_t *server);
 NETINS_UDP_PUBLIC int netins_udp_transfer(netins_udp_t *client,
     const netins_udp_transfer_t *task,
     netins_udp_transfer_result_t *result);
+/*
+ * Begin an identified, sequential GET. task_id must be unique on this
+ * connection and contain 1..191 ASCII letters, digits, dots, underscores or
+ * hyphens. On a connection using this extension, all file tasks must use this
+ * entry point. Call wait_get_task() after every successful download, including
+ * the last. Both peers must support this extension.
+ */
+NETINS_UDP_PUBLIC int netins_udp_transfer_get_task(netins_udp_t *client,
+    const netins_udp_transfer_t *task, netins_udp_transfer_result_t *result,
+    const char *task_id);
+/* Wait for the server to close the file streams and queue its checkpoint
+ * when observation is enabled. timeout_ms must be nonzero.
+ * This wait is separate from the completed GET's timing and result.
+ */
+NETINS_UDP_PUBLIC int netins_udp_wait_get_task(netins_udp_t *client,
+    uint32_t timeout_ms);
 NETINS_UDP_PUBLIC int netins_udp_serve(netins_udp_t *connection,
     const netins_udp_serve_config_t *config);
 

@@ -324,6 +324,9 @@ typedef struct xqc_mini_cli_user_conn_s {
     xqc_cid_t               cid;
     xqc_h3_conn_t          *h3_conn;
     mini_observer_t        *observer;
+    char                    get_task_id[192];
+    int                     get_task_needs_confirmation;
+    int                     get_confirmation_result;
 
     xqc_mini_cli_ctx_t     *ctx;
 
@@ -410,7 +413,9 @@ typedef struct xqc_mini_cli_user_conn_s {
 
 } xqc_mini_cli_user_conn_t;
 
+struct xqc_mini_cli_user_stream_s;
 void xqc_mini_cli_observer_extra(void *);
+int xqc_mini_cli_send_get_confirmation(struct xqc_mini_cli_user_stream_s *);
 void xqc_mini_cli_diag_maybe_log(xqc_mini_cli_user_conn_t *user_conn,
     const char *scene, int force);
 void xqc_mini_cli_diag_record_pwrite(xqc_mini_cli_user_conn_t *user_conn,
@@ -426,6 +431,8 @@ void xqc_mini_cli_stop_async_writer(xqc_mini_cli_user_conn_t *user_conn);
 typedef struct xqc_mini_cli_user_stream_s {
     xqc_mini_cli_user_conn_t   *user_conn;
     int                         stream_index;
+    int                         get_confirmation;
+    int                         get_confirmation_headers;
 
     /* send file*/
     FILE                  *send_body_fp;

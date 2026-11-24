@@ -209,6 +209,12 @@ typedef struct xqc_mini_svr_user_conn_s {
     uint64_t                get_submit_start_us;
     uint64_t                get_submit_last_us;
     uint64_t                observer_get_expected, observer_get_closed;
+    char                    get_task_id[192];
+    unsigned char           *get_task_streams;
+    struct xqc_mini_svr_user_stream_s *get_checkpoint_request;
+    int                     get_checkpoint_status;
+    int                     get_task_confirmed;
+    int                     get_task_failed;
     uint64_t                get_submit_streams;
     uint64_t                get_submit_bytes;
     uint64_t                get_split_sample_count;

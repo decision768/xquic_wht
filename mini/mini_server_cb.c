@@ -2034,6 +2034,70 @@ xqc_mini_svr_h3_request_create_notify(xqc_h3_request_t *h3_request, void *strm_u
     return 0;
 }
 
+static int
+xqc_mini_svr_send_get_confirmation(xqc_mini_svr_user_conn_t *conn)
+{
+    xqc_mini_svr_user_stream_t *stream = conn->get_checkpoint_request;
+    if (!stream || !stream->fin_received || conn->get_checkpoint_status == 0) {
+        return XQC_OK;
+    }
+    const char *status = conn->get_checkpoint_status == 204 ? "204" : "500";
+    xqc_http_header_t fields[] = {
+        { .name = { ":status", 7 }, .value = { (void *)status, 3 } },
+        { .name = { MINI_GET_CHECKPOINT_HEADER, sizeof(MINI_GET_CHECKPOINT_HEADER) - 1 },
+          .value = { conn->get_task_id, strlen(conn->get_task_id) } },
+    };
+    xqc_http_headers_t headers = { .headers = fields, .count = sizeof(fields) / sizeof(fields[0]) };
+    ssize_t ret = xqc_h3_request_send_headers(stream->h3_request, &headers, 1);
+    if (ret == -XQC_EAGAIN) {
+        return XQC_OK;
+    }
+    conn->get_checkpoint_request = NULL;
+    if (ret < 0) {
+        return XQC_ERROR;
+    }
+    conn->get_task_confirmed = conn->get_checkpoint_status == 204;
+    return XQC_OK;
+}
+
+static int
+xqc_mini_svr_register_get_stream(xqc_mini_svr_user_conn_t *conn,
+    xqc_mini_svr_user_stream_t *stream, const char *id, size_t expected)
+{
+    if (expected > XQC_MINI_SVR_MAX_TRACKED_FRAGMENTS || (size_t)stream->stream_index >= expected) {
+        return XQC_ERROR;
+    }
+    if (strcmp(conn->get_task_id, id)) {
+        if (stream->stream_index != 0 || (conn->get_task_id[0] && !conn->get_task_confirmed)) {
+            return XQC_ERROR;
+        }
+        unsigned char *seen = calloc((expected + CHAR_BIT - 1) / CHAR_BIT, 1);
+        if (!seen) {
+            return XQC_ERROR;
+        }
+        free(conn->get_task_streams);
+        conn->get_task_streams = seen;
+        snprintf(conn->get_task_id, sizeof(conn->get_task_id), "%s", id);
+        conn->observer_get_expected = expected;
+        conn->observer_get_closed = 0;
+        conn->get_checkpoint_status = 0;
+        conn->get_task_confirmed = 0;
+        conn->get_task_failed = 0;
+    }
+    if (conn->get_checkpoint_status || conn->observer_get_expected != expected) {
+        return XQC_ERROR;
+    }
+    size_t index = (size_t)stream->stream_index;
+    unsigned char *seen = &conn->get_task_streams[index / CHAR_BIT];
+    unsigned char bit = 1U << (index % CHAR_BIT);
+    if (*seen & bit) {
+        return XQC_ERROR;
+    }
+    *seen |= bit;
+    stream->get_task_file = 1;
+    return XQC_OK;
+}
+
 int
 xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
@@ -2048,12 +2112,34 @@ xqc_mini_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_us
     xqc_mini_svr_user_conn_t *user_conn =
         xqc_mini_svr_get_conn_from_request(user_stream);
     xqc_mini_svr_unlink_deferred_request(user_conn, user_stream);
-    if (user_conn && user_stream->method == REQUEST_METHOD_GET && user_stream->metadata_parsed
-        && user_stream->response_status >= 200 && user_stream->response_status < 300) {
+    if (user_conn && user_stream->get_confirmation) {
+        if (user_conn->get_checkpoint_request == user_stream) {
+            user_conn->get_checkpoint_request = NULL;
+        }
+    } else if (user_conn && user_stream->method == REQUEST_METHOD_GET && user_stream->metadata_parsed
+        && (user_stream->get_task_file || (!user_conn->get_task_id[0]
+            && user_stream->response_status >= 200 && user_stream->response_status < 300)))
+    {
+        if (user_stream->get_task_file && (user_stream->response_status < 200
+            || user_stream->response_status >= 300 || stats.stream_err
+            || user_stream->response_body_sent != user_stream->response_body_len))
+        {
+            user_conn->get_task_failed = 1;
+        }
         user_conn->observer_get_closed++;
-        if (user_conn->observer_get_expected && user_conn->observer_get_closed >= user_conn->observer_get_expected) {
+        if (user_conn->observer_get_expected && user_conn->observer_get_closed == user_conn->observer_get_expected) {
             xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid, "get_requests_closed", 0, 0, 0);
-            mini_observer_finish(user_conn->observer);
+            int checkpoint_error = mini_observer_finish(user_conn->observer);
+            if (user_stream->get_task_file) {
+                int observer_unavailable = user_conn->ctx->args->observer_config.enabled
+                    && !user_conn->observer;
+                user_conn->get_checkpoint_status =
+                    checkpoint_error || observer_unavailable || user_conn->get_task_failed ? 500 : 204;
+                xqc_mini_svr_user_stream_t *query = user_conn->get_checkpoint_request;
+                if (xqc_mini_svr_send_get_confirmation(user_conn) != XQC_OK && query) {
+                    xqc_h3_request_close(query->h3_request);
+                }
+            }
         }
     }
     if (user_stream->recv_body_fd >= 0) {
@@ -2185,6 +2271,14 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
     }
 
 
+    if (user_stream->get_confirmation) {
+        if (!(flag & XQC_REQ_NOTIFY_READ_EMPTY_FIN)) {
+            return XQC_ERROR;
+        }
+        user_stream->fin_received = 1;
+        return xqc_mini_svr_send_get_confirmation(user_conn);
+    }
+
     read = 0;
     recv_buff_size = sizeof(recv_buff);
     
@@ -2199,6 +2293,7 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         }
         char observer_attempt[192] = {0};
         int observer_attempt_seen = 0;
+        int managed_get = 0, checkpoint_query = 0;
         int have_index = 0;
         int have_count = 0;
         int have_offset = 0;
@@ -2218,7 +2313,12 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
             printf("%.*s: %.*s\n",
                 (int)h->name.iov_len, (char*)h->name.iov_base,
                 (int)h->value.iov_len, (char*)h->value.iov_base);
-            if (xqc_mini_svr_header_name_is(h, "x-observer-attempt")) {
+            if (xqc_mini_svr_header_name_is(h, "x-observer-attempt")
+                || xqc_mini_svr_header_name_is(h, MINI_GET_TASK_HEADER)
+                || xqc_mini_svr_header_name_is(h, MINI_GET_CHECKPOINT_HEADER))
+            {
+                managed_get |= xqc_mini_svr_header_name_is(h, MINI_GET_TASK_HEADER);
+                checkpoint_query |= xqc_mini_svr_header_name_is(h, MINI_GET_CHECKPOINT_HEADER);
                 if (!observer_attempt_seen && h->value.iov_len > 0
                     && h->value.iov_len < sizeof(observer_attempt)
                     && !memchr(h->value.iov_base, 0, h->value.iov_len)) {
@@ -2329,6 +2429,30 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
         user_stream->expected_content_length =
             have_content_length ? (size_t)parsed_content_length : 0;
 
+        if (checkpoint_query) {
+            if (!user_conn || managed_get || user_stream->method != REQUEST_METHOD_GET
+                || (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_TRAILER))
+                || user_stream->expected_content_length || have_index || have_count
+                || !mini_get_task_id_valid(observer_attempt)
+                || strcmp(user_conn->get_task_id, observer_attempt)
+                || user_conn->get_checkpoint_request)
+            {
+                return XQC_ERROR;
+            }
+            user_stream->get_confirmation = 1;
+            user_stream->fin_received = fin;
+            user_conn->get_checkpoint_request = user_stream;
+            xqc_observer_ignore_stream(user_conn->ctx->engine, &user_conn->cid, xqc_h3_stream_id(h3_request));
+            return xqc_mini_svr_send_get_confirmation(user_conn);
+        }
+        if (managed_get && (!user_conn || user_stream->method != REQUEST_METHOD_GET
+            || !mini_get_task_id_valid(observer_attempt))) {
+            return XQC_ERROR;
+        }
+        if (!managed_get && user_conn && user_conn->get_task_id[0]) {
+            return XQC_ERROR;
+        }
+
         if (user_stream->method == REQUEST_METHOD_GET) {
             if (!have_index || !have_count || !have_offset || !have_total
                 || !have_content_length || parsed_count == 0
@@ -2395,12 +2519,21 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                     user_stream->resolved_path);
             }
             if (user_stream->metadata_parsed) {
-                if (user_stream->stream_index == 0 && user_conn->observer_get_closed >= user_conn->observer_get_expected) {
-                    user_conn->observer_get_closed = 0;
-                }
                 size_t observer_range = xqc_mini_svr_get_stream_range_size(user_stream);
-                user_conn->observer_get_expected = user_stream->total_file_size ?
+                size_t expected = user_stream->total_file_size ?
                     (user_stream->total_file_size - 1) / observer_range + 1 : 1;
+                if (managed_get) {
+                    if (xqc_mini_svr_register_get_stream(user_conn, user_stream,
+                            observer_attempt, expected) != XQC_OK) {
+                        return XQC_ERROR;
+                    }
+                } else {
+                    if (user_stream->stream_index == 0
+                        && user_conn->observer_get_closed >= user_conn->observer_get_expected) {
+                        user_conn->observer_get_closed = 0;
+                    }
+                    user_conn->observer_get_expected = expected;
+                }
             }
             xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
                 xqc_h3_stream_id(h3_request), observer_attempt, 1, user_stream->stream_index,
@@ -2765,6 +2898,11 @@ xqc_mini_svr_h3_request_write_notify(xqc_h3_request_t *h3_request, void *strm_us
 {
     DEBUG;
     xqc_mini_svr_user_stream_t *user_stream = (xqc_mini_svr_user_stream_t *)strm_user_data;
+    if (user_stream->get_confirmation) {
+        xqc_mini_svr_user_conn_t *conn = xqc_mini_svr_get_conn_from_request(user_stream);
+        return conn && conn->get_checkpoint_request == user_stream
+            ? xqc_mini_svr_send_get_confirmation(conn) : XQC_OK;
+    }
     if (!user_stream->response_prepared) {
         return XQC_OK;
     }

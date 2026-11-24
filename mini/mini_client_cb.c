@@ -298,6 +298,13 @@ xqc_mini_cli_h3_request_close_notify(xqc_h3_request_t *h3_request, void *user_da
 {
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)user_data;
     xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    if (user_stream->get_confirmation) {
+        if (!user_stream->recv_fin && user_conn->get_confirmation_result == EINPROGRESS) {
+            user_conn->get_confirmation_result = EPROTO;
+        }
+        free(user_stream);
+        return XQC_OK;
+    }
     xqc_mini_cli_ctx_t *conn_ctx = user_conn->ctx;
     xqc_request_stats_t stats = xqc_h3_request_get_stats(h3_request);
 
@@ -499,6 +506,47 @@ xqc_mini_cli_parse_size_header(const xqc_http_header_t *header,
     return XQC_OK;
 }
 
+static int
+xqc_mini_cli_read_get_confirmation(xqc_mini_cli_user_stream_t *stream,
+    xqc_request_notify_flag_t flag)
+{
+    xqc_mini_cli_user_conn_t *conn = stream->user_conn;
+    if (stream->recv_fin || conn->get_confirmation_result != EINPROGRESS) {
+        return XQC_OK;
+    }
+    unsigned char fin = (flag & XQC_REQ_NOTIFY_READ_EMPTY_FIN) != 0;
+    if (flag & (XQC_REQ_NOTIFY_READ_BODY | XQC_REQ_NOTIFY_READ_TRAILER)) {
+        conn->get_confirmation_result = EPROTO;
+        return XQC_ERROR;
+    }
+    if (flag & XQC_REQ_NOTIFY_READ_HEADER) {
+        xqc_http_headers_t *headers = xqc_h3_request_recv_headers(stream->h3_request, &fin);
+        int status = 0, matched = 0;
+        if (headers) {
+            for (size_t i = 0; i < headers->count; ++i) {
+                const xqc_http_header_t *h = &headers->headers[i];
+                if (xqc_mini_cli_header_name_is(h, ":status")) {
+                    status += h->value.iov_len == 3 && !memcmp(h->value.iov_base, "204", 3) ? 1 : 2;
+                } else if (xqc_mini_cli_header_name_is(h, MINI_GET_CHECKPOINT_HEADER)) {
+                    size_t len = strlen(conn->get_task_id);
+                    matched += h->value.iov_len == len
+                        && !memcmp(h->value.iov_base, conn->get_task_id, len) ? 1 : 2;
+                }
+            }
+        }
+        if (status != 1 || matched != 1 || stream->get_confirmation_headers) {
+            conn->get_confirmation_result = EPROTO;
+            return XQC_ERROR;
+        }
+        stream->get_confirmation_headers = 1;
+    }
+    if (fin) {
+        stream->recv_fin = 1;
+        conn->get_confirmation_result = stream->get_confirmation_headers ? 0 : EPROTO;
+    }
+    return XQC_OK;
+}
+
 int
 xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request, 
     xqc_request_notify_flag_t flag, void *h3s_user_data)
@@ -509,6 +557,9 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
     unsigned char fin = 0;
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
     xqc_mini_cli_user_conn_t *user_conn = user_stream->user_conn;
+    if (user_stream->get_confirmation) {
+        return xqc_mini_cli_read_get_confirmation(user_stream, flag);
+    }
     if (user_stream->recv_fin) {
         return XQC_OK;
     }
@@ -635,7 +686,8 @@ xqc_mini_cli_h3_request_read_notify(xqc_h3_request_t *h3_request,
             /* POST response length describes its acknowledgement, not the file.
              * Resolve GET metadata only after all response range checks pass. */
             xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
-                xqc_h3_stream_id(h3_request), user_conn->ctx->args->observer_config.attempt_id,
+                xqc_h3_stream_id(h3_request), user_conn->get_task_id[0]
+                    ? user_conn->get_task_id : user_conn->ctx->args->observer_config.attempt_id,
                 1, user_stream->stream_index, user_stream->recv_offset, parsed_content_length,
                 user_conn->max_concurrent_requests, stream_range_size);
 
@@ -836,6 +888,9 @@ int
 xqc_mini_cli_h3_request_write_notify(xqc_h3_request_t *h3_request, void *h3s_user_data)
 {
     xqc_mini_cli_user_stream_t *user_stream = (xqc_mini_cli_user_stream_t *)h3s_user_data;
+    if (user_stream->get_confirmation) {
+        return xqc_mini_cli_send_get_confirmation(user_stream);
+    }
     if (!user_stream->hdr_sent) {
         int ret = xqc_mini_cli_send_h3_headers(user_stream);
         if (ret != XQC_OK || !user_stream->hdr_sent) {

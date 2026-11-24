@@ -75,6 +75,9 @@ class RoadtestObserver:
         self._cleanup_lock = _claim_cleanup_lock(self.root / "cleanup.lock")
         self.remotes = {"board": board, "server": server}
         self.enabled = not args.disable_observer
+        self.requires_get_confirmation = (
+            getattr(args, "get_repeat", 1) > 1 and getattr(args, "direction", "get") in {"get", "both"}
+        )
         self.supported = {"board": False, "server": False}
         self.paths = {
             "board": args.board_resource_dir.rstrip("/") + "/observer_" + session,
@@ -216,9 +219,11 @@ class RoadtestObserver:
                         result = self.remotes[endpoint].run(command, timeout_s=15)
                         if result.exit_code or result.timed_out or result.truncated:
                             raise OSError("不能核验观测目录")
-                        owners = ({tag for tag in self.manifest["attempts"]
-                                   if re.fullmatch(re.escape("api_" + self.session + "_") + r"[A-Za-z0-9_.-]+", tag)}
-                                  if endpoint == "board" else {"server"})
+                        owners = {"server"} if endpoint == "server" else {
+                            base for tag, entry in self.manifest["attempts"].items()
+                            if isinstance((base := entry.get("connection_attempt_id", tag)), str)
+                            and re.fullmatch(re.escape("api_" + self.session + "_") + r"[A-Za-z0-9_.-]+", base)
+                        }
                         for line in result.output.splitlines():
                             name = line.removeprefix("./")
                             match = re.fullmatch(r"(.+)\.[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"
@@ -281,10 +286,12 @@ class RoadtestObserver:
         self.save()
 
     def start(self):
-        if not self.enabled:
+        if not self.enabled and not self.requires_get_confirmation:
             return
-        for dependency in ("openpyxl", "matplotlib.pyplot"):
-            importlib.import_module(dependency)
+        if self.enabled:
+            for dependency in ("openpyxl", "matplotlib.pyplot"):
+                importlib.import_module(dependency)
+        ready = set()
         for endpoint, remote in self.remotes.items():
             executable = self.args.client_executable if endpoint == "board" else self.args.server_executable
             directory = self.args.board_dir if endpoint == "board" else self.args.server_dir
@@ -294,8 +301,15 @@ class RoadtestObserver:
             try:
                 response = remote.run(command + " --telemetry-capabilities", timeout_s=10)
                 capabilities = _json_response(response.output)
-                if (response.exit_code or response.timed_out or response.truncated
-                        or capabilities.get("transport_schema") != 2
+                if response.exit_code or response.timed_out or response.truncated:
+                    raise ValueError("无法读取可执行文件的能力声明")
+                if self.requires_get_confirmation and capabilities.get("get_task_confirmation") is not True:
+                    raise ValueError("缺少 get_task_confirmation，请部署配套的新版可执行文件")
+                if not self.enabled:
+                    info["capabilities"] = capabilities
+                    ready.add(endpoint)
+                    continue
+                if (capabilities.get("transport_schema") != 2
                         or capabilities.get("event_schema") != 1
                         or capabilities.get("hol_event_accounting") is not True
                         or capabilities.get("observer_revision") != 2
@@ -321,11 +335,14 @@ class RoadtestObserver:
                 info["binary_sha256"] = token[0]
                 self.clock_probe(endpoint, command, "before")
                 self.supported[endpoint] = True
+                ready.add(endpoint)
             except Exception as exc:
                 self.error(endpoint, exc, status="UNSUPPORTED")
         self.save()
-        if not all(self.supported.values()):
-            raise RuntimeError("双端 P0 观测预检未通过，尚未开始文件传输；详见 manifest.errors")
+        if ready != set(self.remotes):
+            raise RuntimeError("双端可执行文件能力预检未通过，尚未开始文件传输；详见 manifest.errors")
+        if not self.enabled:
+            return
         if getattr(self.args, "observer_radio", False) or getattr(self.args, "observer_network", False):
             from benchmark_telemetry import create_session, telemetry_call
             from argparse import Namespace
@@ -389,10 +406,19 @@ class RoadtestObserver:
         self.manifest["endpoints"].setdefault(endpoint, {}).setdefault("commands", []).append(argv)
         self.save()
 
-    def begin(self, attempt, metadata):
-        self.active.add(attempt)
-        self.manifest["attempts"][attempt] = dict(metadata, run_tag=attempt,
-            controller_start_us=time.time_ns()//1000)
+    def begin(self, attempt, metadata, repeat=1):
+        start_us = time.time_ns() // 1000
+        if repeat == 1:
+            self.active.add(attempt)
+            self.manifest["attempts"][attempt] = dict(
+                metadata, run_tag=attempt, controller_start_us=start_us)
+        else:
+            for iteration in range(1, repeat + 1):
+                task = f"{attempt}.{iteration}"
+                self.active.add(task)
+                self.manifest["attempts"][task] = dict(
+                    metadata, run_tag=task, connection_attempt_id=attempt,
+                    iteration=iteration, iterations=repeat, controller_start_us=start_us)
         self.save()
         if self.optional_collectors:
             from benchmark_telemetry import telemetry_call
@@ -431,8 +457,10 @@ class RoadtestObserver:
     def needs_server_state(self):
         return self.server_log_uncollected
 
-    def end(self, attempt, success=None, error=None):
+    def end(self, attempt, success=None, error=None, transfers=None):
         try:
+            if transfers is not None:
+                return self._end_repeated(attempt, success, error, transfers)
             return self._end(attempt, success, error)
         finally:
             try:
@@ -448,41 +476,9 @@ class RoadtestObserver:
         if not self.enabled:
             self.save()
             return {"status": "DISABLED", "errors": []}
-        deadline = time.monotonic() + getattr(self.args, "observer_checkpoint_timeout_s", 15.0)
-        paths = set()
-        while True:
-            paths.update(self.collect(checkpoints_only=True))
-            receipts = self.checkpoint_files.get(attempt, ())
-            found = {path.parent.name for path in receipts}
-            if found == set(self.remotes) or time.monotonic() >= deadline:
-                break
-            time.sleep(min(0.25, max(0, deadline-time.monotonic())))
-        # Receipts are published after sealing. Include all files of their
-        # writers, including segments archived before this call.
-        paths.update(self.collect())
-        for path in self.checkpoint_files.get(attempt, ()):
-            paths.update(self.writer_files[_writer_prefix(str(path))])
-        paths = {path for path in paths if path.is_file()}
-        relative_paths = {path.relative_to(self.root).as_posix() for path in paths}
-        current = {
-            **self.manifest,
-            "attempts": {attempt: entry},
-            "files": {
-                key: meta for key, meta in self.manifest["files"].items()
-                if meta["local_path"].replace("\\", "/") in relative_paths
-            },
-        }
-        tables = _summarize(self.root, current, paths)
+        tables, missing = self._summarize_attempts({attempt: entry}, {attempt})
         summary, = tables["transfer_observability_summary"]
-        reasons = list(summary.get("integrity_errors" if success is False else "validation_errors", []))
-        if found != set(self.remotes):
-            reasons.append("双端任务检查点等待超时：" + ",".join(sorted(set(self.remotes)-found)))
-        if success is False and not summary.get("integrity_valid"):
-            reasons.append("失败任务观测完整性未通过验收")
-        elif success is not False and (not summary.get("hol_valid") or not summary.get("window_valid")):
-            reasons.append("HoL 或发送窗口未通过完整性验收")
-        result = {"status": "INVALID" if reasons else "OK", "errors": list(dict.fromkeys(reasons)),
-                  "metrics_valid": bool(summary.get("observation_valid"))}
+        result = self._validate_attempt(summary, missing[attempt], success)
         entry["observation"] = result
         self.save()
         if self.optional_collectors:
@@ -490,6 +486,100 @@ class RoadtestObserver:
             telemetry_call(self.optional_collectors, "end_attempt", attempt)
             telemetry_call(self.optional_collectors, "result", attempt, success, {}, error)
         return result
+
+    def _end_repeated(self, attempt, success, error, transfers):
+        entries = {}
+        results = {}
+        end_us = time.time_ns() // 1000
+        for row in transfers:
+            task = row["attempt_id"]
+            self.active.discard(task)
+            entry = self.manifest["attempts"][task]
+            entries[task] = entry
+            entry.update(
+                controller_end_us=end_us,
+                business_success=row["get_fct_status"] == "ok" if row["started"] else None,
+                business_error=None if row["get_fct_status"] == "ok" else row["get_fct_status"],
+                confirmation_status=row["confirmation_status"],
+            )
+            status = "NOT_RUN" if not row["started"] else "DISABLED" if not self.enabled else "INCOMPLETE"
+            results[task] = {"status": status, "errors": [], "metrics_valid": False}
+        if self.enabled:
+            required = {row["attempt_id"] for row in transfers if row["confirmation_status"] == "ok"}
+            tables, missing = self._summarize_attempts(entries, required)
+            connection_ids = defaultdict(set)
+            for summary in tables["transfer_observability_summary"]:
+                task = summary["attempt_id"]
+                if results[task]["status"] == "NOT_RUN":
+                    continue
+                if task not in required and missing[task]:
+                    results[task]["errors"] = ["未收到双端任务检查点"]
+                    continue
+                results[task] = self._validate_attempt(summary, missing[task], entries[task]["business_success"])
+            for checkpoint in tables["observer_health"]:
+                if checkpoint.get("checkpoint") and checkpoint.get("attempt_id") in required:
+                    connection_ids[checkpoint["endpoint"]].add(checkpoint["conn_uid"])
+            for endpoint, ids in connection_ids.items():
+                if len(ids) > 1:
+                    for task in required:
+                        results[task].update(status="INVALID", metrics_valid=False)
+                        results[task]["errors"].append(f"{endpoint} 的文件检查点来自多条 QUIC 连接")
+        for task, result in results.items():
+            entries[task]["observation"] = result
+        self.save()
+        if self.optional_collectors:
+            from benchmark_telemetry import telemetry_call
+            telemetry_call(self.optional_collectors, "end_attempt", attempt)
+            telemetry_call(self.optional_collectors, "result", attempt, success, {}, error)
+        errors = [f"{task}: {reason}" for task, result in results.items()
+                  if result["status"] == "INVALID" for reason in result["errors"]]
+        return {"status": "INVALID" if errors else "OK" if self.enabled else "DISABLED",
+                "errors": errors, "transfers": results}
+
+    def _summarize_attempts(self, entries, required):
+        # Writers keep cumulative sequences on reused connections. Include the
+        # earlier archived segments when validating any checkpoint from a writer.
+        deadline = time.monotonic() + getattr(self.args, "observer_checkpoint_timeout_s", 15.0)
+        endpoint_names = set(self.remotes)
+        paths = set()
+        while True:
+            paths.update(self.collect(checkpoints_only=True))
+            missing = {
+                task: endpoint_names - {p.parent.name for p in self.checkpoint_files.get(task, ())}
+                for task in required
+            }
+            if not any(missing.values()) or time.monotonic() >= deadline:
+                break
+            time.sleep(min(0.25, max(0, deadline-time.monotonic())))
+        paths.update(self.collect())
+        missing = {}
+        for task in entries:
+            receipts = self.checkpoint_files.get(task, ())
+            missing[task] = endpoint_names - {p.parent.name for p in receipts}
+            for path in receipts:
+                paths.update(self.writer_files[_writer_prefix(str(path))])
+        paths = {path for path in paths if path.is_file()}
+        relative_paths = {path.relative_to(self.root).as_posix() for path in paths}
+        current = {
+            **self.manifest, "attempts": entries,
+            "files": {
+                key: meta for key, meta in self.manifest["files"].items()
+                if meta["local_path"].replace("\\", "/") in relative_paths
+            },
+        }
+        return _summarize(self.root, current, paths), missing
+
+    @staticmethod
+    def _validate_attempt(summary, missing, success):
+        reasons = list(summary.get("integrity_errors" if success is False else "validation_errors", []))
+        if missing:
+            reasons.append("双端任务检查点等待超时：" + ",".join(sorted(missing)))
+        if success is False and not summary.get("integrity_valid"):
+            reasons.append("失败任务观测完整性未通过验收")
+        elif success is not False and (not summary.get("hol_valid") or not summary.get("window_valid")):
+            reasons.append("HoL 或发送窗口未通过完整性验收")
+        return {"status": "INVALID" if reasons else "OK", "errors": list(dict.fromkeys(reasons)),
+                "metrics_valid": bool(summary.get("observation_valid")) and not reasons}
 
     def collect(self, final=False, checkpoints_only=False):
         """Copy and verify sealed segments; return local paths touched by this pass.
@@ -613,8 +703,9 @@ class RoadtestObserver:
                 try:
                     receipt = json.loads(item[2].read_text(encoding="utf-8"))
                     attempt = receipt.get("attempt_id")
-                    base = attempt if endpoint == "board" else "server"
-                    if (attempt in self.manifest["attempts"] and receipt.get("endpoint") == endpoint
+                    entry = self.manifest["attempts"].get(attempt)
+                    base = entry.get("connection_attempt_id", attempt) if entry and endpoint == "board" else "server"
+                    if (entry and receipt.get("endpoint") == endpoint
                             and receipt.get("task_complete") is True
                             and receipt.get("writer_prefix") == self.paths[endpoint] + "/" + item[0]
                             and isinstance(base, str) and re.fullmatch(
@@ -731,7 +822,10 @@ def observe(args, method, *values):
         return getattr(observer, method)(*values)
     except Exception:
         LOG.exception("P0观测 %s 失败；业务结果保持独立", method)
-        if method in ("track_temporary", "finish") or (method == "start" and observer.enabled):
+        repeated_begin = method == "begin" and len(values) == 3 and values[2] > 1
+        if repeated_begin or method in ("track_temporary", "finish") or (
+            method == "start" and (observer.enabled or getattr(observer, "requires_get_confirmation", False))
+        ):
             raise
         if method == "end":
             return {"status": "INVALID", "errors": ["任务观测验收异常，详见控制机日志"]}

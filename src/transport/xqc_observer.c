@@ -55,7 +55,7 @@ static void
 observer_emit(xqc_connection_t *conn, int event, const char *kind, const char *body)
 {
     xqc_observer_t *o = conn->observer;
-    if (!o || !o->sink) { return; }
+    if (!o || !o->sink || o->task_complete) { return; }
     char *record = o->record;
     uint64_t now = observer_now(o), realtime = xqc_observer_realtime_us();
     if (!realtime) { o->invalid = 1; }
@@ -192,7 +192,8 @@ void
 xqc_observer_stream_update(xqc_stream_t *stream, uint64_t begin, uint64_t end)
 {
     xqc_connection_t *conn = stream->stream_conn;
-    if (!conn->observer || stream->stream_type != XQC_CLI_BID) { return; }
+    if (!conn->observer || stream->stream_type != XQC_CLI_BID
+        || (stream->stream_flag & XQC_STREAM_FLAG_OBSERVER_IGNORED)) { return; }
     if (!stream->observer) {
         if (conn->observer->stream_count >= XQC_OBSERVER_MAX_STREAMS) {
             conn->observer->invalid = 1; return;
@@ -264,6 +265,25 @@ xqc_observer_stream_end(xqc_stream_t *stream, const char *reason)
 }
 
 void
+xqc_observer_ignore_stream(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id)
+{
+    xqc_connection_t *conn = observer_conn(engine, cid);
+    xqc_stream_t *stream = observer_stream(conn, id);
+    if (!stream || (stream->observer && stream->observer->bound)) { return; }
+    stream->stream_flag |= XQC_STREAM_FLAG_OBSERVER_IGNORED;
+    if (stream->observer) {
+        xqc_observer_stream_t *v = stream->observer;
+        v->state.ended = 1;
+        observer_aggregate(conn, v, observer_now(conn->observer));
+        conn->observer->unbound_observed--;
+        conn->observer->stream_count--;
+        free(v->state.ranges);
+        free(v);
+        stream->observer = NULL;
+    }
+}
+
+void
 xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
     const char *attempt, int direction, uint64_t index, uint64_t offset,
     uint64_t length, uint64_t concurrency, uint64_t range_bytes)
@@ -331,8 +351,9 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
                 return;
             }
         }
-        o->aggregate_prebind_unobserved = 1;
+        o->aggregate_prebind_unobserved = !o->task_complete;
         o->any_hol_us = o->sum_b_peak = o->sum_b_byte_us = 0;
+        o->stream_count = o->unbound_observed;
         o->aggregate_last_us = o->aggregate_from_us = observer_now(conn->observer);
         o->write_cost_us = o->write_samples = o->write_bytes = 0;
     }
@@ -341,7 +362,10 @@ xqc_observer_bind(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t id,
         xqc_observer_event(conn, "observer_error", "\"reason\":\"attempt_reused_for_multiple_transfers\"");
         return;
     }
-    if (task_start) { o->first_request_id = UINT64_MAX; }
+    if (task_start) {
+        o->task_complete = 0;
+        o->first_request_id = UINT64_MAX;
+    }
     if (index == 0) { o->first_request_id = id; }
     snprintf(o->attempt, sizeof(o->attempt), "%s", attempt);
     snprintf(o->direction, sizeof(o->direction), "%s", direction == 1 ? "get" : "post");
@@ -656,5 +680,7 @@ xqc_observer_checkpoint_metadata(xqc_engine_t *engine, const xqc_cid_t *cid,
         "\"transport_seq\":%"PRIu64",\"event_seq\":%"PRIu64",\"observer_valid\":%s,\"task_complete\":true",
         o->attempt, o->uid, o->endpoint, o->seq, o->event_seq,
         o->invalid || o->dropped ? "false" : "true");
-    return n < 0 || (size_t)n >= capacity ? -1 : 0;
+    if (n < 0 || (size_t)n >= capacity) { return -1; }
+    o->task_complete = 1;
+    return 0;
 }

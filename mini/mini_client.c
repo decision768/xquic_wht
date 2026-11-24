@@ -1302,11 +1302,14 @@ xqc_mini_cli_format_h3_req(xqc_http_header_t *headers,
     }
     
     const netins_udp_observer_config_t *oc = &user_stream->user_conn->ctx->args->observer_config;
-    if (oc->enabled && oc->attempt_id[0]) {
-        headers[req_sz].name.iov_base = "x-observer-attempt";
-        headers[req_sz].name.iov_len = strlen("x-observer-attempt");
-        headers[req_sz].value.iov_base = (void *)oc->attempt_id;
-        headers[req_sz].value.iov_len = strlen(oc->attempt_id);
+    const char *task_id = user_stream->user_conn->get_task_id;
+    if (*task_id || (oc->enabled && oc->attempt_id[0])) {
+        const char *name = *task_id ? MINI_GET_TASK_HEADER : "x-observer-attempt";
+        const char *id = *task_id ? task_id : oc->attempt_id;
+        headers[req_sz].name.iov_base = (void *)name;
+        headers[req_sz].name.iov_len = strlen(name);
+        headers[req_sz].value.iov_base = (void *)id;
+        headers[req_sz].value.iov_len = strlen(id);
         headers[req_sz].flags = 0;
         ++req_sz;
     }
@@ -1534,10 +1537,14 @@ xqc_mini_cli_send_h3_req(xqc_mini_cli_user_conn_t *user_conn, xqc_mini_cli_user_
     }
 
     xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
-        xqc_h3_stream_id(user_stream->h3_request), user_conn->ctx->args->observer_config.attempt_id,
+        xqc_h3_stream_id(user_stream->h3_request), user_conn->get_task_id[0]
+            ? user_conn->get_task_id : user_conn->ctx->args->observer_config.attempt_id,
         user_conn->ctx->args->req_cfg.method == REQUEST_METHOD_GET ? 1 : 2,
         stream_index, chunk_offset, chunk_length, user_conn->max_concurrent_requests,
         xqc_mini_cli_get_stream_range_size(user_conn));
+    if (user_conn->get_task_id[0]) {
+        mini_observer_resume(user_conn->observer);
+    }
     int ret;
     xqc_mini_cli_req_config_t *req_cfg =
         &user_stream->user_conn->ctx->args->req_cfg;

@@ -353,7 +353,8 @@ mini_backend_client_poll(mini_backend_client_t *client)
 int
 mini_backend_client_transfer(mini_backend_client_t *client,
     int direction, const char *local_path, const char *remote_path,
-    uint32_t timeout_ms, mini_backend_transfer_result_t *result)
+    uint32_t timeout_ms, mini_backend_transfer_result_t *result,
+    const char *get_task_id)
 {
     if (client == NULL || client->connection == NULL || result == NULL
         || !client->api_mode || !client->connect_started
@@ -367,6 +368,17 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     {
         return EINVAL;
     }
+
+    xqc_mini_cli_user_conn_t *conn = client->connection;
+    if (conn->get_task_needs_confirmation) {
+        return EBUSY;
+    }
+    if ((!get_task_id && conn->get_task_id[0])
+        || (get_task_id && (!mini_get_task_id_valid(get_task_id)
+            || !strcmp(conn->get_task_id, get_task_id)))) {
+        return EINVAL;
+    }
+    int reuse_observer = get_task_id && conn->get_task_id[0];
 
     uint64_t observer_task_start_us = xqc_observer_clock_us();
     memset(result, 0, sizeof(*result));
@@ -382,10 +394,19 @@ mini_backend_client_transfer(mini_backend_client_t *client,
             ? client->connection->transfer_error_code : EIO;
     }
 
-    mini_observer_stop(&client->connection->observer);
-    client->connection->observer = mini_observer_start(client->ctx.engine,
-        &client->connection->cid, client->ctx.eb, &client->args->observer_config,
-        "board", xqc_mini_cli_observer_extra, client->connection);
+    if (get_task_id) {
+        snprintf(conn->get_task_id, sizeof(conn->get_task_id), "%s", get_task_id);
+    }
+    if (!reuse_observer) {
+        netins_udp_observer_config_t observer_config = client->args->observer_config;
+        if (get_task_id) {
+            snprintf(observer_config.attempt_id, sizeof(observer_config.attempt_id),
+                "%s", get_task_id);
+        }
+        mini_observer_stop(&conn->observer);
+        conn->observer = mini_observer_start(client->ctx.engine, &conn->cid,
+            client->ctx.eb, &observer_config, "board", xqc_mini_cli_observer_extra, conn);
+    }
     int ret = XQC_OK;
     if (method == REQUEST_METHOD_GET
         && !xqc_mini_cli_paths_ready_for_requests(client->connection))
@@ -483,8 +504,96 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     xqc_observer_phase(client->ctx.engine, &client->connection->cid,
         ret == XQC_OK ? "client_confirmed" : "client_failed", 0, 0,
         xqc_observer_elapsed_us(observer_task_start_us, xqc_observer_clock_us()));
-    mini_observer_finish(client->connection->observer);
+    int checkpoint_result = mini_observer_finish(conn->observer);
+    if (ret == XQC_OK && get_task_id) {
+        conn->get_task_needs_confirmation = 1;
+        conn->get_confirmation_result = client->args->observer_config.enabled
+            && (!conn->observer || checkpoint_result != 0) ? EIO : EINPROGRESS;
+    }
     return ret == XQC_OK ? 0 : ret;
+}
+
+int
+xqc_mini_cli_send_get_confirmation(xqc_mini_cli_user_stream_t *stream)
+{
+    xqc_mini_cli_user_conn_t *conn = stream->user_conn;
+    if (stream->hdr_sent || conn->get_confirmation_result != EINPROGRESS) {
+        return XQC_OK;
+    }
+    const char *id = conn->get_task_id;
+    const char *authority = conn->ctx->args->req_cfg.host;
+    xqc_http_header_t fields[] = {
+        { .name = { ":method", 7 }, .value = { "GET", 3 } },
+        { .name = { ":scheme", 7 }, .value = { "https", 5 } },
+        { .name = { ":authority", 10 }, .value = { (void *)authority, strlen(authority) } },
+        { .name = { ":path", 5 }, .value = { "/", 1 } },
+        { .name = { MINI_GET_CHECKPOINT_HEADER, sizeof(MINI_GET_CHECKPOINT_HEADER) - 1 },
+          .value = { (void *)id, strlen(id) } },
+    };
+    xqc_http_headers_t headers = { .headers = fields, .count = sizeof(fields) / sizeof(fields[0]) };
+    ssize_t ret = xqc_h3_request_send_headers(stream->h3_request, &headers, 1);
+    if (ret == -XQC_EAGAIN) {
+        return XQC_OK;
+    }
+    if (ret < 0) {
+        conn->get_confirmation_result = EIO;
+        return XQC_ERROR;
+    }
+    stream->hdr_sent = 1;
+    return XQC_OK;
+}
+
+int
+mini_backend_client_wait_get_task(mini_backend_client_t *client, uint32_t timeout_ms)
+{
+    xqc_mini_cli_user_conn_t *conn = client->connection;
+    if (!conn || !conn->get_task_needs_confirmation || conn->connection_closed) {
+        return EINVAL;
+    }
+    if (conn->get_confirmation_result != EINPROGRESS) {
+        return conn->get_confirmation_result;
+    }
+
+    xqc_usec_t start = xqc_now();
+    struct event *timeout_event = NULL;
+    int ret = mini_backend_client_arm_timeout(client->ctx.eb, start, timeout_ms, &timeout_event);
+    if (ret != 0) {
+        return ret;
+    }
+
+    xqc_mini_cli_user_stream_t *stream = calloc(1, sizeof(*stream));
+    if (!stream) {
+        mini_backend_client_disarm_timeout(&timeout_event);
+        return ENOMEM;
+    }
+    stream->user_conn = conn;
+    stream->get_confirmation = 1;
+    xqc_stream_settings_t settings = {0};
+    stream->h3_request = xqc_h3_request_create(client->ctx.engine, &conn->cid, &settings, stream);
+    if (!stream->h3_request) {
+        free(stream);
+        mini_backend_client_disarm_timeout(&timeout_event);
+        return EIO;
+    }
+    xqc_observer_ignore_stream(client->ctx.engine, &conn->cid, xqc_h3_stream_id(stream->h3_request));
+    xqc_mini_cli_send_get_confirmation(stream);
+
+    while (conn->get_confirmation_result == EINPROGRESS && !conn->connection_closed) {
+        if (xqc_now() - start >= (xqc_usec_t)timeout_ms * 1000) {
+            conn->get_confirmation_result = ETIMEDOUT;
+        } else if (event_base_loop(client->ctx.eb, EVLOOP_ONCE) != 0) {
+            conn->get_confirmation_result = EIO;
+        }
+    }
+    mini_backend_client_disarm_timeout(&timeout_event);
+    if (conn->get_confirmation_result == EINPROGRESS) {
+        conn->get_confirmation_result = ECONNRESET;
+    }
+    ret = conn->get_confirmation_result;
+    if (ret == 0) {
+        conn->get_task_needs_confirmation = 0;
+    }
+    return ret;
 }
 
 int

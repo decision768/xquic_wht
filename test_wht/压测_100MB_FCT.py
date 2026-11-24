@@ -24,6 +24,8 @@ Active GX-style outputs (each algorithm has its own directory):
 
 Single-link baselines are recorded under single_link/. Warmup logs are excluded from summaries.
 每轮每个方向测两次 minrtt 单链路和每种算法各一次双卡聚合。
+每个 GET 用例默认在同一 QUIC 连接上顺序下载三次，以三次 FCT 的算术平均值参与对比。
+所有尝试的逐文件 FCT、吞吐率和收尾确认记录在 get_transfers.csv。
 默认把聚合放在两次单链路之间，并在各轮轮换聚合算法和首尾网卡。
 GET 轮换云端发送算法，板卡接收端固定 adaptive。POST 轮换板卡发送算法，
 云端接收端固定 adaptive。服务端需要先部署支持 --scheduler 的配套版本。
@@ -85,6 +87,8 @@ DEFAULT_POST_LOCAL = "/oemdata/gx/xquic_file/download/kkk.txt"
 # 超时参数
 DEFAULT_CLIENT_TIMEOUT_MS = 600000
 DEFAULT_COMMAND_TIMEOUT_S = 690.0
+DEFAULT_GET_REPEAT = 3  # 同一条 QUIC 连接内顺序下载的文件数
+DEFAULT_GET_CONFIRM_TIMEOUT_MS = 15000  # 单份文件等待云端收尾确认的时限
 
 # SSH密码从环境变量读取，也可填写下方的代码配置。
 
@@ -169,7 +173,7 @@ SINGLE_LINK_SCHEDULER = "minrtt"
 
 TRANSFER_RECORD_RE = re.compile(r"transfer\s+iteration=", re.IGNORECASE)
 TRANSFER_FIELD_RE = re.compile(
-    r"\b(?P<key>direction|bytes|fragments|elapsed_us|throughput_mbps|metric)="
+    r"\b(?P<key>iteration|direction|bytes|fragments|elapsed_us|throughput_mbps|metric)="
     r"(?P<value>[^\s\r\n]+)",
     re.IGNORECASE,
 )
@@ -185,11 +189,18 @@ EXPECTED_B_METRIC = {
 }
 GET_FCT_METRIC = "first_get_submit_to_last_body"
 GET_FCT_PREFIX = "[get_fct] "
+GET_CHECKPOINT_PREFIX = "[get_checkpoint] "
 GET_FCT_FIELDS = (
     "first_get_submit_us", "last_body_us", "get_fct_us", "get_fct_mbps",
     "get_fct_received_bytes", "get_fct_expected_bytes", "get_fct_status",
 )
-GET_LOG_METRIC_FIELDS = (*GET_FCT_FIELDS, "body_time_ms", "body_mbps")
+GET_CONNECTION_FIELDS = (
+    "get_repeat_count", "get_valid_file_count", "get_confirmed_file_count",
+    "get_confirm_wait_total_us",
+)
+GET_LOG_METRIC_FIELDS = (
+    *GET_FCT_FIELDS, "body_time_ms", "body_mbps", *GET_CONNECTION_FIELDS,
+)
 GET_FCT_BOARD_FAILURES = (
     "setup_failed", "connect_failed", "transfer_timeout", "transfer_failed",
     "byte_count_mismatch", "missing_timestamp", "invalid_timestamp_order",
@@ -1161,7 +1172,13 @@ def build_client_command(
             str(args.client_timeout_ms),
         ]
     )
-    argv.extend(observe(args, "client_arguments", attempt_token) or [])
+    observer_args = observe(args, "client_arguments", attempt_token) or []
+    if direction == "get" and args.get_repeat > 1:
+        argv.extend(["--repeat", str(args.get_repeat),
+                     "--get-confirm-timeout-ms", str(args.get_confirm_timeout_ms)])
+        if not observer_args:
+            argv.extend(["--attempt-id", attempt_token])
+    argv.extend(observer_args)
     observe(args, "command", "board", argv)
     client_command = " ".join(q(item) for item in argv)
     gate_file = f"/tmp/{attempt_token}_client.start"
@@ -1571,17 +1588,26 @@ def parse_get_fct(
         record = json.loads(lines[0])
     except ValueError:
         record = None
+    return validate_get_fct(
+        record, attempt_id, expected_size, 1, 1,
+        success=success, timed_out=command_result.timed_out, require_id=observer_enabled,
+    )
+
+
+def validate_get_fct(record, attempt_id, expected_size, iteration, count, *,
+                     success=True, timed_out=False, require_id=True):
+    fct = dict.fromkeys(GET_FCT_FIELDS)
     if (
         not isinstance(record, dict)
         or type(record.get("iteration")) is not int
         or type(record.get("iterations")) is not int
-        or (record["iteration"], record["iterations"]) != (1, 1)
+        or (record["iteration"], record["iterations"]) != (iteration, count)
     ):
         fct["get_fct_status"] = "invalid_fct_record"
         return fct
 
     board_attempt_id = record.get("attempt_id")
-    if board_attempt_id != attempt_id and (observer_enabled or board_attempt_id is not None):
+    if board_attempt_id != attempt_id and (require_id or board_attempt_id is not None):
         fct["get_fct_status"] = "attempt_id_mismatch"
         return fct
 
@@ -1603,7 +1629,7 @@ def parse_get_fct(
     elif fct["get_fct_received_bytes"] != expected_size or fct["get_fct_expected_bytes"] != expected_size:
         status = "byte_count_mismatch"
     elif not success:
-        status = "controller_timeout" if command_result.timed_out else "attempt_failed"
+        status = "controller_timeout" if timed_out else "attempt_failed"
     elif not first or not last:
         status = "missing_timestamp"
     elif last < first:
@@ -1618,6 +1644,122 @@ def parse_get_fct(
         fct["get_fct_mbps"] = expected_size * 8 / fct["get_fct_us"]
     fct["get_fct_status"] = status
     return fct
+
+
+def repeated_get_records(stdout_lines, attempt_id, expected_size, count, timed_out):
+    prefixes = (GET_FCT_PREFIX, GET_CHECKPOINT_PREFIX)
+    framed = {prefix: {} for prefix in prefixes}
+    bodies = {}
+    errors = []
+    for line in stdout_lines:
+        if line.startswith(prefixes):
+            prefix = next(prefix for prefix in prefixes if line.startswith(prefix))
+            try:
+                value = json.loads(line[len(prefix):])
+                iteration = value.get("iteration") if isinstance(value, dict) else None
+            except ValueError:
+                iteration = None
+            if type(iteration) is not int or not 1 <= iteration <= count:
+                errors.append("invalid repeated GET record")
+                continue
+            framed[prefix].setdefault(iteration, []).append(value)
+        elif TRANSFER_RECORD_RE.search(line):
+            for record in extract_transfer_records(line):
+                if record.get("direction", "").lower() == "get":
+                    bodies.setdefault(record.get("iteration"), []).append(record)
+
+    transfers = []
+    for iteration in range(1, count + 1):
+        task_id = f"{attempt_id}.{iteration}"
+        fct_records = framed[GET_FCT_PREFIX].get(iteration, [])
+        confirm_records = framed[GET_CHECKPOINT_PREFIX].get(iteration, [])
+        body_records = bodies.get(f"{iteration}/{count}", [])
+        started = bool(fct_records or confirm_records or body_records)
+        if len(fct_records) == 1:
+            metrics = validate_get_fct(fct_records[0], task_id, expected_size, iteration, count)
+        else:
+            metrics = dict.fromkeys(GET_FCT_FIELDS)
+            if len(fct_records) > 1:
+                metrics["get_fct_status"] = "multiple_fct_records"
+            elif not started and iteration > 1:
+                metrics["get_fct_status"] = "not_reached"
+            else:
+                metrics["get_fct_status"] = "controller_timeout" if timed_out else "missing_fct_record"
+
+        wait_us = None
+        if len(confirm_records) == 1:
+            confirmation = confirm_records[0]
+            wait = confirmation.get("wait_us")
+            status = confirmation.get("status")
+            if (confirmation.get("attempt_id") == task_id and status in ("ok", "failed")
+                    and type(wait) is int and 0 <= wait < (1 << 64) - 1):
+                confirmation_status, wait_us = status, wait
+            else:
+                confirmation_status = "invalid"
+        elif confirm_records:
+            confirmation_status = "duplicate"
+        elif not started:
+            confirmation_status = "not_reached"
+        else:
+            confirmation_status = "controller_timeout" if timed_out else "missing"
+
+        body_status, body_time_ms, body_mbps = "missing", None, None
+        if len(body_records) == 1:
+            body_status = "invalid"
+            body = body_records[0]
+            if (body.get("metric", "").lower() == EXPECTED_B_METRIC["get"]
+                    and transfer_numeric_fields_are_valid(body)):
+                fragments = re.fullmatch(r"([1-9]\d*)/([1-9]\d*)", body.get("fragments", ""))
+                elapsed_us = int(body["elapsed_us"])
+                rate = float(body["throughput_mbps"])
+                if (int(body["bytes"]) == expected_size and elapsed_us > 0 and rate > 0
+                        and fragments and fragments[1] == fragments[2]):
+                    calculated = expected_size * 8 / elapsed_us
+                    if abs(calculated - rate) <= max(0.01, calculated * 0.0001):
+                        body_status, body_time_ms, body_mbps = "ok", elapsed_us / 1000, rate
+        elif body_records:
+            body_status = "duplicate"
+
+        row = {
+            "iteration": iteration, "iterations": count, "attempt_id": task_id, "started": started,
+            "body_status": body_status, "body_time_ms": body_time_ms, "body_mbps": body_mbps,
+            "confirmation_status": confirmation_status, "confirmation_wait_us": wait_us, **metrics,
+        }
+        transfers.append(row)
+        if (metrics["get_fct_status"], body_status, confirmation_status) != ("ok", "ok", "ok"):
+            errors.append(
+                f"GET {iteration}/{count}: FCT={metrics['get_fct_status']}, "
+                f"body={body_status}, confirmation={confirmation_status}"
+            )
+    valid = [r for r in transfers if r["get_fct_status"] == "ok"]
+    if any(previous["last_body_us"] >= current["first_get_submit_us"]
+           for previous, current in zip(valid, valid[1:])):
+        errors.append("repeated GET timestamps overlap or are out of order")
+    return transfers, "; ".join(dict.fromkeys(errors))
+
+
+def summarize_get_connection(transfers, expected_size, success):
+    waits = [row["confirmation_wait_us"] for row in transfers if row["confirmation_wait_us"] is not None]
+    metrics = {
+        **dict.fromkeys(GET_FCT_FIELDS),
+        "get_repeat_count": len(transfers),
+        "get_valid_file_count": sum(row["get_fct_status"] == "ok" for row in transfers),
+        "get_confirmed_file_count": sum(row["confirmation_status"] == "ok" for row in transfers),
+        "get_confirm_wait_total_us": sum(waits) if waits else None,
+        "get_fct_expected_bytes": expected_size,
+        "get_fct_status": "incomplete_connection",
+        "body_time_ms": None,
+        "body_mbps": None,
+    }
+    if success:
+        fct_us = statistics.mean(row["get_fct_us"] for row in transfers)
+        body_time_ms = statistics.median(row["body_time_ms"] for row in transfers)
+        metrics.update(
+            get_fct_us=fct_us, get_fct_mbps=expected_size * 8 / fct_us,
+            get_fct_received_bytes=expected_size, get_fct_status="ok",
+            body_time_ms=body_time_ms, body_mbps=expected_size * 8 / (body_time_ms * 1000),
+        )
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -1693,7 +1835,8 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--quic-port", type=int, default=DEFAULT_QUIC_PORT)
     parser.add_argument("--server-name", default=DEFAULT_SERVER_NAME)
     parser.add_argument("--accept-timeout-ms", type=int, default=DEFAULT_ACCEPT_TIMEOUT_MS)
-    parser.add_argument("--serve-timeout-ms", type=int, default=DEFAULT_SERVE_TIMEOUT_MS)
+    parser.add_argument("--serve-timeout-ms", type=int, default=None,
+                        help="每条服务端连接的时限，默认按 GET 文件数自动计算")
     parser.add_argument("--server-ready-timeout-s", type=float, default=DEFAULT_SERVER_READY_TIMEOUT_S)
 
     parser.add_argument("--board-dir", default=DEFAULT_BOARD_DIR)
@@ -1748,8 +1891,13 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument(
         "--command-timeout-s",
         type=float,
-        default=DEFAULT_COMMAND_TIMEOUT_S,
+        default=None,
+        help="单个客户端 SSH 命令的时限，默认覆盖建连、传输和确认",
     )
+    parser.add_argument("--repeat", dest="get_repeat", type=int, default=DEFAULT_GET_REPEAT,
+                        help="每条连接顺序下载次数（仅 GET，默认 %(default)s）")
+    parser.add_argument("--get-confirm-timeout-ms", type=int, default=DEFAULT_GET_CONFIRM_TIMEOUT_MS,
+                        help="每次 GET 等待云端收尾确认的时限（默认 %(default)s ms）")
 
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
     parser.add_argument(
@@ -1887,10 +2035,28 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         parser.error("--board-ssh-port无效")
     if not 1 <= args.server_ssh_port <= 65535:
         parser.error("--server-ssh-port无效")
-    if args.client_timeout_ms <= 0 or args.command_timeout_s <= 0:
-        parser.error("客户端和控制端超时必须大于0")
-    if args.command_timeout_s <= args.client_timeout_ms / 1000.0:
-        parser.error("--command-timeout-s必须大于客户端timeout")
+    max_wire_ms = (1 << 32) - 1
+    if not 0 < args.client_timeout_ms <= max_wire_ms:
+        parser.error("--client-timeout-ms 超出客户端支持范围")
+    if not 0 < args.get_repeat <= max_wire_ms or not 0 < args.get_confirm_timeout_ms <= max_wire_ms:
+        parser.error("--repeat 和 --get-confirm-timeout-ms 必须是有效正整数")
+    repeated_get = args.direction in {"get", "both"} and args.get_repeat > 1
+    if args.serve_timeout_ms is None:
+        args.serve_timeout_ms = DEFAULT_SERVE_TIMEOUT_MS
+        if repeated_get:
+            args.serve_timeout_ms = max(
+                args.serve_timeout_ms,
+                args.get_repeat * (args.client_timeout_ms + args.get_confirm_timeout_ms) + 30000,
+            )
+    if args.command_timeout_s is None:
+        args.command_timeout_s = DEFAULT_COMMAND_TIMEOUT_S
+        if repeated_get:
+            args.command_timeout_s = max(
+                args.command_timeout_s,
+                (args.client_timeout_ms + args.serve_timeout_ms) / 1000.0 + 90,
+            )
+    if not math.isfinite(args.command_timeout_s) or args.command_timeout_s <= args.client_timeout_ms / 1000.0:
+        parser.error("--command-timeout-s必须是大于客户端timeout的有限数值")
     for value_name in (
         "observer_checkpoint_timeout_s",
         "server_ready_timeout_s",
@@ -1915,7 +2081,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         parser.error("--board-resource-retention-days不能小于0")
     if args.server_resource_retention_days < 0:
         parser.error("--server-resource-retention-days不能小于0")
-    if args.accept_timeout_ms < 0 or args.serve_timeout_ms <= 0:
+    if not 0 <= args.accept_timeout_ms <= max_wire_ms or not 0 < args.serve_timeout_ms <= max_wire_ms:
         parser.error("服务端timeout参数无效")
     active_directions = ("get", "post") if args.direction == "both" else (args.direction,)
     for direction in active_directions:
@@ -2862,6 +3028,12 @@ def summarize_get_fct(records: Sequence[Dict[str, object]]) -> Dict[str, object]
         "get_fct_valid_count": len(valid),
         "get_fct_excluded_count": sum(excluded.values()),
         "get_fct_exclusion_reasons": json.dumps(excluded, sort_keys=True),
+        "get_file_fct_expected_count": sum(record.get("get_repeat_count", 1) for record in records),
+        "get_file_fct_valid_count": sum(
+            record.get("get_valid_file_count", int(record.get("get_fct_status") == "ok"))
+            for record in records
+        ),
+        "get_file_confirmed_count": sum(record.get("get_confirmed_file_count", 0) for record in records),
         "get_fct_mean_ms": statistics.mean(valid) / 1000 if valid else "",
         "get_fct_median_ms": statistics.median(valid) / 1000 if valid else "",
     }
@@ -2894,6 +3066,7 @@ def write_gx_final_summary(
         "server_cpu_samples",
         "get_fct_valid_count", "get_fct_excluded_count", "get_fct_exclusion_reasons",
         "get_fct_mean_ms", "get_fct_median_ms",
+        "get_file_fct_expected_count", "get_file_fct_valid_count", "get_file_confirmed_count",
     ]
     path = log_root / f"stress_summary_{session}.csv"
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -3144,6 +3317,28 @@ def append_json_record(path: Path, record: Dict[str, object]) -> None:
         os.fsync(handle.fileno())
 
 
+def append_get_transfer_rows(path, metadata, connection_attempt_id, attempt, transfers, observation):
+    fields = [
+        *metadata, "connection_attempt_id", "attempt", "iteration", "iterations", "attempt_id",
+        "started", *GET_FCT_FIELDS, "body_status", "body_time_ms", "body_mbps",
+        "confirmation_status", "confirmation_wait_us", "p0_status", "p0_errors",
+    ]
+    with path.open("a", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        if handle.tell() == 0:
+            writer.writeheader()
+        observations = observation.get("transfers", {})
+        for transfer in transfers:
+            task_observation = observations.get(transfer["attempt_id"], observation)
+            writer.writerow({
+                **metadata, "connection_attempt_id": connection_attempt_id, "attempt": attempt,
+                **transfer, "p0_status": task_observation["status"],
+                "p0_errors": "; ".join(task_observation["errors"]),
+            })
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCase]) -> None:
     # 白名单快照：不序列化argparse整个对象，避免输出密码和私钥路径。
     profiles = list(dict.fromkeys(c.profile for c in plan if c.mode == "agg"))
@@ -3171,8 +3366,13 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "algorithm_cooldown_s": args.algorithm_cooldown_s,
         "verify_sha256": args.verify_sha256, "dry_run": args.dry_run,
         "scheduler_scope": "sender algorithm; GET server / POST client; receiver scheduler=adaptive",
+        "get_repeat_per_connection": args.get_repeat,
+        "get_fct_case_statistic": "mean_of_complete_connection",
+        "get_sha256_scope": "final_download_on_connection",
+        "get_confirm_timeout_ms": args.get_confirm_timeout_ms,
         "client_timeout_ms": args.client_timeout_ms,
         "command_timeout_s": args.command_timeout_s,
+        "serve_timeout_ms": args.serve_timeout_ms,
         "resource_monitor_enabled": args.resource_monitor,
         "board_resource_interval_s": args.board_resource_interval_s,
         "server_resource_interval_s": args.server_resource_interval_s,
@@ -3185,16 +3385,22 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "observer_checkpoint_timeout_s": args.observer_checkpoint_timeout_s,
         "measured_cases": sum(c.phase == "measured" for c in plan),
         "warmup_cases": sum(c.phase == "warmup" for c in plan),
+        "measured_file_transfers": sum(
+            args.get_repeat if c.direction == "get" else 1 for c in plan if c.phase == "measured"
+        ),
         "maximum_attempts": len(plan) * (args.retries + 1),
         "algorithm_position_counts": position_counts if args.execution_mode == "round-robin" else None,
     }
     (root / "experiment_config.json").write_text(
         json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-    fields = ["experiment_id", *TestCase.__dataclass_fields__]
+    fields = ["experiment_id", *TestCase.__dataclass_fields__, "files_per_connection"]
     with (root / "test_plan.csv").open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        writer.writerows(case_metadata(c, session) for c in plan)
+        writer.writerows(
+            {**case_metadata(c, session), "files_per_connection": args.get_repeat if c.direction == "get" else 1}
+            for c in plan
+        )
 
 
 
@@ -3417,16 +3623,19 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             successful_record: Optional[Dict[str, object]] = None
             first_start = ""
             last_end = ""
+            get_count = args.get_repeat if direction == "get" else 1
+            case_info = case_metadata(case, session)
 
             for attempt in range(1, args.retries + 2):
                 run_tag = (
                     f"api_{session}_{case.phase}_{case.profile}_r{round_index:03d}_{display_mode}_"
                     f"{direction}_i{round_index:03d}_a{attempt:02d}_{time.time_ns()}"
                 )
-                observe(args, "begin", run_tag, {**case_metadata(case, session),
+                observe(args, "begin", run_tag, {**case_info,
                     "expected_bytes": get_expected_size if direction == "get" else post_expected_size,
                     "expected_sha256": get_expected_sha if direction == "get" else post_expected_sha,
-                    "interfaces": MODE_INTERFACES[mode], "verify_sha256": args.verify_sha256})
+                    "interfaces": MODE_INTERFACES[mode], "verify_sha256": args.verify_sha256},
+                    get_count)
                 raw_stdout_path = raw_client_dir / f"{run_tag}.stdout.log"
                 raw_stderr_path = raw_client_dir / f"{run_tag}.stderr.log"
                 attempt_token = run_tag
@@ -3468,13 +3677,14 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
 
                 LOG.info(
                     "开始测试: round=%s mode=%s direction=%s interfaces=%s "
-                    "调度算法=%s 拥塞算法=%s attempt=%s/%s",
+                    "调度算法=%s 拥塞算法=%s 文件数=%s attempt=%s/%s",
                     round_index,
                     display_mode,
                     direction,
                     ",".join(MODE_INTERFACES[mode]),
                     scheduler,
                     cc,
+                    get_count,
                     attempt,
                     args.retries + 1,
                 )
@@ -3667,15 +3877,45 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     )
 
                 get_metrics = {}
+                get_transfers = []
                 if direction == "get":
-                    get_metrics = parse_get_fct(
-                        command_result, run_tag, expected_size, success,
-                        observer_enabled=not args.disable_observer,
-                    )
-                    get_metrics["body_time_ms"] = (
-                        parsed["transfer_elapsed_s"] * 1000 if parsed["metric"] else None
-                    )
-                    get_metrics["body_mbps"] = parsed["throughput_mbps"] if parsed["metric"] else None
+                    if get_count > 1:
+                        # The SSH capture is a tail buffer. The raw file retains early transfers
+                        # even if verbose output exceeded the in-memory limit.
+                        if raw_stdout_path.is_file():
+                            with raw_stdout_path.open(encoding="utf-8", errors="replace") as stdout:
+                                get_transfers, repeated_error = repeated_get_records(
+                                    stdout, run_tag, expected_size, get_count, command_result.timed_out)
+                        else:
+                            get_transfers, repeated_error = repeated_get_records(
+                                command_result.output.splitlines(), run_tag, expected_size,
+                                get_count, command_result.timed_out)
+                        if repeated_error:
+                            success = False
+                            error = "; ".join(filter(None, (error, repeated_error)))
+                        get_metrics = summarize_get_connection(get_transfers, expected_size, success)
+                        transferred_bytes = get_metrics["get_valid_file_count"] * expected_size
+                        elapsed_s = parsed["remote_wall_elapsed_s"]
+                        parsed.update(get_transferred_bytes=transferred_bytes,
+                                      wall_throughput_mbps=transferred_bytes * 8 / (elapsed_s * 1_000_000)
+                                      if elapsed_s > 0 else 0.0)
+                    else:
+                        get_metrics = parse_get_fct(
+                            command_result, run_tag, expected_size, success,
+                            observer_enabled=not args.disable_observer,
+                        )
+                        get_metrics["body_time_ms"] = (
+                            parsed["transfer_elapsed_s"] * 1000 if parsed["metric"] else None
+                        )
+                        get_metrics["body_mbps"] = parsed["throughput_mbps"] if parsed["metric"] else None
+                        get_transfers = [{
+                            "iteration": 1, "iterations": 1, "attempt_id": run_tag, "started": True,
+                            "body_status": "ok" if parsed["metric"] and success else "invalid",
+                            "confirmation_status": "not_required", "confirmation_wait_us": None,
+                            **get_metrics,
+                        }]
+                        get_metrics.update(get_repeat_count=1, get_confirmed_file_count=0,
+                                           get_valid_file_count=int(get_metrics["get_fct_status"] == "ok"))
                     fct_us = get_metrics["get_fct_us"]
                     parsed.update(
                         transfer_elapsed_s=fct_us / 1_000_000 if fct_us is not None else None,
@@ -3684,27 +3924,34 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         **get_metrics,
                     )
                 attempt_record = {
-                    **case_metadata(case, session), "attempt": attempt, "attempt_id": run_tag,
+                    **case_info, "attempt": attempt, "attempt_id": run_tag,
                     "success": success, "error": error, "start_time": start_dt.isoformat(),
                     "end_time": end_dt.isoformat(), "raw_stdout": str(raw_stdout_path),
                     "raw_stderr": str(raw_stderr_path), "parsed": parsed,
                     "board_resource": board_resource, "server_resource": server_resource,
                 }
+                if get_transfers:
+                    attempt_record["get_transfers"] = get_transfers
                 append_json_record(log_root / "attempts.jsonl", attempt_record)
-                if direction == "get":
-                    fct_rate = get_metrics["get_fct_mbps"]
+                for transfer in get_transfers:
                     LOG.info(
-                        "GET FCT: mode=%s round=%s attempt=%s get_fct_us=%s get_fct_mbps=%s status=%s",
-                        display_mode, round_index, attempt, get_metrics["get_fct_us"],
-                        f"{fct_rate:.3f}" if fct_rate is not None else None,
-                        get_metrics["get_fct_status"],
+                        "GET FCT: mode=%s round=%s attempt=%s file=%s/%s get_fct_us=%s "
+                        "get_fct_mbps=%s status=%s confirmation=%s wait_us=%s",
+                        display_mode, round_index, attempt, transfer["iteration"], transfer["iterations"],
+                        transfer["get_fct_us"], transfer["get_fct_mbps"], transfer["get_fct_status"],
+                        transfer["confirmation_status"], transfer["confirmation_wait_us"],
                     )
-                observation_result = observe(args, "end", run_tag, success, error)
+                observation_result = observe(
+                    args, "end", run_tag, success, error, get_transfers if get_count > 1 else None
+                )
                 if observation_result is None:
                     observation_result = {"status": "DISABLED" if args.disable_observer else "INVALID",
                                           "errors": [] if args.disable_observer else ["观测验收未返回结果"]}
                 append_json_record(log_root / "observability" / "attempt_validation.jsonl",
                                    {"attempt_id": run_tag, "business_success": success, **observation_result})
+                if get_transfers:
+                    append_get_transfer_rows(log_root / "get_transfers.csv", case_info, run_tag,
+                                             attempt, get_transfers, observation_result)
                 if success:
                     if direction == "get":
                         fct_us = get_metrics["get_fct_us"]

@@ -971,10 +971,10 @@ netins_udp_accept(netins_udp_t *server)
     return accepted;
 }
 
-int
-netins_udp_transfer(netins_udp_t *client,
-    const netins_udp_transfer_t *task,
-    netins_udp_transfer_result_t *result)
+static int
+netins_udp_transfer_file(netins_udp_t *client,
+    const netins_udp_transfer_t *task, netins_udp_transfer_result_t *result,
+    const char *get_task_id)
 {
     if (!netins_udp_valid(client) || client->role != NETINS_UDP_ROLE_CLIENT
         || client->state != NETINS_UDP_STATE_CONNECTED
@@ -993,6 +993,7 @@ netins_udp_transfer(netins_udp_t *client,
     }
     if (task->struct_size < sizeof(*task)
         || task->api_version != NETINS_UDP_API_VERSION
+        || (get_task_id && task->direction != NETINS_UDP_TRANSFER_GET)
         || result->struct_size < sizeof(*result)
         || result->api_version != NETINS_UDP_API_VERSION
         || (task->direction != NETINS_UDP_TRANSFER_GET
@@ -1019,7 +1020,7 @@ netins_udp_transfer(netins_udp_t *client,
     mini_backend_log_scope_enter(&client->backend_config);
     int ret = mini_backend_client_transfer(client->client_backend,
         backend_direction, task->local_path, task->remote_path,
-        task->timeout_ms, &backend_result);
+        task->timeout_ms, &backend_result, get_task_id);
     mini_backend_log_scope_leave();
 
     result->total_bytes = backend_result.total_bytes;
@@ -1060,6 +1061,42 @@ netins_udp_transfer(netins_udp_t *client,
         task->direction == NETINS_UDP_TRANSFER_GET
             ? "first_body_to_last_body"
             : "app_submit_not_remote_receive");
+    return 0;
+}
+
+int
+netins_udp_transfer(netins_udp_t *client, const netins_udp_transfer_t *task,
+    netins_udp_transfer_result_t *result)
+{
+    return netins_udp_transfer_file(client, task, result, NULL);
+}
+
+int
+netins_udp_transfer_get_task(netins_udp_t *client, const netins_udp_transfer_t *task,
+    netins_udp_transfer_result_t *result, const char *task_id)
+{
+    if (task_id == NULL) {
+        return netins_udp_set_error(client, EINVAL, "missing GET task ID");
+    }
+    return netins_udp_transfer_file(client, task, result, task_id);
+}
+
+int
+netins_udp_wait_get_task(netins_udp_t *client, uint32_t timeout_ms)
+{
+    if (!netins_udp_valid(client) || client->role != NETINS_UDP_ROLE_CLIENT
+        || client->state != NETINS_UDP_STATE_CONNECTED || client->client_backend == NULL
+        || timeout_ms == 0)
+    {
+        return netins_udp_set_error(client, EINVAL, "invalid GET confirmation wait");
+    }
+    mini_backend_log_scope_enter(&client->backend_config);
+    int ret = mini_backend_client_wait_get_task(client->client_backend, timeout_ms);
+    mini_backend_log_scope_leave();
+    if (ret != 0) {
+        return netins_udp_set_error(client, ret, "GET task confirmation failed");
+    }
+    netins_udp_clear_error(client);
     return 0;
 }
 

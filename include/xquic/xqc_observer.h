@@ -21,6 +21,8 @@ XQC_EXPORT_PUBLIC_API void xqc_observer_body(xqc_engine_t *, const xqc_cid_t *,
 XQC_EXPORT_PUBLIC_API void xqc_observer_phase(xqc_engine_t *, const xqc_cid_t *,
     const char *, uint64_t, uint64_t, uint64_t);
 XQC_EXPORT_PUBLIC_API int xqc_observer_checkpoint_metadata(xqc_engine_t *, const xqc_cid_t *, char *, size_t);
+/* Exclude an application control stream from file-stream accounting. */
+XQC_EXPORT_PUBLIC_API void xqc_observer_ignore_stream(xqc_engine_t *, const xqc_cid_t *, uint64_t);
 XQC_EXPORT_PUBLIC_API void xqc_observer_detach(xqc_engine_t *, const xqc_cid_t *);
 #ifdef __cplusplus
 }

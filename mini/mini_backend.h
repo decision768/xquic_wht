@@ -187,7 +187,10 @@ int mini_backend_client_run(mini_backend_client_t *client);
 int mini_backend_client_poll(mini_backend_client_t *client);
 int mini_backend_client_transfer(mini_backend_client_t *client,
     int direction, const char *local_path, const char *remote_path,
-    uint32_t timeout_ms, mini_backend_transfer_result_t *result);
+    uint32_t timeout_ms, mini_backend_transfer_result_t *result,
+    const char *get_task_id);
+int mini_backend_client_wait_get_task(mini_backend_client_t *client,
+    uint32_t timeout_ms);
 int mini_backend_client_shutdown(mini_backend_client_t *client,
     uint32_t timeout_ms);
 void mini_backend_client_destroy(mini_backend_client_t *client);

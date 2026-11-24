@@ -139,6 +139,8 @@ XQUIC_VERS_1.0 {
         netins_udp_listen;
         netins_udp_accept;
         netins_udp_transfer;
+        netins_udp_transfer_get_task;
+        netins_udp_wait_get_task;
         netins_udp_serve;
         netins_udp_stream_open;
         netins_udp_stream_accept;
