@@ -128,7 +128,7 @@ xqc_peekaboo_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         return fast_path;
     }
 
-    xqc_sched_path_eval_t slow_eval;
+    xqc_sched_path_eval_t slow_eval = {0};
     xqc_list_for_each(pos, &conn->conn_paths_list) {
         xqc_path_ctx_t *path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
         if (path == fast_path || !xqc_scheduler_path_eligible(path, packet_out, reinject)) {
