@@ -2110,7 +2110,9 @@ xqc_conn_log_sent_packet(xqc_connection_t *c, xqc_packet_out_t *po,
 }
 
 void
-xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t sent, xqc_usec_t now, xqc_send_type_t send_type)
+xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t sent,
+    xqc_usec_t now, xqc_send_type_t send_type,
+    xqc_usec_t socket_start_us, xqc_usec_t socket_return_us)
 {
     xqc_list_head_t  *pos, *next;
     xqc_packet_out_t *packet_out;
@@ -2137,6 +2139,9 @@ xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t 
                 xqc_pacing_on_packet_sent(&send_ctl->ctl_pacing, packet_out->po_used_size);
             }
 
+            if (packet_out->po_arrival_trace) {
+                xqc_arrival_sent(send_ctl, packet_out, socket_start_us, socket_return_us, 1);
+            }
             xqc_send_ctl_on_packet_sent(send_ctl, pn_ctl, packet_out, now);
             xqc_path_send_buffer_remove(path, packet_out);
             if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
@@ -2223,6 +2228,7 @@ xqc_path_send_burst_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
     struct iovec      iov_array[XQC_MAX_SEND_MSG_ONCE];
     char              enc_pkt_array[XQC_MAX_SEND_MSG_ONCE][XQC_CONN_MAX_UDP_PAYLOAD_SIZE];
     int               burst_cnt = 0;
+    xqc_bool_t        trace_batch = XQC_FALSE;
     xqc_packet_out_t *packet_out;
     xqc_list_head_t  *pos, *next;
     xqc_send_ctl_t   *send_ctl = path->path_send_ctl;
@@ -2278,6 +2284,7 @@ xqc_path_send_burst_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
             iov_array[burst_cnt].iov_len = packet_out->po_used_size;
         }
 
+        trace_batch |= packet_out->po_arrival_trace;
         /* reach send limit, break and send packets */
         burst_cnt++;
         if (burst_cnt >= XQC_MAX_SEND_MSG_ONCE) {
@@ -2291,8 +2298,10 @@ xqc_path_send_burst_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
         return burst_cnt;
     }
 
-    /* burst send packets */
+    /* The observation clock starts after the batch has been assembled. */
+    xqc_usec_t socket_start_us = trace_batch ? xqc_monotonic_timestamp() : 0;
     ret = xqc_send_burst(conn, path, iov_array, burst_cnt);
+    xqc_usec_t socket_return_us = trace_batch && ret > 0 ? xqc_monotonic_timestamp() : 0;
     xqc_arrival_socket_result(conn, path, NULL, ret, burst_cnt, now, 1);
     if (ret < 0) {
         return ret;
@@ -2301,7 +2310,7 @@ xqc_path_send_burst_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
         xqc_log(conn->log, XQC_LOG_ERROR, "|error send msg|sent:%ui||cnt:%d|", ret, burst_cnt);
     }
 
-    xqc_on_packets_send_burst(conn, path, ret, now, send_type);
+    xqc_on_packets_send_burst(conn, path, ret, now, send_type, socket_start_us, socket_return_us);
     return ret;
 }
 
@@ -2619,6 +2628,8 @@ xqc_send_packet_with_pn(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_packet
 
     /* send data */
     ssize_t sent = xqc_send(conn, path, conn->enc_pkt, conn->enc_pkt_len);
+    xqc_usec_t socket_return_us = packet_out->po_arrival_trace && sent == conn->enc_pkt_len
+        ? xqc_monotonic_timestamp() : 0;
     xqc_arrival_socket_result(conn, path, packet_out, sent, conn->enc_pkt_len, now, 0);
     if (sent != conn->enc_pkt_len) {
         xqc_log(conn->log, XQC_LOG_ERROR,
@@ -2641,6 +2652,9 @@ xqc_send_packet_with_pn(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_packet
     xqc_pn_ctl_t *pn_ctl = xqc_get_pn_ctl(conn, path);
 
     xqc_conn_log_sent_packet(conn, packet_out, now);
+    if (packet_out->po_arrival_trace) {
+        xqc_arrival_sent(path->path_send_ctl, packet_out, now, socket_return_us, 0);
+    }
     xqc_send_ctl_on_packet_sent(path->path_send_ctl, pn_ctl, packet_out, now);
     return sent;
 }

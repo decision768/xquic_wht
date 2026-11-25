@@ -113,6 +113,9 @@ def main():
         elif kind == "socket_attempt":
             attempts.append(row)
         elif kind == "packet_sent":
+            row.setdefault("send_time_basis", "legacy_pre_socket")
+            if not isinstance(row["send_time_basis"], str):
+                row["send_time_basis"] = "unknown"
             sends.append(row)
         elif kind == "summary":
             summaries[conn] = row
@@ -200,9 +203,16 @@ def main():
                        ("packet_sends", sends), ("connection_summaries", summaries.values()),
                        ("file_fct", fct), ("receiver_hol_fct", receiver), ("boundary_uncertainty", boundaries)):
         write_csv(args.output / (name + ".csv"), rows)
-    errors = [r["W_error_us"] for r in sends if isinstance(r.get("W_error_us"), int)]
-    report = dict(chosen_path_W_error_samples=len(errors),
-        chosen_path_W_error_mean_us=sum(errors)/len(errors) if errors else None,
+    errors_by_basis = defaultdict(list)
+    for row in sends:
+        if type(row.get("W_error_us")) is int:
+            errors_by_basis[row["send_time_basis"]].append(row["W_error_us"])
+    error_stats = {basis: dict(samples=len(errors), mean_us=sum(errors) / len(errors))
+                   for basis, errors in errors_by_basis.items()}
+    error_mean = next(iter(error_stats.values()))["mean_us"] if len(error_stats) == 1 else None
+    report = dict(chosen_path_W_error_samples=sum(stats["samples"] for stats in error_stats.values()),
+        chosen_path_W_error_mean_us=error_mean,
+        chosen_path_W_error_by_basis=error_stats,
         schema_version=1, connections=len(configs), modes=sorted({r["mode"] for r in configs.values()}),
         prediction_records=len(predictions), wait_episodes=len(waits), successful_send_mappings=len(sends),
         connection_counters_scope="connection lifetime, not GET FCT", issues=issues,

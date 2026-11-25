@@ -13,6 +13,9 @@ static uint64_t clock_fn(void);
 #include "src/transport/scheduler/xqc_scheduler_adaptive_v2.c"
 #include "src/transport/scheduler/xqc_scheduler_adaptive.c"
 ssize_t xqc_send(xqc_connection_t *,xqc_path_ctx_t *,unsigned char *,unsigned int);
+ssize_t xqc_send_burst(xqc_connection_t *, xqc_path_ctx_t *, struct iovec *, int);
+xqc_int_t xqc_check_acked_or_dropped_pkt(xqc_connection_t *, xqc_packet_out_t *, xqc_send_type_t);
+void xqc_convert_pkt_0rtt_2_1rtt(xqc_connection_t *, xqc_packet_out_t *);
 #include "src/common/xqc_algorithm.h"
 #include "arrival_transport_slices.c"
 
@@ -30,6 +33,8 @@ static xqc_observer_t observer;
 static xqc_scheduler_callback_t cb;
 static unsigned sent_events, log_fail, log_records, pacing_debits;
 static ssize_t socket_result;
+static uint64_t transport_sent_us;
+static char last_packet_sent[1200];
 static uint64_t test_window=10000;
 static uint64_t test_cwnd(void *ctx){(void)ctx;return test_window;}
 static uint32_t test_rate(void *ctx){(void)ctx;return 100000;}
@@ -47,7 +52,10 @@ static int log_sink(void *data,int family,const char *line)
     const char *logpath=getenv("XQC_ARRIVAL_TEST_LOG");
     if(logpath) {FILE *f=fopen(logpath,"ab");assert(f);fprintf(f,"%s\n",line);fclose(f);}
     assert(line[0]=='{' && line[strlen(line)-1]=='}');
-    if(strstr(line,"\"event\":\"packet_sent\""))sent_events++;
+    if (strstr(line, "\"event\":\"packet_sent\"")) {
+        sent_events++;
+        snprintf(last_packet_sent, sizeof(last_packet_sent), "%s", line);
+    }
     return log_fail?-1:0;
 }
 xqc_stream_t *xqc_find_stream_by_id(xqc_stream_id_t id,xqc_id_hash_table_t *hash)
@@ -78,9 +86,34 @@ xqc_bool_t xqc_packet_out_on_specific_path(xqc_connection_t *c,xqc_packet_out_t 
 xqc_usec_t xqc_conn_get_queue_fin_timeout(xqc_connection_t *c){(void)c;return 0;}
 
 ssize_t xqc_send(xqc_connection_t *c,xqc_path_ctx_t *path,unsigned char *data,unsigned int len)
-{(void)c;(void)path;(void)data;return socket_result<0?socket_result:(ssize_t)len;}
+{
+    clock_now += 40;
+    return socket_result < 0 ? socket_result : (ssize_t)len;
+}
+ssize_t xqc_send_burst(xqc_connection_t *c, xqc_path_ctx_t *path, struct iovec *iov, int count)
+{
+    clock_now += 40;
+    return socket_result;
+}
+xqc_int_t xqc_conn_enc_packet(xqc_connection_t *c, xqc_path_ctx_t *path, xqc_packet_out_t *p,
+    char *data, size_t capacity, size_t *length, xqc_usec_t now)
+{
+    clock_now += 20;
+    *length = p->po_used_size;
+    return XQC_OK;
+}
+xqc_int_t xqc_check_acked_or_dropped_pkt(xqc_connection_t *c, xqc_packet_out_t *p,
+    xqc_send_type_t type)
+{ return XQC_FALSE; }
+void xqc_convert_pkt_0rtt_2_1rtt(xqc_connection_t *c, xqc_packet_out_t *p)
+{ assert(0); }
+xqc_bool_t xqc_send_ctl_check_anti_amplification(xqc_send_ctl_t *ctl, size_t bytes)
+{ return XQC_FALSE; }
+xqc_bool_t xqc_send_packet_check_cc(xqc_send_ctl_t *ctl, xqc_packet_out_t *p,
+    uint32_t bytes, xqc_usec_t now)
+{ return XQC_TRUE; }
 void xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *ctl,xqc_pn_ctl_t *pn,xqc_packet_out_t *p,xqc_usec_t now)
-{(void)pn;xqc_arrival_sent(ctl,p,now);}
+{ transport_sent_us = now; }
 int xqc_pacing_is_on(xqc_pacing_t *p){return p->pacing_on;}
 void xqc_pacing_on_packet_sent(xqc_pacing_t *p,uint32_t n)
 {pacing_debits++;p->bytes_budget=p->bytes_budget>n?p->bytes_budget-n:0;}
@@ -95,6 +128,8 @@ static void setup(unsigned mode,int old)
     memset(paths,0,sizeof(paths));memset(ctls,0,sizeof(ctls));memset(streams,0,sizeof(streams));
     memset(&cc,0,sizeof(cc));memset(&info,0,sizeof(info));memset(&observer,0,sizeof(observer));
     clock_now=1000000;test_window=10000;log_fail=sent_events=log_records=pacing_debits=0;socket_result=0;
+    transport_sent_us = 0;
+    last_packet_sent[0] = '\0';
     cc.xqc_cong_ctl_get_cwnd=test_cwnd;cc.xqc_cong_ctl_get_bandwidth_estimate=test_rate;
     cc.xqc_cong_ctl_info_cb=&info;info.full_bw_reached=test_full;
     /* Non-NULL BBR initialization marks the same eligibility as production. */
@@ -236,7 +271,7 @@ int main(void)
     puts("PASS T20/T21/T25: mixed, framing, specified-path and recovery bypass, no observer dependency");
     p.po_frame_types=XQC_FRAME_BIT_STREAM;conn.observer=NULL;assert(decide(&p));
     p.po_pkt.pkt_num=7;p.po_pkt.pkt_pns=XQC_PNS_APP_DATA;
-    assert(!sent_events);xqc_arrival_sent(&ctls[0],&p,clock_now+3000);assert(sent_events==1);
+    assert(!sent_events);xqc_arrival_sent(&ctls[0],&p,clock_now+3000,clock_now+3040,0);assert(sent_events==1);
     log_fail=1;clock_now+=1000;decide(&p);assert(conn.arrival->lifecycle_dropped>0);
     puts("PASS T28: unsampled totals distinguish lifecycle drops");teardown();
 
@@ -267,18 +302,48 @@ int main(void)
     assert(history(conn.arrival,paths[0].path_id)->nr==8 && streams[2].arrival->spent_us==0);
     puts("PASS T18/T22: exhausted stream does not spend another transfer's budget; rate history persists");teardown();
     setup(XQC_ARRIVAL_SHADOW,0);packet(&p,0);assert(!decide(&p));
+    p.po_arrival_prediction_valid = 1;
+    p.po_arrival_prediction_path = paths[1].path_id;
+    p.po_arrival_decision_us = clock_now - 100;
+    p.po_arrival_prediction_W = 50;
     conn.enc_pkt_len=1000;socket_result=-XQC_EAGAIN;
     assert(xqc_send_packet_with_pn(&conn,&paths[1],&p)==-XQC_EAGAIN && sent_events==0);
+    uint64_t single_start = clock_now;
     socket_result=0;assert(xqc_send_packet_with_pn(&conn,&paths[1],&p)==1000 && sent_events==1);
-    packet(&p,0);p.po_arrival_trace=1;xqc_path_send_buffer_append(&paths[1],&p,&paths[1].path_schedule_buf[0]);
-    xqc_on_packets_send_burst(&conn,&paths[1],-XQC_EAGAIN,clock_now,0);
-    assert(sent_events==1 && paths[1].path_schedule_bytes==1000);
-    xqc_on_packets_send_burst(&conn,&paths[1],1,clock_now,0);
-    assert(sent_events==2 && paths[1].path_schedule_bytes==0);
-    puts("PASS T24: real single/batch completion paths log only successful sends");
+    char timing[160];
+    snprintf(timing, sizeof(timing), "\"send_time_us\":%"PRIu64",\"socket_return_us\":%"PRIu64","
+        "\"send_time_basis\":\"socket_call_start\"", single_start, single_start + 40);
+    assert(strstr(last_packet_sent, timing));
+    assert(strstr(last_packet_sent, "\"W_error_us\":90}"));
+    assert(transport_sent_us == single_start && p.po_sent_time == single_start);
+
+    packet(&p,0);packet(&second,0);
+    p.po_arrival_trace = second.po_arrival_trace = 1;
+    p.po_arrival_prediction_valid = 1;
+    p.po_arrival_prediction_path = paths[1].path_id;
+    p.po_arrival_decision_us = clock_now - 100;
+    p.po_arrival_prediction_W = 50;
+    xqc_path_send_buffer_append(&paths[1],&p,&paths[1].path_schedule_buf[0]);
+    xqc_path_send_buffer_append(&paths[1],&second,&paths[1].path_schedule_buf[0]);
+    socket_result = -XQC_EAGAIN;
+    assert(xqc_path_send_burst_packets(&conn,&paths[1],0,0)==-XQC_EAGAIN);
+    assert(sent_events==1 && paths[1].path_schedule_bytes==2000);
+    uint64_t batch_prepare = clock_now;
+    socket_result = 1;
+    assert(xqc_path_send_burst_packets(&conn,&paths[1],0,0)==1);
+    assert(sent_events==2 && paths[1].path_schedule_bytes==1000);
+    snprintf(timing, sizeof(timing), "\"send_time_us\":%"PRIu64",\"socket_return_us\":%"PRIu64","
+        "\"send_time_basis\":\"batch_socket_call_start\"", batch_prepare + 40, batch_prepare + 80);
+    assert(strstr(last_packet_sent, timing));
+    assert(strstr(last_packet_sent, "\"W_error_us\":170}"));
+    assert(transport_sent_us == batch_prepare);
+    assert(paths[1].path_schedule_buf[0].next == &second.po_list);
+    assert(xqc_path_send_burst_packets(&conn,&paths[1],0,0)==1);
+    assert(sent_events==3 && paths[1].path_schedule_bytes==0);
+    puts("PASS T24: send clocks bracket the call and only accepted packets are recorded after retry or partial success");
     packet(&p,0);p.po_frame_types=XQC_FRAME_BIT_ACK;ctls[1].ctl_pacing.pacing_on=1;
     xqc_path_send_buffer_append(&paths[1],&p,&paths[1].path_schedule_buf[0]);
-    xqc_on_packets_send_burst(&conn,&paths[1],1,clock_now,0);assert(pacing_debits==0);
+    xqc_on_packets_send_burst(&conn,&paths[1],1,clock_now,0,0,0);assert(pacing_debits==0);
     puts("PASS shared pacing regression: ACK-only batch does not debit the pacer");teardown();
     setup(XQC_ARRIVAL_ENFORCE,0);packet(&p,0);
     streams[0].stream_send_offset=0;p.po_stream_frames[0].ps_offset=0;p.po_stream_frames[0].ps_length=10;

@@ -884,7 +884,6 @@ xqc_send_ctl_update_cwnd_limited(xqc_send_ctl_t *send_ctl, xqc_usec_t now)
 void
 xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_packet_out_t *packet_out, xqc_usec_t now)
 {
-    xqc_arrival_sent(send_ctl, packet_out, now);
     xqc_pkt_num_space_t pns = packet_out->po_pkt.pkt_pns;
 
     if (send_ctl->diag.enabled) {

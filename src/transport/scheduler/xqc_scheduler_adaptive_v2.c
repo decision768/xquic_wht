@@ -579,18 +579,29 @@ void xqc_arrival_socket_result(xqc_connection_t *c,xqc_path_ctx_t *path,xqc_pack
         emit(a,b,1);
     }
 }
-void xqc_arrival_sent(xqc_send_ctl_t *ctl,xqc_packet_out_t *p,uint64_t now)
+void xqc_arrival_sent(xqc_send_ctl_t *ctl, xqc_packet_out_t *p,
+    uint64_t socket_start_us, uint64_t socket_return_us, int batch)
 {
-    xqc_arrival_t *a=ctl->ctl_conn->arrival;if(!a || !p->po_arrival_trace)return;
-    char b[1200],error[64];
-    if(p->po_arrival_prediction_valid && p->po_arrival_prediction_path==ctl->ctl_path->path_id
-        && now>=p->po_arrival_decision_us && now-p->po_arrival_decision_us<=INT64_MAX && p->po_arrival_prediction_W<=INT64_MAX)
-        snprintf(error,sizeof(error),"%"PRId64,(int64_t)(now-p->po_arrival_decision_us)-(int64_t)p->po_arrival_prediction_W);
-    else strcpy(error,"null");
+    xqc_arrival_t *a = ctl->ctl_conn->arrival;
+    if (!a || !p->po_arrival_trace) return;
+
+    char b[1200], error[64];
+    if (p->po_arrival_prediction_valid && p->po_arrival_prediction_path == ctl->ctl_path->path_id
+        && socket_start_us >= p->po_arrival_decision_us
+        && socket_start_us - p->po_arrival_decision_us <= INT64_MAX
+        && p->po_arrival_prediction_W <= INT64_MAX)
+    {
+        snprintf(error, sizeof(error), "%"PRId64,
+            (int64_t)(socket_start_us - p->po_arrival_decision_us) - (int64_t)p->po_arrival_prediction_W);
+    } else {
+        strcpy(error, "null");
+    }
     snprintf(b,sizeof(b),"{\"family\":\"adaptive_arrival_events\",\"schema_version\":1,\"event\":\"packet_sent\","
       "\"conn_uid\":%"PRIu64",\"packet_uid\":%"PRIu64",\"decision_id\":%"PRIu64",\"path_id\":%"PRIu64",\"pns\":%d,\"packet_number\":%"PRIu64","
-      "\"send_time_us\":%"PRIu64",\"stream_id\":%"PRIu64",\"offset\":%"PRIu64",\"length\":%u,\"W_error_us\":%s}",
-      a->conn_uid,p->po_arrival_uid,p->po_arrival_decision_id,ctl->ctl_path->path_id,p->po_pkt.pkt_pns,p->po_pkt.pkt_num,now,
+      "\"send_time_us\":%"PRIu64",\"socket_return_us\":%"PRIu64",\"send_time_basis\":\"%s\","
+      "\"stream_id\":%"PRIu64",\"offset\":%"PRIu64",\"length\":%u,\"W_error_us\":%s}",
+      a->conn_uid,p->po_arrival_uid,p->po_arrival_decision_id,ctl->ctl_path->path_id,p->po_pkt.pkt_pns,p->po_pkt.pkt_num,
+      socket_start_us,socket_return_us,batch?"batch_socket_call_start":"socket_call_start",
       p->po_stream_frames[0].ps_stream_id,p->po_stream_frames[0].ps_offset,p->po_stream_frames[0].ps_length,error);emit(a,b,1);
 }
 int xqc_engine_set_arrival_config(xqc_engine_t *e,const xqc_arrival_config_t *config)

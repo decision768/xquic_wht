@@ -608,12 +608,16 @@ xqc_observer_role(xqc_connection_t *conn, int valid, uint64_t primary,
         char *paths = o->paths_record, *body = o->body_record;
         paths[0] = body[0] = 0;
         observer_paths(conn, paths, sizeof(o->paths_record));
+        const char *scheduler_name = conn->scheduler_callback
+            && conn->scheduler_callback->xqc_scheduler_get_path
+                == xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path
+            ? "adaptive-v2" : "adaptive";
         snprintf(body, sizeof(o->body_record),
-            "\"role_epoch\":%"PRIu64",\"primary_valid\":%s,\"old_primary_path_id\":%s,"
+            "\"scheduler_name\":\"%s\",\"role_epoch\":%"PRIu64",\"primary_valid\":%s,\"old_primary_path_id\":%s,"
             "\"primary_path_id\":%s,\"secondary_path_id\":%s,"
             "\"target_secondary_pct\":%.6f,\"adaptive_phase_code\":%d,"
             "\"reason\":\"scheduler_state_change\",\"paths\":[%s]",
-            o->role_epoch, valid ? "true" : "false", old_text, primary_text,
+            scheduler_name, o->role_epoch, valid ? "true" : "false", old_text, primary_text,
             secondary_text, target, phase, paths);
         xqc_observer_event(conn, role_changed ? "role_change" : "control_update", body);
         o->role_initialized = 1; o->role_valid = valid; o->primary_id = primary;

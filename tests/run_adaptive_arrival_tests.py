@@ -59,7 +59,8 @@ def main():
         "src/transport/xqc_send_queue.c": ["xqc_send_queue_remove_free", "xqc_send_queue_move_to_high_pri"],
         "src/transport/xqc_multipath.c": ["xqc_path_send_buffer_append", "xqc_path_send_buffer_remove", "xqc_path_recent_loss_rate"],
         "src/transport/xqc_conn.c": ["xqc_conn_schedule_packets", "xqc_conn_next_wakeup_time", "xqc_conn_log_sent_packet",
-                                    "xqc_on_packets_send_burst", "xqc_send_packet_with_pn"],
+                                    "xqc_on_packets_send_burst", "xqc_path_send_burst_packets",
+                                    "xqc_send_packet_with_pn"],
         "src/transport/xqc_timer.c": ["xqc_timer_register_gp_timer", "xqc_timer_unregister_gp_timer",
                                       "xqc_timer_destroy_gp_timer"],
     }

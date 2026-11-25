@@ -27,7 +27,8 @@ void xqc_arrival_ack(xqc_send_ctl_t *, uint64_t, uint64_t);
 void xqc_arrival_rate(xqc_send_ctl_t *, uint64_t, int);
 void xqc_arrival_socket_result(xqc_connection_t *, xqc_path_ctx_t *, xqc_packet_out_t *,
     int64_t, uint64_t, uint64_t, int);
-void xqc_arrival_sent(xqc_send_ctl_t *, xqc_packet_out_t *, uint64_t);
+void xqc_arrival_sent(xqc_send_ctl_t *, xqc_packet_out_t *,
+    uint64_t socket_start_us, uint64_t socket_return_us, int batch);
 int xqc_arrival_fallback(xqc_connection_t *, xqc_packet_out_t *, xqc_path_ctx_t *,
     xqc_path_ctx_t *, size_t, int, uint64_t);
 void xqc_arrival_roles(xqc_connection_t *, uint64_t, uint64_t, int, uint64_t);

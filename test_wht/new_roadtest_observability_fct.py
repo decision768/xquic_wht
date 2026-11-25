@@ -1366,6 +1366,13 @@ def _summarize(root, manifest, paths):
             tags = {r.get("attempt_id") for r in records if r["raw_file"] == item["file"] and r.get("attempt_id")}
             if tags:
                 item["attempt_ids"] = sorted(tags)
+    connection_schedulers = defaultdict(set)
+    for row in records:
+        name = row.get("scheduler_name")
+        if (row.get("schema_family", "transport") == "transport" and row["checksum_valid"]
+                and row.get("observer_valid", True) and isinstance(name, str) and name):
+            connection_schedulers[(row.get("endpoint"), row.get("conn_uid"))].add(name)
+
     tables = {name: [] for name in TABLES}
     samples = defaultdict(list)
     episodes = defaultdict(list)
@@ -1387,8 +1394,10 @@ def _summarize(root, manifest, paths):
             seen.add(identity)
             sequences[sequence_key].append(seq)
         if family == "transport" or kind in ("role_change", "control_update"):
-            if kind in ("role_change", "control_update"):
-                row["scheduler_name"] = "adaptive"
+            if kind in ("role_change", "control_update") and not row.get("scheduler_name"):
+                names = connection_schedulers.get((endpoint, conn))
+                if names and len(names) == 1:
+                    row["scheduler_name"] = next(iter(names))
             samples[(tag, endpoint, conn)].append(row)
         if kind == "observer_error":
             health.append(dict(attempt_id=tag, endpoint=endpoint, conn_uid=conn,
@@ -1437,7 +1446,7 @@ def _summarize(root, manifest, paths):
                 for name, numerator in (("real_utilization", inflight), ("scheduled_utilization", scheduled),
                                         ("total_utilization", inflight+scheduled if supported else None)):
                     record[name] = numerator/eff if supported and eff else None
-                record["role"] = ("not_applicable" if row.get("scheduler_name") != "adaptive" else
+                record["role"] = ("not_applicable" if row.get("scheduler_name") not in ("adaptive", "adaptive-v2") else
                                   "unassigned" if not row.get("primary_valid") else
                                   "primary" if path.get("path_id") == row.get("primary_path_id") else
                                   "secondary" if path.get("path_id") == row.get("secondary_path_id") else "other")
@@ -1456,6 +1465,8 @@ def _summarize(root, manifest, paths):
                     record["delta_valid"] = dt > 0 and not reset
                     record["role_delta_valid"] = ((same_epoch or row.get("sample_kind") == "role_change")
                         and record["delta_valid"] and "stream_packet_sent_bytes" in paired
+                        and old["role"] in ("primary", "secondary")
+                        and old.get("scheduler_name") == row.get("scheduler_name")
                         and old.get("observer_valid", True) and row.get("observer_valid", True))
                     record["delta_role_epoch"] = old.get("role_epoch")
                     record["delta_role"] = old.get("role")
