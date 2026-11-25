@@ -1,0 +1,316 @@
+{
+  "base_head": "e332852e0eef1a7a39714732e97b9893c883729b",
+  "starting_worktree_dirty": true,
+  "files": [
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "764b6af474cc616f5c3c19e7bea3d7c3ca0ea6fe6c24a7c8ddbcb8435bceba79",
+      "starting_dirty_file_sha256": "0444f4c7a4adb7a44fe37a45aab7f91d256aff3d0b211ecc66d843668b3e4942"
+    },
+    {
+      "path": "cmake/adaptive_arrival_build.cmake",
+      "sha256": "9ca07dc0c4b2f1e8fdf2116723930ba82a7da29b1b9daaa12d984388067fa147",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "demo/netins_udp_mini_api_client.c",
+      "sha256": "55c3a51341f058e94a3f5a59f527c6b4688aae5c5ad36fa914e12b5944ca2432",
+      "starting_dirty_file_sha256": "8f44f2548d6a41b061c5be6a23b5a4905ea0659dc4bdf419554a888fe609b307"
+    },
+    {
+      "path": "demo/netins_udp_mini_api_server.c",
+      "sha256": "a6a04d87cf64dd4800c24d7d4889b98196fab5e7f85b0aa1f1b06d553d93f344",
+      "starting_dirty_file_sha256": "c47a279527b6832466d1d3f08485267a5fea2ac7afed293981555ed7941c0337"
+    },
+    {
+      "path": "demo/netins_udp_stream_client.c",
+      "sha256": "71e8babd5f4695cfcfebe2ca981d51605db01669669316f16b4f351d3ac394ed",
+      "starting_dirty_file_sha256": "6011f44a50dae65b38f84ce918675ef14c1dea3b9810cf602123eb98adf22c05"
+    },
+    {
+      "path": "docs/adaptive-v2/compile_aarch64.json",
+      "sha256": "d7928e11b0b50690c5ec25779f7b411e7d4455de84b2a928f8df50afa5301db5",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/compile_x86_64.json",
+      "sha256": "7d34615614048a52a2b3c55cd0b73c31ca8f723cb89f00d7fcb5b4e1b17bb766",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/defaults.json",
+      "sha256": "2576a4c2893296df8c14af5feb928694fda6ae0c25fcbbf82fa19a7a1e95af20",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/analysis.json",
+      "sha256": "65645e0b47f30d8461f91e30a95ac9439214aee955ae28ee898ee623c6d837fb",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/boundary_uncertainty.csv",
+      "sha256": "3f5cb2102ede92f6b1557562d081db71d40d5b704d4ad01a1736862af5e40437",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/connection_summaries.csv",
+      "sha256": "90c1f30c6950294f6fa3f7438b7a1c9d4b25e53ce01c3c96097bc27a4a84c223",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/deterministic_events.jsonl",
+      "sha256": "e019be5d3ca1568243279a0aaafd57c0d6ccb5c267f2999ce588f1f7a8d28ff3",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/file_fct.csv",
+      "sha256": "f01a374e9c81e3db89b3a42940c4d6a5447684986a1296e42bf13f196eed6295",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/packet_sends.csv",
+      "sha256": "c2ffdb15da6b9973cfe8818fd53de4aaa67b677eb88c57ac36fa3d7b27e4f08c",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/predictions.csv",
+      "sha256": "3b00e56a88a36d45903c557b0264ffe2573b704101bb1dd3ea101dfc51a030e9",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/receiver_hol_fct.csv",
+      "sha256": "f01a374e9c81e3db89b3a42940c4d6a5447684986a1296e42bf13f196eed6295",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/socket_attempts.csv",
+      "sha256": "153169c35f6e584ecad94e4ebd35a358bec5fe59cdd132bc7d730c7444d91fcb",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/examples/wait_episodes.csv",
+      "sha256": "decbe29350271570f50ae5290304d22a165ab710a41f308f635e5a90b9eb0e5a",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/implementation.txt",
+      "sha256": "b61034b4870c082c10acb9666fbf136a197ecc5491157f29c420e8b445f4696f",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/offline_tests.json",
+      "sha256": "c69d9876bcc34da87b1efdc75eec8ebbefab078c70f154dd334d31a54a2d2951",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/other_checks.json",
+      "sha256": "4663a263d2dc57ca0f1443fc4cd67397cefe8c98878a91f30aa6c102aa716294",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/source_manifest.json",
+      "sha256": "509b955b9a563366b1434561d2052d763926b1472fde89519ab6aa2a203a2988",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/starting_worktree_manifest.json",
+      "sha256": "5f08d410f1056c95ca2f3e60797febb15d900be38646877c5d46a7d33cfedd0c",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "docs/adaptive-v2/test_coverage.csv",
+      "sha256": "5240879aa6e63a3d015266b7a17f2f4b4bea656440ad83ce178f9c218e7d999c",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "include/xquic/netins_udp.h",
+      "sha256": "54ddc9a9d2f74adfaadca19555b77a5e04bd722f067a23eff35c52c876434741",
+      "starting_dirty_file_sha256": "e7a63949211d48021c1c8973b77f1dfce2380d4234ddee260fc0e520a0026563"
+    },
+    {
+      "path": "include/xquic/xqc_adaptive_arrival.h",
+      "sha256": "4f067c62f780b716adbf8c4c50fd51e2ccd0fa7ca60477f4f784a708963079d4",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "include/xquic/xquic.h",
+      "sha256": "7e217190a225b085ab37968440cb796138be33203e8a184fb7e001b3eed20f46",
+      "starting_dirty_file_sha256": "8f9e46ef40c686cbbbc5f07047e2cbe5f10bf2a8a4753cdb49c6eab9f20e1dc0"
+    },
+    {
+      "path": "mini/common.c",
+      "sha256": "518b3cfb3a17b234e06629e4f560576c3e01f9dfe0d64c3633e8a3b61cbd2d25",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "mini/mini_backend.h",
+      "sha256": "2bf7288392b559f6e330ec0b7776cbfececa61b83b838ce23eec1a131031582d",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "mini/mini_client.c",
+      "sha256": "dfd2c4445190a5a0af5bfa3f3d4e2e93ee8d97950468ad6f34a581d173c02e0c",
+      "starting_dirty_file_sha256": "8625170954ccd634ee70afd5b799f5114e76993660c27b90e6ed4f096453027d"
+    },
+    {
+      "path": "mini/mini_server.c",
+      "sha256": "948085de058908040868477a6f2d0a0d0a83a3dda76610401a0e7df662d366a4",
+      "starting_dirty_file_sha256": "271de37be6a396228f838e50e14d3dd0e9013bc6ccb884994a0a53c760da2013"
+    },
+    {
+      "path": "mini/mini_server.h",
+      "sha256": "3fcc795db00a5bbf1f8fc0f89bce59c5b1bf156ba7761cfdcc8901718552420d",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "mini/mini_server_backend.c",
+      "sha256": "fd5b0935e7bc21d5e40c574a28d0bdfc355236f1fda6fb5051e9b472cb7be5e4",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "mini/mini_server_cb.c",
+      "sha256": "76d19134892ffa535dfcacbf00fcfbe8b6fce2a98a1f8526b94d5a62916717d7",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "scripts/xquic.lds",
+      "sha256": "57889eabf1f12ba30f75e8e6d1409f3a6f0e56bfb926c2f182133b6dfc6eaed4",
+      "starting_dirty_file_sha256": "e9214d424b9cb584ff7b4b066b9b05c56b654244bd9b8be0fc27829fe748fbeb"
+    },
+    {
+      "path": "src/http3/xqc_h3_stream.c",
+      "sha256": "b3541c57f2cba76a1e2459c350da52ee572626c416381d8ee54130bb68ece296",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/netins_udp/netins_udp_api.c",
+      "sha256": "58287aaabd39ecbb196630d8dee2fcde0d9054058a3cff97db595b6f797354a3",
+      "starting_dirty_file_sha256": "3759ae129880a2f3bbbc6332c4543eb0b89cd088ae711232803ec34ed75e15d7"
+    },
+    {
+      "path": "src/transport/scheduler/adaptive_arrival_predictor.c",
+      "sha256": "5dd0f621dadd2e094bf72c07199cbc7ae2a7c35972e49909ff448e591370c096",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/scheduler/adaptive_arrival_predictor.h",
+      "sha256": "fa954defb3de5624e2072c22fc9fc5d82110b779593a76d20a22104724be84b0",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/scheduler/xqc_scheduler_adaptive.c",
+      "sha256": "4bae3a8ffd91fb70bd43151f82d272c7c791fc1b761b99c6c91b02104a8435ef",
+      "starting_dirty_file_sha256": "89ead0f2ec3896693655e460de8c915904baed5add295ac7eca1aa4d1d6da32e"
+    },
+    {
+      "path": "src/transport/scheduler/xqc_scheduler_adaptive_v2.c",
+      "sha256": "e19ea43dd5ea0b43028b3a19e99d170b877ccaeb85dcdffdd0e4fdf2ca380a0d",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/scheduler/xqc_scheduler_adaptive_v2.h",
+      "sha256": "f6a0bcf0dd9a946687e0f10e52e733a3fec3f03beadc01826bdd391d198cd883",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_conn.c",
+      "sha256": "4c8e09819f798b0395865d3bba9946e64307490f6685742b352439304bf835ad",
+      "starting_dirty_file_sha256": "cea8496418d9bffa640729e4f44b2c4c5519eb9bd7e79e779380b6fa74e3a7e5"
+    },
+    {
+      "path": "src/transport/xqc_conn.h",
+      "sha256": "e471591a22a2178c97b336c02035ed109a70fc24423f3e8117c18737bd30af3a",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_engine.h",
+      "sha256": "46984fe2573ddefa492c934f63c18dc836626ee5d3bb501bca7911c58117cba4",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_multipath.c",
+      "sha256": "8231a92a76c3642b716e717c978a3a66f82bc9e3871dc169f78ede0ce0103764",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_pacing.c",
+      "sha256": "ddd5e6c49ec9ef1e6d80f8986511b88280893517bbbc6e2d0fb5c05f45e899aa",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_packet_out.c",
+      "sha256": "42e2fb0e9f7eb354a152d5fcd261b7b16addd9e86ed2f4b5e120a7230e9b5da1",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_packet_out.h",
+      "sha256": "ce3243d3815542fddba7eda7a23267706d3ae3b717a0f4cc1d74d39a2516b810",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_send_ctl.c",
+      "sha256": "638ed53bc0d1ae275f63879e6741de58ff4f26ab70a688df8ba997e31f7430cd",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_send_queue.c",
+      "sha256": "7eca20ddbd95b36257b21625da72b1a2dd2182556321917f56c9636d702ae01a",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_stream.c",
+      "sha256": "2a4864829eb9d689a5aa55367f61f89883ed1868df9fb9a4282fc9af5e9b7dd1",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "src/transport/xqc_stream.h",
+      "sha256": "69e54f5ebfa46404910ff2be31f6c31cfc59dedab943a731e86e73b47065ac38",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "test_wht/adaptive_arrival_benchmark.py",
+      "sha256": "5dfdf4481341672a3e3bef7d53fa8877c6f69f42ff089838b0c955cdf374ce8d",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "test_wht/new_roadtest_observability_fct.py",
+      "sha256": "d71a8b1c741d9abea1ccaeab42df5fc4d7196b77c0b1a99b21ab724c74499394",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "test_wht/压测_100MB_FCT.py",
+      "sha256": "9caf6c51837594473ecfe15827879aa8c7b16f1ec7952ea0eb8b8e26fe92caca",
+      "starting_dirty_file_sha256": "fe810124c677df725fccef2338d9e324d668b47820ea4983383df2dfecd4da4d"
+    },
+    {
+      "path": "tests/run_adaptive_arrival_tests.py",
+      "sha256": "7045d32881a5c93a69ce3fd82b00acaefa9982288e18968f010af22b0e29047a",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "tests/stream_api_benchmark.py",
+      "sha256": "94dc2fb0a82351c64de8b126eff8b0a424955b3c0065ce6c0ed778cd9c1a4edc",
+      "starting_dirty_file_sha256": "954f94b18901b099857da237a2ef531e62d2e74a1daacb353e9bf1c95f8b7257"
+    },
+    {
+      "path": "tests/test_adaptive_arrival_predictor.c",
+      "sha256": "954210d7e199174ee7543a805ac0d81dce38e35248fdffa0de080e1bbc633c88",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "tests/test_adaptive_arrival_runtime.c",
+      "sha256": "cb25b73effe16bb30754493b61c30db74df72957a4e2b66bd844711fb903ea32",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "tests/test_adaptive_arrival_tools.py",
+      "sha256": "a001fe9f6100003c7be631e819c139069ae8512c1b25907a48d4d5016593190b",
+      "starting_dirty_file_sha256": null
+    },
+    {
+      "path": "tools/analyze_adaptive_arrival.py",
+      "sha256": "c2f3b9abf5081effde8c7301f5f6b4e20e61704d7e0409a2d3464f1e1018b90a",
+      "starting_dirty_file_sha256": null
+    }
+  ]
+}

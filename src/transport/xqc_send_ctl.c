@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -442,6 +443,7 @@ xqc_send_ctl_destroy(xqc_send_ctl_t *send_ctl)
 void
 xqc_send_ctl_reset(xqc_send_ctl_t *send_ctl)
 {
+    xqc_arrival_path_reset(send_ctl->ctl_conn, send_ctl->ctl_path->path_id);
     xqc_connection_t *conn = send_ctl->ctl_conn;
     xqc_path_ctx_t *path = send_ctl->ctl_path;
 
@@ -882,6 +884,7 @@ xqc_send_ctl_update_cwnd_limited(xqc_send_ctl_t *send_ctl, xqc_usec_t now)
 void
 xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_packet_out_t *packet_out, xqc_usec_t now)
 {
+    xqc_arrival_sent(send_ctl, packet_out, now);
     xqc_pkt_num_space_t pns = packet_out->po_pkt.pkt_pns;
 
     if (send_ctl->diag.enabled) {
@@ -1138,6 +1141,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     xqc_pktno_range_t *range = &ack_info->ranges[ack_info->n_ranges - 1];
     xqc_pkt_num_space_t pns = ack_info->pns;
 
+    uint64_t arrival_ack_freed = 0;
     /* 标记ack info里是否有这条路径发出的包 */
     unsigned char has_acked = 0, update_largest_ack = 0, ignore_rtt = 0;
     unsigned char has_ack_eliciting = 0, spurious_loss_detected = 0;
@@ -1268,7 +1272,11 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
                 xqc_datagram_notify_ack(conn, packet_out);
             }
 
+            uint64_t arrival_before_I = send_ctl->ctl_bytes_in_flight;
             xqc_send_ctl_on_packet_acked(send_ctl, packet_out, ack_recv_time, 1);
+            if (arrival_before_I >= send_ctl->ctl_bytes_in_flight) {
+                arrival_ack_freed += arrival_before_I - send_ctl->ctl_bytes_in_flight;
+            }
             
             if (packet_out->po_used_size > conn->max_acked_po_size) {
                 conn->max_acked_po_size = packet_out->po_used_size + XQC_TLS_AEAD_OVERHEAD_MAX_LEN;
@@ -1348,6 +1356,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     }
 
     /* BBR */
+    xqc_arrival_ack(send_ctl, ack_recv_time, arrival_ack_freed);
     if (send_ctl->ctl_cong_callback->xqc_cong_ctl_init_bbr /* && stream_frame_acked */) {
 
         uint64_t bw_before = 0, bw_after = 0;
@@ -1371,6 +1380,7 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
             send_ctl->ctl_cong_callback->xqc_cong_ctl_on_ack_multiple_pkts(send_ctl->ctl_cong, &send_ctl->sampler);
         }
 
+        xqc_arrival_rate(send_ctl, ack_recv_time, sample_type == XQC_RATE_SAMPLE_VALID);
         if (send_ctl->ctl_conn->log->log_level >= XQC_LOG_DEBUG) {
             uint8_t mode, full_bw_reached;
             uint8_t recovery_mode, round_start;

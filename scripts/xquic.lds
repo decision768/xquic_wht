@@ -69,6 +69,17 @@ XQUIC_VERS_1.0 {
         xqc_reno_cb;
         xqc_cubic_cb;
         xqc_minrtt_scheduler_cb;
+        xqc_original_minrtt_scheduler_cb;
+        xqc_adaptive_v2_scheduler_cb;
+        xqc_arrival_config_init;
+        xqc_arrival_config_validate;
+        xqc_arrival_config_option;
+        xqc_arrival_mode_name;
+        xqc_arrival_source_build_id;
+        xqc_engine_set_arrival_config;
+        xqc_arrival_register_get;
+        xqc_arrival_set_mode;
+        xqc_arrival_attach_sink;
         xqc_interop_scheduler_cb;
         xqc_backup_scheduler_cb;
         xqc_balanced_scheduler_cb;

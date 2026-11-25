@@ -9,6 +9,7 @@
 
 #include <xquic/xquic_typedef.h>
 #include <xquic/xquic.h>
+#include <xquic/xqc_adaptive_arrival.h>
 #include "src/tls/xqc_tls.h"
 #include "src/common/xqc_list.h"
 
@@ -70,6 +71,7 @@ typedef struct xqc_engine_s {
     xqc_list_head_t                 alpn_reg_list;
 
     xqc_conn_settings_t             default_conn_settings;
+    xqc_arrival_config_t            arrival_config;
 
     char                            scid_buf[XQC_MAX_CID_LEN * 2 + 1];
     char                            dcid_buf[XQC_MAX_CID_LEN * 2 + 1];

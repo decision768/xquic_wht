@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -149,7 +150,12 @@ xqc_packet_out_copy(xqc_packet_out_t *dst, xqc_packet_out_t *src)
     unsigned char *po_buf = dst->po_buf;
     size_t cap = dst->po_buf_cap;
     unsigned int size = dst->po_buf_size;
+    xqc_connection_t *arrival_owner = dst->po_arrival_owner;
+    uint64_t arrival_uid = dst->po_arrival_uid;
     xqc_memcpy(dst, src, sizeof(xqc_packet_out_t));
+    dst->po_arrival_uid = arrival_uid;
+    dst->po_arrival_owner = arrival_owner;
+    dst->po_arrival_trace = dst->po_arrival_legacy = dst->po_arrival_prediction_valid = dst->po_arrival_eligible = 0;
     dst->po_origin_ref_cnt = 0;
 
     xqc_packet_out_t *origin = src->po_origin == NULL ? src : src->po_origin;
@@ -216,6 +222,9 @@ xqc_packet_out_get(xqc_send_queue_t *send_queue)
     }
 
 return_po:
+    packet_out->po_arrival_owner = send_queue->sndq_conn;
+    packet_out->po_arrival_uid = send_queue->sndq_conn->arrival_next_packet_uid == UINT64_MAX
+        ? 0 : ++send_queue->sndq_conn->arrival_next_packet_uid;
     reserved_size = 0;
     if (send_queue->sndq_conn->conn_settings.fec_params.fec_encoder_scheme) {
         reserved_size += XQC_FEC_SPACE;
@@ -247,6 +256,7 @@ xqc_packet_out_get_and_insert_send(xqc_send_queue_t *send_queue, enum xqc_pkt_ty
 void
 xqc_packet_out_destroy(xqc_packet_out_t *packet_out)
 {
+    if (packet_out->po_arrival_owner) xqc_arrival_packet_gone(packet_out->po_arrival_owner, packet_out);
     xqc_free(packet_out->po_buf);
     xqc_free(packet_out);
 }
@@ -1239,6 +1249,7 @@ xqc_write_stream_frame_to_packet(xqc_connection_t *conn,
         xqc_maybe_recycle_packet_out(packet_out, conn);
         return n_written;
     }
+    xqc_arrival_frame_written(stream, packet_out, *send_data_written);
     stream->stream_send_offset += *send_data_written;
     stream->stream_conn->conn_flow_ctl.fc_data_sent += *send_data_written;
     packet_out->po_used_size += n_written;

@@ -1046,6 +1046,7 @@ typedef struct xqc_scheduler_callback_s {
 } xqc_scheduler_callback_t;
 
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_minrtt_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_original_minrtt_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_fec_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_rap_scheduler_cb;
@@ -1058,6 +1059,7 @@ XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_fastprobe10_
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_fastprobe20_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_fastonly_scheduler_cb;
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_adaptive_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_adaptive_v2_scheduler_cb;
 
 #ifdef XQC_ENABLE_MP_INTEROP
 XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_scheduler_cb;

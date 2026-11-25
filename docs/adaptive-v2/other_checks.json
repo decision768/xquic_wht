@@ -1,0 +1,64 @@
+{
+  "abi": {
+    "command": [
+      "python",
+      "scripts/mini_api/check_abi.py"
+    ],
+    "exit_code": 0,
+    "stdout": "ABI CHECK: PASS (30 public functions)\n",
+    "stderr": ""
+  },
+  "stream_isolation": {
+    "command": [
+      "python",
+      "scripts/mini_api/check_stream_isolation.py"
+    ],
+    "exit_code": 1,
+    "stdout": "",
+    "stderr": "missing invariant: file transfer rejects an active stream\nmissing invariant: file transfer rejects every stream-mode connection\nSTREAM ISOLATION CHECK: FAIL\n",
+    "baseline_issue": true
+  },
+  "tools": {
+    "command": [
+      "python",
+      "tests/test_adaptive_arrival_tools.py"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "...\n----------------------------------------------------------------------\nRan 3 tests in 0.165s\n\nOK\n"
+  },
+  "whitespace": {
+    "command": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "warning: in the working copy of 'include/xquic/xquic.h', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/common.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_backend.h', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_client.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_server.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_server.h', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_server_backend.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'mini/mini_server_cb.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'scripts/xquic.lds', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/http3/xqc_h3_stream.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/netins_udp/netins_udp_api.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/scheduler/xqc_scheduler_adaptive.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_conn.h', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_engine.h', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_multipath.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_send_ctl.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_stream.c', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'src/transport/xqc_stream.h', LF will be replaced by CRLF the next time Git touches it\n"
+  },
+  "cpp_header_linkage": {
+    "status": "PASS",
+    "binary_sha256": "3bb53284cc55c1cfd38c026cc8d2e32b67396f1c3d52139c199d56f7194e2ab6"
+  },
+  "original_minrtt_regression": {
+    "status": "PASS",
+    "binary_sha256": "df26a67399492ff2bffb8de60d817a213ad3f45630c6964691d79b2baa84cdd2",
+    "extracted_function_bodies_match_current_production": true
+  },
+  "prior_GET_rate_arithmetic_mean": {
+    "status": "PASS",
+    "method": "AST equality of summarize_get_connection against starting backup"
+  },
+  "cmake_source_manifest_agreement": {
+    "status": "PASS",
+    "source_files": 280
+  },
+  "deployment_binary": {
+    "status": "NOT_BUILT",
+    "reason": "No complete board/cloud SDK and TLS/event/zlog linking performed"
+  },
+  "network_experiments": {
+    "status": "NOT_RUN"
+  }
+}

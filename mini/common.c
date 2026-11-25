@@ -197,6 +197,7 @@ mini_backend_config_init(mini_backend_config_t *config)
         return;
     }
     memset(config, 0, sizeof(*config));
+    xqc_arrival_config_init(&config->arrival_config);
     config->load_config_file = 1;
 }
 

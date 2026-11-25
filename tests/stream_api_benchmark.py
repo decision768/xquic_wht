@@ -78,6 +78,7 @@ MODE_ORDER = ("rmnet", "agg", "usb")
 SCHEDULERS = (
     "default",
     "minrtt",
+    "original_minrtt",
     "backup",
     "balanced",
     "rap",
@@ -89,6 +90,7 @@ SCHEDULERS = (
     "fastprobe20",
     "fastonly",
     "adaptive",
+    "adaptive-v2",
 )
 
 FIELD_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)=([^\s\r\n]+)")

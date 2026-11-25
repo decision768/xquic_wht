@@ -375,6 +375,14 @@ xqc_scheduler_handle_path_probe(xqc_connection_t *conn)
     xqc_send_ctl_t *send_ctl;
     xqc_usec_t now, probe_timeout, last_send_time, probe_deadline;
 
+    /* The upstream original_minrtt has neither this bootstrap nor idle probe. */
+    if (conn->scheduler_callback
+        && conn->scheduler_callback->xqc_scheduler_get_path
+            == xqc_original_minrtt_scheduler_cb.xqc_scheduler_get_path)
+    {
+        return;
+    }
+
     if (!conn->enable_multipath
         || conn->conn_state != XQC_CONN_STATE_ESTABED)
     {

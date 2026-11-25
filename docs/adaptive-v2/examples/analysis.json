@@ -1,0 +1,22 @@
+{
+  "chosen_path_W_error_samples": 2,
+  "chosen_path_W_error_mean_us": 0.0,
+  "schema_version": 1,
+  "connections": 22,
+  "modes": [
+    "enforce",
+    "off",
+    "shadow"
+  ],
+  "prediction_records": 47,
+  "wait_episodes": 14,
+  "successful_send_mappings": 3,
+  "connection_counters_scope": "connection lifetime, not GET FCT",
+  "issues": [
+    {
+      "conn_uid": 8,
+      "reason": "lifecycle_evidence_incomplete"
+    }
+  ],
+  "uncalibrated_server_events_are_not_attributed_to_receiver_FCT": true
+}

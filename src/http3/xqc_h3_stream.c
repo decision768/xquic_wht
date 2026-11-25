@@ -480,9 +480,11 @@ xqc_h3_stream_send_data_frame(xqc_h3_stream_t *h3s, unsigned char *data, size_t 
             }
         }
 
+        h3s->stream->arrival_writing_body = 1;
         /* Send frame data */
         sent = xqc_stream_send(h3s->stream, data + data_sent,
                 xqc_min(data_size - data_sent, h3s->data_frame.data_len - h3s->data_frame.data_sent), fin_flag_for_quic_stream);
+        h3s->stream->arrival_writing_body = 0;
         if (sent == -XQC_EAGAIN) {
             break;
 

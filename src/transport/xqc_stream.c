@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -791,6 +792,9 @@ xqc_destroy_stream(xqc_stream_t *stream)
         stream->stream_if->stream_close_notify(stream, stream->user_data);
     }
 
+    xqc_arrival_stream_close(stream->stream_conn, stream->stream_id);
+    xqc_free(stream->arrival);
+    stream->arrival = NULL;
     xqc_observer_stream_end(stream, "stream_destroy");
     if (stream->observer) {
         free(stream->observer->state.ranges);
@@ -888,6 +892,7 @@ xqc_stream_close(xqc_stream_t *stream)
     xqc_log(conn->log, XQC_LOG_DEBUG, "|stream_id:%ui|stream_state_send:%d|stream_state_recv:%d|conn:%p|conn_state:%s|",
             stream->stream_id, stream->stream_state_send, stream->stream_state_recv, conn, xqc_conn_state_2_str(conn->conn_state));
 
+    xqc_arrival_stream_close(conn, stream->stream_id);
     XQC_STREAM_CLOSE_MSG(stream, "local reset");
 
     if (stream->stream_state_send >= XQC_SEND_STREAM_ST_RESET_SENT) {

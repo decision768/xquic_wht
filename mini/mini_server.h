@@ -138,6 +138,7 @@ typedef struct xqc_mini_svr_args_s {
 
     /* Public data-stream API mode; selected before listening. */
     netins_udp_observer_config_t observer_config;
+    xqc_arrival_config_t arrival_config;
     int                         stream_api_enabled;
 
 } xqc_mini_svr_args_t;
@@ -192,6 +193,7 @@ typedef struct xqc_mini_svr_user_conn_s {
     xqc_cid_t               cid;
     xqc_h3_conn_t          *h3_conn;
     mini_observer_t        *observer;
+    struct netins_telemetry_writer_s *arrival_writer;
     xqc_mini_svr_ctx_t     *ctx;
 
     /* ipv4 server */

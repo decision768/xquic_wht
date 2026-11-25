@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -33,6 +34,7 @@
 #include "src/transport/xqc_fec.h"
 #include "src/transport/xqc_fec_scheme.h"
 #include "src/transport/scheduler/xqc_scheduler_common.h"
+#include "src/transport/scheduler/xqc_scheduler_original_minrtt.h"
 #include "src/tls/xqc_tls.h"
 #include <inttypes.h>
 
@@ -730,6 +732,9 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
         xc->conn_settings.mp_enable_reinjection |= XQC_REINJ_UNACK_AFTER_SEND;
     }
 
+    /* Keep the original scheduler's baseline independent of Mini defaults. */
+    xqc_original_minrtt_apply_settings(&xc->conn_settings);
+
     if (xc->conn_settings.init_recv_window) {
         xc->conn_settings.init_recv_window = xqc_max(xc->conn_settings.init_recv_window, XQC_QUIC_MAX_MSS);
 
@@ -1021,6 +1026,7 @@ xqc_conn_create(xqc_engine_t *engine, xqc_cid_t *dcid, xqc_cid_t *scid,
         goto fail;
     }
     xc->scheduler_callback->xqc_scheduler_init(xc->scheduler, xc->log, &xc->conn_settings.scheduler_params);
+    xqc_arrival_conn_init(xc);
 
     /* set reinject control callback if reinjection enabled */
     if (xc->conn_settings.reinj_ctl_callback.xqc_reinj_ctl_init) {
@@ -1479,6 +1485,8 @@ xqc_conn_destroy(xqc_connection_t *xc)
         xqc_log_event(xc->log, CON_CONNECTION_STATE_UPDATED, xc);
         return;
     }
+
+    xqc_arrival_conn_close(xc);
 
     uint8_t         fec_flag;
     xqc_conn_stats_t conn_stats;
@@ -2010,9 +2018,18 @@ xqc_conn_schedule_packets(xqc_connection_t *conn,  xqc_list_head_t *head,
 
     now = xqc_monotonic_timestamp();
     reset_rpr_timer = 0;
-
-    xqc_list_for_each_safe(pos, next, head) {
+    unsigned arrival_scanned = 0;
+    int arrival_normal = send_type == XQC_SEND_TYPE_NORMAL;
+    pos = arrival_normal ? xqc_arrival_scan_start(conn, head, now) : head->next;
+    for (; pos != head; pos = arrival_normal ? xqc_arrival_scan_next(conn, head, pos, next) : next) {
+        if (arrival_normal && xqc_arrival_scan_cut(conn, head, pos, arrival_scanned++, now)) { break; }
+        next = pos->next;
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
+        if (arrival_normal) {
+            int skip = xqc_arrival_skip(conn, packet_out, now);
+            if (skip == 2) { continue; }
+            if (skip == 1) { continue; }
+        }
         /* 1. 已设置特定路径发送的包，例如：PATH_CHALLENGE PATH_RESPONSE MP_ACK(原路径ACK) */
         if (xqc_packet_out_on_specific_path(conn, packet_out, &path)) {
             if (path == NULL) {
@@ -2024,12 +2041,14 @@ xqc_conn_schedule_packets(xqc_connection_t *conn,  xqc_list_head_t *head,
 
         /* 2. schedule packet multipath */
         } else {
+            xqc_arrival_clear_hint(conn);
             path = conn->scheduler_callback->
                    xqc_scheduler_get_path(conn->scheduler, 
                                           conn, packet_out, 
                                           packets_are_limited_by_cc, 
                                           0, &cc_blocked);
             if (path == NULL) {
+                if (xqc_arrival_is_defer(conn, packet_out)) { continue; }
                 if (cc_blocked) {
                     conn->sched_cc_blocked++;
                     if (packet_out->po_sched_cwnd_blk_ts == 0) {
@@ -2060,7 +2079,9 @@ xqc_conn_schedule_packets(xqc_connection_t *conn,  xqc_list_head_t *head,
 #endif
 
         xqc_path_send_buffer_append(path, packet_out, &path->path_schedule_buf[send_type]);
+        xqc_arrival_queued(conn, packet_out, path, now);
     }
+    if (arrival_normal && pos == head) { xqc_arrival_scan_cut(conn, head, head, 0, now); }
     if (conn->conn_settings.fec_params.fec_encoder_scheme == XQC_PACKET_MASK_CODE
         && send_type == XQC_SEND_TYPE_NORMAL
         && reset_rpr_timer)
@@ -2110,8 +2131,8 @@ xqc_on_packets_send_burst(xqc_connection_t *conn, xqc_path_ctx_t *path, ssize_t 
 
         if (xqc_has_packet_number(&packet_out->po_pkt)) {
             /* count packets with pkt_num in the send control */
-            if (XQC_CAN_IN_FLIGHT(packet_out->po_frame_types 
-                && xqc_pacing_is_on(&send_ctl->ctl_pacing)))
+            if (XQC_CAN_IN_FLIGHT(packet_out->po_frame_types)
+                && xqc_pacing_is_on(&send_ctl->ctl_pacing))
             {
                 xqc_pacing_on_packet_sent(&send_ctl->ctl_pacing, packet_out->po_used_size);
             }
@@ -2272,6 +2293,7 @@ xqc_path_send_burst_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
 
     /* burst send packets */
     ret = xqc_send_burst(conn, path, iov_array, burst_cnt);
+    xqc_arrival_socket_result(conn, path, NULL, ret, burst_cnt, now, 1);
     if (ret < 0) {
         return ret;
 
@@ -2597,6 +2619,7 @@ xqc_send_packet_with_pn(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_packet
 
     /* send data */
     ssize_t sent = xqc_send(conn, path, conn->enc_pkt, conn->enc_pkt_len);
+    xqc_arrival_socket_result(conn, path, packet_out, sent, conn->enc_pkt_len, now, 0);
     if (sent != conn->enc_pkt_len) {
         xqc_log(conn->log, XQC_LOG_ERROR,
                 "|write_socket error|conn:%p|path:%ui|pkt_num:%ui|size:%ud|sent:%z|pkt_type:%s|frame:%s|now:%ui|",

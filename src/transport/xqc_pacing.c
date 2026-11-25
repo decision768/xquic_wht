@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -100,6 +101,7 @@ xqc_pacing_on_timeout(xqc_pacing_t *pacing)
     pacing->bytes_budget = xqc_max(budget, pacing->bytes_budget + pacing->pending_budget);
     pacing->pending_budget = 0;
     pacing->last_sent_time = now;
+    xqc_arrival_pacing_wake(pacing->ctl_ctx, now);
 }
 
 void 

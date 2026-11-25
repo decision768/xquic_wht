@@ -988,6 +988,9 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     if (strncmp(args->quic_cfg.mp_sched, "minrtt", strlen("minrtt")) == 0) {
         sched = xqc_minrtt_scheduler_cb;
 
+    } else if (strcmp(args->quic_cfg.mp_sched, "original_minrtt") == 0) {
+        sched = xqc_original_minrtt_scheduler_cb;
+
     } else if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
         sched = xqc_backup_scheduler_cb;
     }
@@ -1017,6 +1020,9 @@ xqc_mini_cli_get_sched_cb(xqc_mini_cli_args_t *args)
     }
     else if (strcmp(args->quic_cfg.mp_sched, "fastprobe") == 0) {
         sched = xqc_fastprobe_scheduler_cb;
+    }
+    else if (strcmp(args->quic_cfg.mp_sched, "adaptive-v2") == 0) {
+        sched = xqc_adaptive_v2_scheduler_cb;
     }
     else if (strcmp(args->quic_cfg.mp_sched, "adaptive") == 0) {
         sched = xqc_adaptive_scheduler_cb;
@@ -2627,6 +2633,7 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
 
         } else if (strcmp(key, "mp_sched") == 0) {
             if (strcmp(value, "minrtt") == 0
+                || strcmp(value, "original_minrtt") == 0
                 || strcmp(value, "backup") == 0
                 || strcmp(value, "balanced") == 0
                 || strcmp(value, "rap") == 0
@@ -2637,6 +2644,7 @@ xqc_mini_cli_load_config_file(xqc_mini_cli_args_t *args, const char *path)
                 || strcmp(value, "fastprobe10") == 0
                 || strcmp(value, "fastprobe20") == 0
                 || strcmp(value, "fastonly") == 0
+                || strcmp(value, "adaptive-v2") == 0
                 || strcmp(value, "adaptive") == 0) {
                 memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
                 strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
@@ -3738,6 +3746,7 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
             break;
         case 'm':
             if (strcmp(optarg, "minrtt") != 0
+                && strcmp(optarg, "original_minrtt") != 0
                 && strcmp(optarg, "backup") != 0
                 && strcmp(optarg, "balanced") != 0
                 && strcmp(optarg, "rap") != 0
@@ -3748,6 +3757,7 @@ xqc_mini_cli_parse_cmd_args(xqc_mini_cli_args_t *args, int argc, char *argv[])
                 && strcmp(optarg, "fastprobe10") != 0
                 && strcmp(optarg, "fastprobe20") != 0
                 && strcmp(optarg, "fastonly") != 0
+                && strcmp(optarg, "adaptive-v2") != 0
                 && strcmp(optarg, "adaptive") != 0) {
                 printf("[warn] unsupported scheduler %s, keep default %s\n",
                     optarg, args->quic_cfg.mp_sched);

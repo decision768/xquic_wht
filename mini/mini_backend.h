@@ -118,6 +118,7 @@ typedef struct mini_backend_config_s {
 
     netins_udp_observer_config_t observer;
     int stream_mode;
+    xqc_arrival_config_t arrival_config;
 } mini_backend_config_t;
 
 typedef struct mini_backend_stream_config_s {

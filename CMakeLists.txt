@@ -154,6 +154,9 @@ configure_file (
     "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
 )
 
+# Build provenance for adaptive-v2 and its independent event stream.
+include(cmake/adaptive_arrival_build.cmake)
+
 set(LIBEVENT_ROOT
     "/home/admin123/libevent_aarch64/libevent-2.1.12-stable"
     CACHE PATH "Path to the libevent source/build tree")
@@ -273,6 +276,7 @@ set(
     "src/transport/reinjection_control/xqc_reinj_deadline.c"
     "src/transport/reinjection_control/xqc_reinj_dgram.c"
     "src/transport/scheduler/xqc_scheduler_minrtt.c"
+    "src/transport/scheduler/xqc_scheduler_original_minrtt.c"
     "src/transport/scheduler/xqc_scheduler_common.c"
     "src/transport/scheduler/xqc_scheduler_backup.c"
     "src/transport/scheduler/xqc_scheduler_backup_fec.c"
@@ -282,6 +286,8 @@ set(
     "src/transport/scheduler/xqc_scheduler_bandwidth.c"
     "src/transport/scheduler/xqc_scheduler_fastprobe.c"
     "src/transport/scheduler/xqc_scheduler_adaptive.c"
+    "src/transport/scheduler/xqc_scheduler_adaptive_v2.c"
+    "src/transport/scheduler/adaptive_arrival_predictor.c"
     "src/transport/scheduler/xqc_scheduler_go_rand.c"
     "src/transport/scheduler/xqc_scheduler_peekaboo.c"
     "src/transport/scheduler/xqc_scheduler_blest.c"

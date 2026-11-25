@@ -1,0 +1,19 @@
+{
+  "predict_horizon_us": 20000,
+  "max_defer_episode_us": 5000,
+  "max_defer_stream_us": 20000,
+  "recheck_interval_us": 1000,
+  "gain_margin_floor_us": 2000,
+  "gain_margin_rtt_ratio": 0.1,
+  "min_valid_rate_samples": 8,
+  "rate_sample_capacity": 16,
+  "ack_batch_capacity": 16,
+  "min_ack_batches": 4,
+  "max_sim_events_per_path": 64,
+  "max_waiting_streams": 16,
+  "schedule_scan_budget": 256,
+  "prediction_log_limit_per_s": 100,
+  "mode": "off",
+  "model_version": "arrival_proxy_v1",
+  "schema_version": 1
+}

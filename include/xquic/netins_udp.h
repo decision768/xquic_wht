@@ -1,5 +1,6 @@
 #ifndef NETINS_UDP_API_H
 #define NETINS_UDP_API_H
+#include <xquic/xqc_adaptive_arrival.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -105,7 +106,9 @@ typedef enum netins_udp_scheduler_e {
     NETINS_UDP_SCHEDULER_FASTONLY = 12,
     NETINS_UDP_SCHEDULER_PEEKABOO = 13,
     NETINS_UDP_SCHEDULER_BLEST = 14,
-    NETINS_UDP_SCHEDULER_ECF = 15
+    NETINS_UDP_SCHEDULER_ECF = 15,
+    NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT = 16,
+    NETINS_UDP_SCHEDULER_ADAPTIVE_V2 = 17
 } netins_udp_scheduler_t;
 
 typedef enum netins_udp_congestion_control_e {
@@ -133,7 +136,8 @@ typedef enum netins_udp_opt_e {
      * keep using the original h3 ALPN unless this option is explicitly set.
      */
     NETINS_UDP_OPT_STREAM_MODE = 13,
-    NETINS_UDP_OPT_OBSERVER_V2 = 14
+    NETINS_UDP_OPT_OBSERVER_V2 = 14,
+    NETINS_UDP_OPT_ADAPTIVE_ARRIVAL_V1 = 15
 } netins_udp_opt_t;
 
 /* Independent observer configuration. Existing API v1 structures are unchanged. */

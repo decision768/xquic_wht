@@ -8,6 +8,7 @@
 
 #include "mini_server_cb.h"
 #include "mini_stream_backend.h"
+#include "../demo/netins_udp_telemetry_json.h"
 #include <errno.h>
 #include <limits.h>
 #include <string.h>
@@ -1932,6 +1933,20 @@ xqc_mini_svr_h3_conn_create_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
             user_conn->api_backend, user_conn);
     }
 
+    if (strcmp(user_conn->ctx->args->quic_cfg.mp_sched, "adaptive-v2") == 0) {
+        char arrival_prefix[1400];
+        const char *base = user_conn->ctx->args->arrival_config.output_prefix;
+        if (!base[0]) base = user_conn->ctx->args->observer_config.output_prefix;
+        if (!base[0]) base = "/tmp/xquic";
+        snprintf(arrival_prefix, sizeof(arrival_prefix), "%s.arrival-%ld-%llu", base,
+            (long)getpid(), (unsigned long long)xqc_observer_clock_us());
+        user_conn->arrival_writer = netins_telemetry_open(arrival_prefix);
+        if (user_conn->arrival_writer) {
+            if (xqc_arrival_attach_sink(user_conn->ctx->engine, cid, netins_telemetry_write, user_conn->arrival_writer)) {
+                netins_telemetry_close(user_conn->arrival_writer); user_conn->arrival_writer = NULL;
+            }
+        }
+    }
     user_conn->observer = mini_observer_start(user_conn->ctx->engine, cid,
         user_conn->ctx->eb, &user_conn->ctx->args->observer_config, "server", NULL, NULL);
     printf("[stats] xqc_mini_svr_h3_conn_create_notify \n");
@@ -1951,6 +1966,10 @@ xqc_mini_svr_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid,
         return 0;
     }
     xqc_mini_svr_log_mp_active_state_force(user_conn, "h3_conn_close");
+    if (user_conn->arrival_writer) {
+        xqc_arrival_attach_sink(user_conn->ctx->engine, &user_conn->cid, NULL, NULL);
+        netins_telemetry_close(user_conn->arrival_writer); user_conn->arrival_writer = NULL;
+    }
     mini_observer_stop(&user_conn->observer);
     printf("[stats] xqc_mini_svr_h3_conn_close_notify success \n");
     if (user_conn->is_connection_scope) {
@@ -2534,6 +2553,11 @@ xqc_mini_svr_h3_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_no
                     }
                     user_conn->observer_get_expected = expected;
                 }
+            }
+            if (user_stream->response_status == 200 && user_stream->use_file_response) {
+                xqc_arrival_register_get(user_conn->ctx->engine, &user_conn->cid,
+                    xqc_h3_stream_id(h3_request), observer_attempt, user_stream->stream_index,
+                    user_stream->response_body_offset, user_stream->response_body_len);
             }
             xqc_observer_bind(user_conn->ctx->engine, &user_conn->cid,
                 xqc_h3_stream_id(h3_request), observer_attempt, 1, user_stream->stream_index,

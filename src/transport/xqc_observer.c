@@ -543,6 +543,8 @@ xqc_observer_sample(xqc_engine_t *engine, const xqc_cid_t *cid, const char *kind
         if (callback != NULL) {
             if (callback->xqc_scheduler_get_path == xqc_minrtt_scheduler_cb.xqc_scheduler_get_path) {
                 name = "minrtt";
+            } else if (callback->xqc_scheduler_get_path == xqc_original_minrtt_scheduler_cb.xqc_scheduler_get_path) {
+                name = "original_minrtt";
             } else if (callback->xqc_scheduler_get_path == xqc_peekaboo_scheduler_cb.xqc_scheduler_get_path) {
                 name = "peekaboo";
             } else if (callback->xqc_scheduler_get_path == xqc_blest_scheduler_cb.xqc_scheduler_get_path) {

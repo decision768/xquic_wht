@@ -1,0 +1,172 @@
+adaptive-v2 实现与离线验证记录（2026-11-25）
+
+本次完成了新调度器的代码接入、只读预测、按流暂缓、唤醒和离线核心验证。
+完整工程链接、板端/云端运行、真实事件循环联调及受控网络实验尚未完成。
+不能据此宣布文档 T01—T29 全部验收通过，也没有实测 FCT 收益结论。
+
+依据：2026-11-25_Adaptive到达时间感知窗口回退_开发实现需求.md，v1.1。
+实际目录：D:\5g\xquic-1.8.3-v5.3.3-path-delivery-diag。
+基线 HEAD：e332852e0eef1a7a39714732e97b9893c883729b，修改开始前工作区已 dirty。
+开始前的文件及补丁备份：
+C:\Users\ZZ\AppData\Local\Temp\codex-adaptive-v2-t4u7t7pp\before
+C:\Users\ZZ\AppData\Local\Temp\codex-adaptive-v2-t4u7t7pp\baseline.patch
+
+已实现的行为
+
+1. 对外新增 adaptive-v2，回调 xqc_adaptive_v2_scheduler_cb。
+   adaptive 保持独立名称和回调，复用原状态机内部代码；不初始化 arrival 上下文。
+   adaptive-v2 默认 off。原有至少 500 ms、最长 800 ms 的预热条件保留。
+
+2. off 不运行预测、不启用等待 timer；shadow 预测后仍执行原选择；
+   enforce 仅对服务端普通 GET 正文、BULK、两条合格路径、主路真实窗口不足、
+   副路可发送的分支考虑等待。路径、指定发送、恢复、重注入、探测、FEC、
+   多 STREAM、混合控制帧、HTTP/3 framing、高优先任务均保守旁路。
+   已知 socket 回压、socket 故障、重绑定验证和包过滤器约束也不建立新等待。
+
+3. GET 用途登记独立于 observer。mini 准备普通文件响应时登记 transfer、
+   request_index、stream、文件范围。HTTP/3 仅在 DATA payload 写入期间标正文；
+   与 framing 合并的 STREAM frame 不会被误标为纯正文。
+
+4. 每路固定容量缓存保存有效非 app-limited 速率样本与实际 ACK 回收批次。
+   ACK 缓存只接受 ACK 语境下 I 的实际下降；重复/丢失后迟到 ACK 不重复释放。
+   同时间 ACK 合并，速率按 ACK 序号去重。路径 reset/destroy 清空历史。
+   连续文件可继承路径历史，各 stream 的用途和等待预算分别保存。
+
+5. 预测器只操作值副本。C、I、Z 分开保存，发送 Z 只在 I/Z 间等量转移。
+   目标排在原 Z 后面；ACK 只回收快照 I，不为模拟新发 Z 虚构 ACK。
+   pacing 复制 raw budget、pending、last_sent、已有 timer、突发上限和 1 ms 下限。
+   窗口等待与排队同时推进，事件数、时域、整数乘加、除法和有符号收益均有边界。
+   ACK 波动的 Q10/Q90 采用 nearest-rank 定义。
+   模型 arrival_proxy_v1；队列近似 grouped_bytes_v1；RTT/2 是代理值。
+
+6. 新增一次性 DEFER hint。主动等待不落入 best-candidate 兜底，
+   不计入原 no_sendable/CWND 阻塞，也不增加真实 I/Z。
+   包保留在原连接发送队列，以受包生命周期保护的指针和 UID 续扫，默认预算 256。
+   仅存在等待或 legacy 头包保护时启用有界续扫；无等待时沿用原发送循环。
+   到期头包轮转优先访问，不移动普通队列节点来续扫。
+   等待结束后重新从较早的数据扫描，防止游标处的较大 offset 越过较小 offset。
+   LEGACY_ONCE 保留零等待预算的同流顺序保护，直到头包进入路径队列或被清理。
+   高优先级提升涉及等待流时，先撤销等待并把头包排在相关控制包前面。
+
+7. 每连接最多一个 adaptive_arrival_wait GP timer。
+   GP timer 已进入原 next_wakeup 链路；回调只标记到期，不发送或阻塞。
+   正回收 ACK、pacing timeout 会让相关头包提前重检；无有用事件时不忙轮询。
+   扫描未完成时也安排续扫唤醒。deadline 首次固定，重复检查不延长；
+   默认 episode 5 ms、stream 总预算 20 ms，按实际经过时间结算。
+   记录事件循环迟到，不承诺墙钟上恰好 5 ms 执行。
+   包释放/复用、流取消、路径重置、连接退出及 mode 切换均有清理。
+
+8. 独立 adaptive_arrival_events/schema_version=1 日志，不复用 P0 字段语义。
+   输出配置、正文绑定、两路快照/预测、等待生命周期、socket attempt、
+   成功发送 UID→path/pns/pn/range/time 映射及未采样汇总。
+   无法得到的预测值写 null 和原因。收益比较的溢出不会变成有效的零值。
+   常规预测默认每秒最多 100 条；等待生命周期不采样，丢失会标为证据不完整。
+   进入等待的包即使预测详情被采样掉，也保留实际发送跟踪。
+   EAGAIN/失败只有 attempt 记录，成功发送处才产生 packet_sent。
+   W 误差只对实际选中且预测有效的路径计算。
+   primary_recovered_send/secondary_legacy_send 的阶段是 path_queue_handoff；
+   它们不能代替成功 socket 发送统计，后者看 packet_sent。
+
+9. 公共新增 xqc_arrival_config_t，struct_size/version 独立检查；
+   未向旧 xqc_conn_settings_t 或旧 scheduler callback 增加无版本参数。
+   NetIns 新增调度 enum 17、配置 option 15；原 enum/option 数值保留。
+   engine 配置作用于后续新连接，xqc_arrival_set_mode 可清理现有连接的等待。
+
+10. CMake 自动生成 adaptive_arrival_source_manifest.json 和非空 source_build_id，
+    包含 HEAD、dirty 及实际源码 SHA256。直接绕过构建标识编译时会注明 unverified。
+    正式部署还须保留完整编译命令、依赖版本和实际运行二进制 SHA256。
+    压测脚本记录 source ID、/proc/PID/exe 哈希、requested/resolved 名称和 mode。
+
+主要文件职责
+
+src/transport/scheduler/xqc_scheduler_adaptive_v2.c/h：新回调、状态机、配置和日志。
+src/transport/scheduler/adaptive_arrival_predictor.c/h：固定缓存、纯预测、收益比较。
+src/transport/scheduler/xqc_scheduler_adaptive.c：共享原流程，在普通回退分支接入 v2。
+src/transport/xqc_conn.c/h：hint、续扫、成功/失败发送接点和连接清理。
+src/transport/xqc_send_ctl.c、xqc_pacing.c：ACK 样本、回收、成功发送和提前重检。
+src/transport/xqc_packet_out.c/h、xqc_send_queue.c：UID、正文标签、释放/复制/优先级提升。
+src/transport/xqc_stream.c/h、xqc_multipath.c：用途、流/路径清理。
+src/http3/xqc_h3_stream.c、mini/mini_server_cb.c：仅标识普通 GET DATA payload。
+mini、NetIns API、demo server/client、xquic.lds、CMakeLists：配置和调度器注册。
+test_wht/adaptive_arrival_benchmark.py：参数校验、模式标识、独立日志校验后归档。
+tools/analyze_adaptive_arrival.py：离线预测、等待、发送、FCT/HoL 和边界不确定项导出。
+tests/test_adaptive_arrival_*、run_adaptive_arrival_tests.py：确定性核心和工具测试。
+
+配置和运行入口
+
+完整默认值见 defaults.json，与公共配置初始化及 benchmark 参数一致。
+服务器示例（须先用现有工程配置完成构建和部署）：
+
+  netins_udp_mini_api_server --root DIR --scheduler adaptive-v2 --adaptive-arrival-mode off
+  netins_udp_mini_api_server --root DIR --scheduler adaptive-v2 --adaptive-arrival-mode shadow
+  netins_udp_mini_api_server --root DIR --scheduler adaptive-v2 --adaptive-arrival-mode enforce
+
+通用覆盖格式：--adaptive-arrival-字段名 VALUE；CLI 支持连字符或下划线。
+例：--adaptive-arrival-max-defer-episode-us 5000 --adaptive-arrival-predict-horizon-us 20000
+原 mini 配置文件也可使用 adaptive_arrival_字段名=value；模式为 adaptive_arrival_mode。
+服务端启动输出实际请求配置，每个 arrival 日志的 config 头也保存完整模型参数。
+客户端默认 off；本轮新等待只用于服务端发送 GET 正文。
+
+现有 100MB 脚本只接入算法、配置和归档，没有新增/运行搁置的 1GB GET 脚本。
+例：python "test_wht/压测_100MB_FCT.py" --schedulers adaptive,adaptive-v2 --direction get --adaptive-arrival-mode shadow --dry-run
+覆盖值：--adaptive-arrival-option predict_horizon_us=20000，可重复传入。
+scheduler 字段保留 adaptive-v2，adaptive_arrival_mode 单列，scheduler_label 带模式。
+先检查 off/shadow 覆盖率与已选路径预测误差，再安排 enforce 网络实验。
+上一轮约定的 GET 速率算术平均实现已和修改前 AST 对照，保持不变。
+
+离线验证命令与材料
+
+  python3 tests/run_adaptive_arrival_tests.py --cc cc --include /usr/include --output /tmp/arrival-tests
+  python3 tests/test_adaptive_arrival_tools.py
+  python3 scripts/mini_api/check_abi.py
+
+Windows 本次使用临时目录下的 Zig 0.13，以及 socket 兼容头运行核心测试；
+生产 scheduler/runtime 源码直接编入测试，连接调度、队列、GP timer 等函数逐字提取。
+clock、CC、socket 和 observer 是可控边界替身；不是实际 QUIC/TLS 网络连接。
+测试命令、源码/提取内容哈希、测试二进制哈希和输出见 offline_tests.json。
+20 个相关翻译单元在 x86_64-linux-musl 和 aarch64-linux-musl 上以 -Wall -Werror 编译；
+命令和对象哈希见 compile_*.json。这不是板端 SDK 完整构建或动态库链接证明。
+公共头 C++→C 链接检查、NetIns 30 个公开函数 ABI 清单检查通过。
+original_minrtt 选择/参数/额外探测隔离回归通过，使用的提取函数与当前生产代码核对一致。
+T01—T29 的离线覆盖范围及未运行项见 test_coverage.csv。
+
+有一项原有检查仍失败：scripts/mini_api/check_stream_isolation.py 的两条 invariant
+“file transfer rejects an active stream”和“file transfer rejects every stream-mode connection”。
+实施前已在原 HEAD 上复现，未扩大本次修改去修复这个既有问题。
+
+examples/deterministic_events.jsonl 是注入时钟的单元测试事件，含 off/shadow/enforce，
+用于复核解析器和状态机。不是板端/云端样例，更不是性能实验。
+其中故意注入了日志写入失败，analysis.json 应报告证据不完整，不能消除该标记。
+
+  python3 tools/analyze_adaptive_arrival.py LOG_DIR --output OUT
+  python3 tools/analyze_adaptive_arrival.py LOG_DIR --output OUT --fct-csv get_transfers.csv --receiver-events BOARD_LOG_DIR
+
+可选校准文件：--calibration calibration.json；按 transfer_id 保存
+server_to_client_offset_us 和非负 error_us。没有校准时不做跨端 FCT 归因。
+HoL 按接收端 FCT 截断后取区间并集；B 积分仅使用完全位于 FCT 内的可核对样本区间。
+边缘样本、缺失区间、截尾 episode 或校准不确定性单列，不用连接总量填补。
+
+实现近似与后续验收
+
+速率仍需默认至少 8 个有效样本、跨度一条 SRTT、BBR full_bw、新鲜度满足。
+只有 16 个样本的缓存可能无法覆盖某些高 RTT/密 ACK 条件，策略会正常旁路。
+不使用 CWND/SRTT 或 1024 B/s 补成“高置信”数据。
+本轮只接受本库原版 BBR 回调的身份；BBR2、其他 CC 或自定义等价接口不会默认启用等待。
+分组 Z、固定短期 C、不预测未来其他包竞争及不虚构新 Z 的 ACK 都是模型限制。
+RTT/2 不是单程实测；收益门槛不是统计置信界；shadow 不证明换路后 FCT 会改善。
+
+本次 64 位测试中 arrival runtime 为 12024 B/连接，stream 元数据为 424 B/流。
+packet_out 当前为 600 B。独立日志复用了既有异步 writer，记录队列本身约 16 MiB/连接，
+另有线程和文件缓冲开销；正式性能实验必须同时评估 CPU、内存和日志开销。
+
+必要的共有修复单独保留：xqc_on_packets_send_burst 中
+XQC_CAN_IN_FLIGHT 的括号原先错误地包含 pacing_on 布尔判断，导致 ACK-only 批量包扣 pacing。
+本次改为和单包路径相同的帧类型判断，并有 ACK-only 批量回归。
+它作用于同一版本所有算法，不能把该修复的效果算作新策略收益。
+
+待完成的验收包括：使用真实依赖完整链接云端/板端程序，核验运行时导出/注册；
+真实 engine event callback 无输入唤醒；完整 ACK 解析和 syscall 集成；
+真实队列满/写入错误压力；同连接连续三次 GET 与并发 8；
+文档四类受控网络、100 MiB/25×4 MiB、首份/第 2/3 份和较快单路参考。
+需要原版、off、shadow、enforce 同版本交叉对照，按每文件 GET FCT 报告失败和未完成项。
+这些尚无实测日志或可部署的完整二进制，不能标记为已通过。

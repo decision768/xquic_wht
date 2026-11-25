@@ -21,6 +21,7 @@ typedef struct server_options_s {
     uint32_t max_connections;
     uint16_t port;
     netins_udp_observer_config_t observer;
+    xqc_arrival_config_t arrival;
     int log_level;
     int scheduler;
     const char *scheduler_name;
@@ -43,7 +44,9 @@ usage(const char *program)
         "  --serve-timeout-ms MS   Per-connection timeout; 0 is infinite\n"
         "  --max-connections N     Connections to serve (default 1)\n"
         "  --version               Print experiment version and exit\n"
-        "  --scheduler NAME        Sender scheduler, including peekaboo, blest and ecf (default adaptive)\n"
+        "  --scheduler NAME        Sender scheduler, including original_minrtt, peekaboo, blest and ecf (default adaptive)\n"
+        "  --adaptive-arrival-mode off|shadow|enforce  (default off)\n"
+        "  --adaptive-arrival-KEY VALUE  Configure any arrival v1 field (use underscores)\n"
         "  --log-level N           0=debug, 1=info, 2=warn, 3=error (default 0)\n"
         "  --zlog-config FILE      Enable zlog with this config file\n"
         "  --zlog-category NAME    zlog category (default xquic_mini_api_server)\n",
@@ -74,6 +77,7 @@ parse_scheduler(const char *name, int *out)
     } schedulers[] = {
         {"default", NETINS_UDP_SCHEDULER_DEFAULT},
         {"minrtt", NETINS_UDP_SCHEDULER_MINRTT},
+        {"original_minrtt", NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT},
         {"backup", NETINS_UDP_SCHEDULER_BACKUP},
         {"balanced", NETINS_UDP_SCHEDULER_BALANCED},
         {"rap", NETINS_UDP_SCHEDULER_RAP},
@@ -85,6 +89,7 @@ parse_scheduler(const char *name, int *out)
         {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
         {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
+        {"adaptive-v2", NETINS_UDP_SCHEDULER_ADAPTIVE_V2},
         {"peekaboo", NETINS_UDP_SCHEDULER_PEEKABOO},
         {"blest", NETINS_UDP_SCHEDULER_BLEST},
         {"ecf", NETINS_UDP_SCHEDULER_ECF},
@@ -120,6 +125,7 @@ parse_args(int argc, char **argv, server_options_t *options)
     options->bind_address = "0.0.0.0";
     options->port = 8443;
     options->observer = (netins_udp_observer_config_t)NETINS_UDP_OBSERVER_CONFIG_INITIALIZER;
+    xqc_arrival_config_init(&options->arrival);
     options->scheduler = NETINS_UDP_SCHEDULER_ADAPTIVE;
     options->scheduler_name = "adaptive";
     options->max_connections = 1;
@@ -141,6 +147,12 @@ parse_args(int argc, char **argv, server_options_t *options)
             if (need_value(argc, argv, &i, &value) != 0
                 || parse_u32(value, 60000, &number) != 0 || number == 0 || number > 60000) { return -1; }
             options->observer.interval_ms = number;
+        } else if (strncmp(argv[i], "--adaptive-arrival-", 19) == 0) {
+            char key[80];
+            if (strlen(argv[i] + 19) >= sizeof(key)) return -1;
+            strcpy(key, argv[i] + 19);
+            for (char *p = key; *p; ++p) if (*p == '-') *p = '_';
+            if (need_value(argc, argv, &i, &value) || xqc_arrival_config_option(&options->arrival, key, value)) return -1;
         } else if (strcmp(argv[i], "--scheduler") == 0) {
             if (need_value(argc, argv, &i, &options->scheduler_name) != 0
                 || parse_scheduler(options->scheduler_name, &options->scheduler) != 0)
@@ -217,7 +229,9 @@ parse_args(int argc, char **argv, server_options_t *options)
 
     int has_certificate = options->certificate_file != NULL;
     int has_private_key = options->private_key_file != NULL;
-    return has_certificate == has_private_key
+    return xqc_arrival_config_validate(&options->arrival) == 0
+        && (options->arrival.mode == XQC_ARRIVAL_OFF || strcmp(options->scheduler_name, "adaptive-v2") == 0)
+        && has_certificate == has_private_key
         && options->root_path != NULL
         && (options->zlog_category == NULL
             || options->zlog_config_file != NULL) ? 0 : -1;
@@ -261,6 +275,8 @@ configure_server(netins_udp_t *server, const server_options_t *options)
     netins_udp_tls_config_t tls = NETINS_UDP_TLS_CONFIG_INITIALIZER;
     int scheduler = options->scheduler;
 
+    if (netins_udp_set_opt(server, NETINS_UDP_OPT_ADAPTIVE_ARRIVAL_V1,
+            &options->arrival, sizeof(options->arrival)) != 0) return -1;
     if (options->observer.enabled && netins_udp_set_opt(server, NETINS_UDP_OPT_OBSERVER_V2,
         &options->observer, sizeof(options->observer)) != 0) { return -1; }
     logger.callback = api_logger;
@@ -345,10 +361,11 @@ main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--telemetry-capabilities") == 0) {
-        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true,\"get_task_confirmation\":true}");
+        puts("{\"transport_schema\":2,\"event_schema\":1,\"hol_event_accounting\":true,\"segmented_writer\":true,\"observer_revision\":2,\"clock_domain\":\"CLOCK_MONOTONIC\",\"task_checkpoint\":true,\"get_task_confirmation\":true,\"adaptive_arrival_schema\":1,\"adaptive_v2\":true}");
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("source_build_id=%s\n", xqc_arrival_source_build_id());
         return EXIT_SUCCESS;
     }
 
@@ -380,6 +397,19 @@ main(int argc, char **argv)
            " root=%s scheduler=%s\n",
         options.bind_address, options.port, options.root_path,
         options.scheduler_name);
+    printf("source_build_id=%s\n", xqc_arrival_source_build_id());
+    printf("adaptive_arrival scheduler=%s mode=%s model=%s\n", options.scheduler_name,
+        xqc_arrival_mode_name(options.arrival.mode), XQC_ARRIVAL_MODEL);
+    const xqc_arrival_config_t *arrival = &options.arrival;
+    printf("adaptive_arrival_config predict_horizon_us=%u max_defer_episode_us=%u max_defer_stream_us=%u "
+           "recheck_interval_us=%u gain_margin_floor_us=%u gain_margin_rtt_ratio=%.9g "
+           "min_valid_rate_samples=%u rate_sample_capacity=%u ack_batch_capacity=%u min_ack_batches=%u "
+           "max_sim_events_per_path=%u max_waiting_streams=%u schedule_scan_budget=%u prediction_log_limit_per_s=%u\n",
+        arrival->predict_horizon_us, arrival->max_defer_episode_us, arrival->max_defer_stream_us,
+        arrival->recheck_interval_us, arrival->gain_margin_floor_us, arrival->gain_margin_rtt_ratio,
+        arrival->min_valid_rate_samples, arrival->rate_sample_capacity, arrival->ack_batch_capacity,
+        arrival->min_ack_batches, arrival->max_sim_events_per_path, arrival->max_waiting_streams,
+        arrival->schedule_scan_budget, arrival->prediction_log_limit_per_s);
     fflush(stdout);
     while (served < options.max_connections) {
         netins_udp_t *connection = netins_udp_accept(server);

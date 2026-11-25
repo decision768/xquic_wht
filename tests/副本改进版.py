@@ -2916,7 +2916,7 @@ def write_aggregation_summary(
 # 实验计划：纯函数，可离线审阅；每个测试项独立记录，重试不增加样本数。
 # =============================================================================
 SUPPORTED_SCHEDULERS = (
-    "default", "minrtt", "backup", "balanced", "rap", "act", "bandwidth",
+    "default", "minrtt", "original_minrtt", "backup", "balanced", "rap", "act", "bandwidth",
     "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive",
 )
 SUPPORTED_CC = ("default", "cubic", "bbr")

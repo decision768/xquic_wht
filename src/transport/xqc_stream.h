@@ -132,6 +132,8 @@ struct xqc_stream_s {
     xqc_encrypt_level_t     stream_encrypt_level;
     xqc_stream_data_in_t    stream_data_in;
     xqc_observer_stream_t  *observer;
+    struct xqc_arrival_stream_s *arrival;
+    unsigned char arrival_writing_body;
     unsigned                stream_unacked_pkt;
     int64_t                 stream_refcnt;
     xqc_send_stream_state_t stream_state_send;

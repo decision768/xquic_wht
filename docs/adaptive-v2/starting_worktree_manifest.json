@@ -1,0 +1,27 @@
+{
+  "head": "e332852e0eef1a7a39714732e97b9893c883729b",
+  "files": {
+    "src/transport/scheduler/xqc_scheduler_original_minrtt.c": "46b5aa0d5abe4533562608949a0a43929f8c250068d25c4ef0bcfe102c054108",
+    "src/transport/scheduler/xqc_scheduler_original_minrtt.h": "c93ac2f535281040569804be57778388bba56ad6631a0128ffee4cffe4429aca",
+    "tests/test_original_minrtt.c": "1a8a3adfd48708299450acc46f1507f0a60fc68500097ee51c3712cc213c60f8",
+    "CMakeLists.txt": "0444f4c7a4adb7a44fe37a45aab7f91d256aff3d0b211ecc66d843668b3e4942",
+    "THIRD_PARTY_LICENSES.md": "2ae9a324f951501e868637aacd6ea49789a6edbb88a9a00e3e061d6aafb6baff",
+    "demo/netins_udp_mini_api_client.c": "8f44f2548d6a41b061c5be6a23b5a4905ea0659dc4bdf419554a888fe609b307",
+    "demo/netins_udp_mini_api_server.c": "c47a279527b6832466d1d3f08485267a5fea2ac7afed293981555ed7941c0337",
+    "demo/netins_udp_stream_client.c": "6011f44a50dae65b38f84ce918675ef14c1dea3b9810cf602123eb98adf22c05",
+    "include/xquic/netins_udp.h": "e7a63949211d48021c1c8973b77f1dfce2380d4234ddee260fc0e520a0026563",
+    "include/xquic/xquic.h": "8f9e46ef40c686cbbbc5f07047e2cbe5f10bf2a8a4753cdb49c6eab9f20e1dc0",
+    "mini/mini_client.c": "8625170954ccd634ee70afd5b799f5114e76993660c27b90e6ed4f096453027d",
+    "mini/mini_server.c": "271de37be6a396228f838e50e14d3dd0e9013bc6ccb884994a0a53c760da2013",
+    "scripts/xquic.lds": "e9214d424b9cb584ff7b4b066b9b05c56b654244bd9b8be0fc27829fe748fbeb",
+    "src/netins_udp/netins_udp_api.c": "3759ae129880a2f3bbbc6332c4543eb0b89cd088ae711232803ec34ed75e15d7",
+    "src/transport/scheduler/xqc_scheduler_adaptive.c": "89ead0f2ec3896693655e460de8c915904baed5add295ac7eca1aa4d1d6da32e",
+    "src/transport/scheduler/xqc_scheduler_common.c": "72bd2cbf4941b7c5e169c558fd79cda3f443ddd9c221e62b1eb429c8af244ce9",
+    "src/transport/xqc_conn.c": "cea8496418d9bffa640729e4f44b2c4c5519eb9bd7e79e779380b6fa74e3a7e5",
+    "src/transport/xqc_observer.c": "d732791fcd3630e5a729879f39c7a9ea36cb5d4543951196391007e8846b3ec6",
+    "test_wht/压测_100MB_FCT.py": "fe810124c677df725fccef2338d9e324d668b47820ea4983383df2dfecd4da4d",
+    "tests/stream_api_benchmark.py": "954f94b18901b099857da237a2ef531e62d2e74a1daacb353e9bf1c95f8b7257",
+    "tests/副本改进版.py": "8b964fdc8540d1e226413dc9ec84d4849ef1b66d6161b9d50cd969428b30ee7f",
+    "文档/NETINS_UDP_调度算法说明.md": "6e4488864da69c849f1886cd6a02771ddc65370390f07422abb263d08b6bf6ab"
+  }
+}

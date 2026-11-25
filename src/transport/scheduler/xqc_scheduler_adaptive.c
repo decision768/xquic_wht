@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 #include <xquic/xqc_observer_clock.h>
 #include "src/transport/scheduler/xqc_scheduler_adaptive.h"
 #include "src/transport/scheduler/xqc_scheduler_common.h"
@@ -17,7 +18,7 @@
 #define XQC_ADAPTIVE_MIN_CAPACITY_BPS           1024.0
 #define XQC_ADAPTIVE_WARMUP_BYTES_PER_PATH      (256 * 1024)
 #define XQC_ADAPTIVE_WARMUP_DELIVERED_MIN       (64 * 1024)
-#define XQC_ADAPTIVE_WARMUP_MIN_US              100000
+#define XQC_ADAPTIVE_WARMUP_MIN_US              500000
 #define XQC_ADAPTIVE_WARMUP_MAX_US              800000
 #define XQC_ADAPTIVE_ADJUST_INTERVAL_US          500000
 #define XQC_ADAPTIVE_PRIMARY_HOLD_US             1000000
@@ -1031,7 +1032,8 @@ static xqc_adaptive_candidate_t *
 xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
     xqc_adaptive_candidate_t *candidates, size_t count,
     size_t packet_size, xqc_bool_t *intentionally_blocked,
-    xqc_adaptive_pick_reason_t *pick_reason)
+    xqc_adaptive_pick_reason_t *pick_reason, xqc_connection_t *conn,
+    xqc_packet_out_t *packet_out, int reinject, xqc_usec_t now, int arrival_enabled)
 {
     xqc_adaptive_candidate_t *primary = xqc_adaptive_find_candidate(
         candidates, count, adaptive->primary_path_id);
@@ -1105,6 +1107,13 @@ xqc_adaptive_pick_bulk(xqc_adaptive_scheduler_t *adaptive,
         return probe_allowed ? secondary : primary;
     }
 
+    if (arrival_enabled && !primary->excluded_by_reinject
+        && primary->cwnd_eval.block_reason != XQC_SCHED_BLOCK_NONE
+        && xqc_arrival_fallback(conn, packet_out, primary->path, secondary->path, count, reinject, now))
+    {
+        return NULL; /* DEFER bypasses all legacy fallbacks and blocking counters. */
+    }
+
     /* Do not idle the connection merely to preserve a target byte share. */
     if (adaptive->sched_diag.enabled || adaptive->observer_enabled) {
         if (primary->cwnd_eval.block_reason == XQC_SCHED_BLOCK_REAL_INFLIGHT) {
@@ -1154,7 +1163,7 @@ xqc_adaptive_diag_return(xqc_adaptive_scheduler_t *adaptive,
 }
 
 xqc_path_ctx_t *
-xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
+xqc_adaptive_get_path_core(void *scheduler, xqc_connection_t *conn,
     xqc_packet_out_t *packet_out, int check_cwnd, int reinject,
     xqc_bool_t *cc_blocked)
 {
@@ -1183,6 +1192,14 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
     count = xqc_adaptive_collect_candidates(adaptive, conn, packet_out,
         check_cwnd, reinject, candidates, standby, &original_path,
         &has_active, &has_sendable, now);
+
+    int arrival_v2 = conn->scheduler_callback->xqc_scheduler_get_path == xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path;
+    if (arrival_v2 && !reinject) {
+        uint64_t secondary = count == 2 ? (candidates[0].path_id == adaptive->primary_path_id
+            ? candidates[1].path_id : candidates[0].path_id) : UINT64_MAX;
+        xqc_arrival_roles(conn, adaptive->primary_path_id, secondary,
+            count == 2 && adaptive->primary_valid && adaptive->phase == XQC_ADAPTIVE_PHASE_BULK, now);
+    }
 
     if ((adaptive->sched_diag.enabled || adaptive->observer_enabled) && count >= 2
         && adaptive->primary_valid)
@@ -1338,9 +1355,17 @@ xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
         }
 
         xqc_adaptive_adjust(adaptive, conn, candidates, count, now);
+        if (arrival_v2 && !reinject) {
+            uint64_t secondary = count == 2 ? (candidates[0].path_id == adaptive->primary_path_id
+                ? candidates[1].path_id : candidates[0].path_id) : UINT64_MAX;
+            xqc_arrival_roles(conn, adaptive->primary_path_id, secondary, count == 2 && adaptive->primary_valid, now);
+        }
         selected = xqc_adaptive_pick_bulk(adaptive, candidates, count,
-            packet_size, &intentionally_blocked, &pick_reason);
+            packet_size, &intentionally_blocked, &pick_reason, conn, packet_out, reinject, now,
+            conn->scheduler_callback->xqc_scheduler_get_path == xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path);
     }
+
+    if (xqc_arrival_is_defer(conn, packet_out)) { return NULL; }
 
     if (selected == NULL && intentionally_blocked) {
         adaptive->no_sendable_count++;
@@ -1625,6 +1650,19 @@ xqc_adaptive_scheduler_conn_close_diag(void *scheduler,
     }
 }
 
+void xqc_adaptive_v2_init_core(void *scheduler, xqc_log_t *log, xqc_scheduler_params_t *params)
+{
+    xqc_adaptive_scheduler_init(scheduler, log, params);
+    ((xqc_adaptive_scheduler_t *)scheduler)->sched_diag.sched_name = "adaptive-v2";
+}
+
+xqc_path_ctx_t *
+xqc_adaptive_scheduler_get_path(void *scheduler, xqc_connection_t *conn,
+    xqc_packet_out_t *packet_out, int check_cwnd, int reinject, xqc_bool_t *cc_blocked)
+{
+    return xqc_adaptive_get_path_core(scheduler, conn, packet_out, check_cwnd, reinject, cc_blocked);
+}
+
 const xqc_scheduler_callback_t xqc_adaptive_scheduler_cb = {
     .xqc_scheduler_size             = xqc_adaptive_scheduler_size,
     .xqc_scheduler_init             = xqc_adaptive_scheduler_init,
@@ -1636,7 +1674,7 @@ const xqc_scheduler_callback_t xqc_adaptive_scheduler_cb = {
 int
 xqc_adaptive_observer_json(xqc_connection_t *conn, char *out, size_t cap)
 {
-    if (!conn->scheduler_callback || conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path || !conn->scheduler) { return 0; }
+    if (!conn->scheduler_callback || (conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path && conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path) || !conn->scheduler) { return 0; }
     const xqc_adaptive_scheduler_t *a = conn->scheduler;
     const char *names[] = {"none", "warmup", "primary", "probe", "cwnd_fallback",
         "reinject_fallback", "best_fallback", "single", "original"};
@@ -1646,7 +1684,7 @@ xqc_adaptive_observer_json(xqc_connection_t *conn, char *out, size_t cap)
         snprintf(secondary, sizeof(secondary), "%"PRIu64, a->observer_secondary_id);
     }
     int n = snprintf(out, cap,
-        "\"scheduler_name\":\"adaptive\",\"adaptive_phase\":\"%s\","
+        "\"scheduler_name\":\"%s\",\"adaptive_phase\":\"%s\","
         "\"primary_valid\":%s,\"primary_path_id\":%s,\"secondary_path_id\":%s,"
         "\"target_secondary_pct\":%.6f,\"role_epoch\":%"PRIu64","
         "\"both_sendable\":%"PRIu64",\"primary_only\":%"PRIu64","
@@ -1655,6 +1693,7 @@ xqc_adaptive_observer_json(xqc_connection_t *conn, char *out, size_t cap)
         "\"fallback_scheduled_reservation_count\":%"PRIu64","
         "\"fallback_real_inflight_bytes\":%"PRIu64",\"fallback_scheduled_reservation_bytes\":%"PRIu64","
         "\"reinject_selected_bytes\":%"PRIu64,
+        conn->scheduler_callback->xqc_scheduler_get_path == xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path ? "adaptive-v2" : "adaptive",
         xqc_adaptive_phase_name(a->phase), a->primary_valid ? "true" : "false", primary, secondary,
         a->probe_pct, conn->observer ? conn->observer->role_epoch : 0,
         a->both_sendable, a->primary_only, a->secondary_only, a->neither_sendable,
@@ -1675,7 +1714,7 @@ xqc_adaptive_observer_json(xqc_connection_t *conn, char *out, size_t cap)
 int
 xqc_adaptive_observer_path_json(xqc_connection_t *conn, uint64_t id, char *out, size_t cap)
 {
-    if (!conn->scheduler_callback || conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path || !conn->scheduler) { return 0; }
+    if (!conn->scheduler_callback || (conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_scheduler_cb.xqc_scheduler_get_path && conn->scheduler_callback->xqc_scheduler_get_path != xqc_adaptive_v2_scheduler_cb.xqc_scheduler_get_path) || !conn->scheduler) { return 0; }
     const xqc_adaptive_scheduler_t *a = conn->scheduler;
     const xqc_adaptive_path_state_t *state = NULL;
     for (unsigned i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {

@@ -278,6 +278,8 @@ netins_udp_scheduler_name(int scheduler)
         return "balanced";
     case NETINS_UDP_SCHEDULER_MINRTT:
         return "minrtt";
+    case NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT:
+        return "original_minrtt";
     case NETINS_UDP_SCHEDULER_BACKUP:
         return "backup";
     case NETINS_UDP_SCHEDULER_RAP:
@@ -290,6 +292,8 @@ netins_udp_scheduler_name(int scheduler)
         return "fastprobe";
     case NETINS_UDP_SCHEDULER_ADAPTIVE:
         return "adaptive";
+    case NETINS_UDP_SCHEDULER_ADAPTIVE_V2:
+        return "adaptive-v2";
     case NETINS_UDP_SCHEDULER_FASTPROBE5:
         return "fastprobe5";
     case NETINS_UDP_SCHEDULER_FASTPROBE10:
@@ -429,6 +433,14 @@ netins_udp_set_opt(netins_udp_t *handle, int option,
     }
 
     switch (option) {
+    case NETINS_UDP_OPT_ADAPTIVE_ARRIVAL_V1: {
+        const xqc_arrival_config_t *arrival = value;
+        if (!arrival || value_len != sizeof(*arrival) || xqc_arrival_config_validate(arrival)) {
+            return netins_udp_set_error(handle, EINVAL, "invalid adaptive arrival v1 configuration");
+        }
+        handle->backend_config.arrival_config = *arrival;
+        break;
+    }
     case NETINS_UDP_OPT_OBSERVER_V2: {
         const netins_udp_observer_config_t *observer = value;
         if (!observer || value_len != sizeof(*observer)

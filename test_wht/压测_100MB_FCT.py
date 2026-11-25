@@ -23,10 +23,12 @@ Active GX-style outputs (each algorithm has its own directory):
     aggregation_summary_post_<session>.csv
 
 Single-link baselines are recorded under single_link/. Warmup logs are excluded from summaries.
-每轮每个方向测两次 minrtt 单链路和每种算法各一次双卡聚合。
-每个 GET 用例默认在同一 QUIC 连接上顺序下载三次，以三次 FCT 的算术平均值参与对比。
+每轮每个方向在开头、相邻聚合算法之间和末尾各测一组 5G1、5G2。
+单链路统一用 minrtt，每个聚合算法使用紧挨它前后的两组单链路测速做对比。
+每个 GET 用例默认在同一 QUIC 连接上顺序下载三次，以各次 FCT 吞吐率的算术平均值参与速率对比。
+代表速率为 mean(每份文件字节数 * 8 / 各次 FCT)，FCT 均值单独保留。
 所有尝试的逐文件 FCT、吞吐率和收尾确认记录在 get_transfers.csv。
-默认把聚合放在两次单链路之间，并在各轮轮换聚合算法和首尾网卡。
+默认在各轮轮换聚合算法的顺序，各组单链路使用相同顺序。
 GET 轮换云端发送算法，板卡接收端固定 adaptive。POST 轮换板卡发送算法，
 云端接收端固定 adaptive。服务端需要先部署支持 --scheduler 的配套版本。
 仅在所需服务端算法变化时重启，核对启动输出中的实际算法后才开始传输。
@@ -53,6 +55,7 @@ import time
 import uuid
 from collections import Counter
 from dataclasses import asdict, dataclass
+import adaptive_arrival_benchmark as arrival_benchmark
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -98,7 +101,7 @@ DEFAULT_GET_CONFIRM_TIMEOUT_MS = 15000  # 单份文件等待云端收尾确认�
 # 单链路发送算法统一使用 minrtt。
 DEFAULT_SCHEDULERS = ("adaptive", "minrtt", "balanced", "blest", "ecf")
 DEFAULT_EXECUTION_MODE = "round-robin"
-DEFAULT_SEQUENCE = "balanced"  # 多轮轮换聚合位置和首尾网卡，fixed 保持固定顺序。
+DEFAULT_SEQUENCE = "balanced"  # 多轮轮换聚合算法位置，fixed 保持固定顺序。
 DEFAULT_DRY_RUN = False  # True=只保存计划，不连接SSH；False=实际测试
 DEFAULT_WARMUP_CYCLES = 0  # 每个算法的预热周期数；预热数据不进入正式汇总
 DEFAULT_ALGORITHM_COOLDOWN_S = 2.0  # 算法周期之间的额外冷却时间
@@ -122,6 +125,7 @@ DEFAULT_ACCEPT_TIMEOUT_MS = 0
 DEFAULT_SERVE_TIMEOUT_MS = 600000
 DEFAULT_SERVER_READY_TIMEOUT_S = 15.0
 DEFAULT_BOARD_DIR = "/oemdata/gx/xquic_file"
+DEFAULT_DOWNLOAD_DIR = None  # None=沿用程序目录；可独立指定板端下载目录。
 DEFAULT_CLIENT_EXECUTABLE = "./netins_udp_mini_api_client"
 DEFAULT_GET_ORIGINAL_PATH = "/upload/1"
 DEFAULT_GET_MIB = 100
@@ -137,7 +141,7 @@ DEFAULT_SERVER_RESOURCE_RETENTION_DAYS = 0
 DEFAULT_OUTPUT_ROOT = ""  # 留空：本文件同目录下的log/<月日_时分秒_算法名称组合>/
 
 # 压测参数
-DEFAULT_ITERATIONS = 500  # 正式轮数，每轮每个方向只测一对单链路基线。
+DEFAULT_ITERATIONS = 500  # 正式轮数，每个聚合用例紧邻前后两组单链路基线。
 DEFAULT_RUN_GET = 1
 DEFAULT_RUN_POST = 0
 DEFAULT_GET_SCHEDULER = "adaptive"
@@ -170,6 +174,7 @@ MODE_INTERFACES = {
 
 SINGLE_LINK_PROFILE = "single_link"
 SINGLE_LINK_SCHEDULER = "minrtt"
+BASELINE_POSITIONS = ("before", "after")
 
 TRANSFER_RECORD_RE = re.compile(r"transfer\s+iteration=", re.IGNORECASE)
 TRANSFER_FIELD_RE = re.compile(
@@ -651,11 +656,13 @@ def board_preflight(
     verify_sha256: bool,
     require_post_source: bool = True,
 ) -> None:
-    write_probe = posixpath.join(args.board_dir, f".mini_bench_{session}")
+    download_dir = getattr(args, "download_dir", None) or args.board_dir
+    write_probe = posixpath.join(download_dir, f".mini_bench_{session}")
     checks = [
         f"cd -- {q(args.board_dir)}",
         f"test -x {q(args.client_executable)}",
-        f"test -w {q(args.board_dir)}",
+        f"test -d {q(download_dir)}",
+        f"test -w {q(download_dir)}",
         f": > {q(write_probe)}",
         f"rm -f -- {q(write_probe)}",
         "command -v env >/dev/null",
@@ -719,13 +726,13 @@ def board_preflight(
     # Pending session journals were recovered before preflight. Current-session
     # artifacts are removed per attempt and again in the final cleanup.
     result = board.run(
-        f"df -Pk {q(args.board_dir)} | "
+        f"df -Pk {q(download_dir)} | "
         "awk 'NR==2 {printf \"__MINI_FREE_BYTES__=%.0f\\n\", $4 * 1024}'", timeout_s=10)
     if result.exit_code or result.timed_out or result.truncated:
         raise RuntimeError("板卡预检未能可靠读取剩余空间")
     free_match = re.search(r"__MINI_FREE_BYTES__=(\d+)", result.output)
     if not free_match:
-        raise RuntimeError("板卡预检未能读取工作目录剩余空间")
+        raise RuntimeError("板卡预检未能读取下载目录剩余空间")
     free_bytes = int(free_match.group(1))
     planned_attempts = getattr(args, "planned_get_attempts", len(args.order) * args.iterations * (args.retries + 1))
     retained_copies = planned_attempts if args.keep_downloads else 1
@@ -1173,11 +1180,12 @@ def build_client_command(
         ]
     )
     observer_args = observe(args, "client_arguments", attempt_token) or []
-    if direction == "get" and args.get_repeat > 1:
-        argv.extend(["--repeat", str(args.get_repeat),
-                     "--get-confirm-timeout-ms", str(args.get_confirm_timeout_ms)])
-        if not observer_args:
-            argv.extend(["--attempt-id", attempt_token])
+    if direction == "get":
+        argv.extend(["--repeat", str(args.get_repeat)])
+        if args.get_repeat > 1:
+            argv.extend(["--get-confirm-timeout-ms", str(args.get_confirm_timeout_ms)])
+            if not observer_args:
+                argv.extend(["--attempt-id", attempt_token])
     argv.extend(observer_args)
     observe(args, "command", "board", argv)
     client_command = " ".join(q(item) for item in argv)
@@ -1753,9 +1761,10 @@ def summarize_get_connection(transfers, expected_size, success):
     }
     if success:
         fct_us = statistics.mean(row["get_fct_us"] for row in transfers)
+        rate_mbps = statistics.mean(row["get_fct_mbps"] for row in transfers)
         body_time_ms = statistics.median(row["body_time_ms"] for row in transfers)
         metrics.update(
-            get_fct_us=fct_us, get_fct_mbps=expected_size * 8 / fct_us,
+            get_fct_us=fct_us, get_fct_mbps=rate_mbps,
             get_fct_received_bytes=expected_size, get_fct_status="ok",
             body_time_ms=body_time_ms, body_mbps=expected_size * 8 / (body_time_ms * 1000),
         )
@@ -1797,10 +1806,11 @@ def configure_console_logging() -> None:
     LOG.addHandler(handler)
 
 
-def parse_gx_args(argv: Optional[Sequence[str]] = None):
+def parse_gx_args(argv: Optional[Sequence[str]] = None, *, get_only=False,
+                  description=None, remote_path_help=None):
     script_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
-        description=(
+        description=description or (
             "通过SSH控制板卡和云端服务端，使用Mini API Demo执行"
             "5G1/5G2/聚合POST与GET，并按旧GX压测格式保存速率和资源数据"
         )
@@ -1840,6 +1850,9 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--server-ready-timeout-s", type=float, default=DEFAULT_SERVER_READY_TIMEOUT_S)
 
     parser.add_argument("--board-dir", default=DEFAULT_BOARD_DIR)
+    parser.add_argument("--download-dir", type=validate_remote_path,
+                        default=DEFAULT_DOWNLOAD_DIR,
+                        help="板端GET下载目录；与客户端程序目录分开，默认沿用 --board-dir")
     parser.add_argument(
         "--client-executable",
         default=DEFAULT_CLIENT_EXECUTABLE,
@@ -1848,36 +1861,38 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         "--remote-path",
         type=validate_remote_path,
         default=DEFAULT_REMOTE_PATH,
-        help=f"GET源文件URL路径；默认 {DEFAULT_REMOTE_PATH}，缺失时从 {DEFAULT_GET_ORIGINAL_PATH} 自动生成",
+        help=remote_path_help or f"GET源文件URL路径；默认 {DEFAULT_REMOTE_PATH}，缺失时从 {DEFAULT_GET_ORIGINAL_PATH} 自动生成",
     )
-    parser.add_argument(
-        "--post-local",
-        default=DEFAULT_POST_LOCAL,
-        help="主板上的POST源文件绝对路径",
-    )
-    parser.add_argument(
-        "--post-remote-rmnet",
-        type=validate_remote_path,
-        default=DEFAULT_POST_REMOTE_RMNET,
-    )
-    parser.add_argument(
-        "--post-remote-usb",
-        type=validate_remote_path,
-        default=DEFAULT_POST_REMOTE_USB,
-    )
-    parser.add_argument(
-        "--post-remote-agg",
-        type=validate_remote_path,
-        default=DEFAULT_POST_REMOTE_AGG,
-    )
+    if not get_only:
+        parser.add_argument(
+            "--post-local",
+            default=DEFAULT_POST_LOCAL,
+            help="主板上的POST源文件绝对路径",
+        )
+        parser.add_argument(
+            "--post-remote-rmnet",
+            type=validate_remote_path,
+            default=DEFAULT_POST_REMOTE_RMNET,
+        )
+        parser.add_argument(
+            "--post-remote-usb",
+            type=validate_remote_path,
+            default=DEFAULT_POST_REMOTE_USB,
+        )
+        parser.add_argument(
+            "--post-remote-agg",
+            type=validate_remote_path,
+            default=DEFAULT_POST_REMOTE_AGG,
+        )
     scheduler_group = parser.add_mutually_exclusive_group()
     scheduler_group.add_argument("--scheduler", default=None)
     scheduler_group.add_argument("--schedulers", type=validate_schedulers, default=None)
+    arrival_benchmark.add_arguments(parser)
     parser.add_argument("--execution-mode", choices=("round-robin", "sequential"),
                         default=DEFAULT_EXECUTION_MODE,
-                        help="多个聚合算法按轮执行，共用同一轮的单链路基线")
+                        help="多个聚合算法按轮执行，相邻聚合共用中间的单链路基线")
     parser.add_argument("--sequence", choices=("balanced", "fixed"), default=DEFAULT_SEQUENCE,
-                        help="balanced 轮换聚合算法位置和首尾网卡，fixed 保持配置顺序")
+                        help="balanced 轮换聚合算法位置，fixed 保持配置顺序")
     parser.add_argument("--dry-run", action="store_true", default=DEFAULT_DRY_RUN)
     parser.add_argument("--warmup-cycles", type=int, default=DEFAULT_WARMUP_CYCLES)
     parser.add_argument("--algorithm-cooldown-s", type=float, default=DEFAULT_ALGORITHM_COOLDOWN_S)
@@ -1895,6 +1910,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
         help="单个客户端 SSH 命令的时限，默认覆盖建连、传输和确认",
     )
     parser.add_argument("--repeat", dest="get_repeat", type=int, default=DEFAULT_GET_REPEAT,
+                        choices=(1,) if get_only else None,
                         help="每条连接顺序下载次数（仅 GET，默认 %(default)s）")
     parser.add_argument("--get-confirm-timeout-ms", type=int, default=DEFAULT_GET_CONFIRM_TIMEOUT_MS,
                         help="每次 GET 等待云端收尾确认的时限（默认 %(default)s ms）")
@@ -1902,15 +1918,16 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument("--iterations", type=int, default=DEFAULT_ITERATIONS)
     parser.add_argument(
         "--direction",
-        choices=("both", "get", "post"),
+        choices=("get",) if get_only else ("both", "get", "post"),
         default=None,
-        help="测试方向：both、get或post；未指定时使用代码顶部的DEFAULT_RUN_GET/POST",
+        help="本入口仅测试GET" if get_only else
+             "测试方向：both、get或post；未指定时使用代码顶部的DEFAULT_RUN_GET/POST",
     )
     parser.add_argument(
         "--order",
         type=validate_order,
         default=validate_order(DEFAULT_MODE_ORDER),
-        help="每轮模式的位置，rmnet 和 usb 各测一次，agg 展开为全部所选聚合算法",
+        help="按 rmnet 和 usb 的相对顺序在首尾和各聚合之间各测一遍",
     )
     parser.add_argument(
         "--retries",
@@ -1982,7 +1999,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     parser.add_argument(
         "--output-root",
         default=DEFAULT_OUTPUT_ROOT or str(script_dir / "log"),
-        help="本机结果目录，默认是脚本目录下的log",
+        help="本机结果根目录（默认 %(default)s）",
     )
 
     add_observer_arguments(parser)
@@ -2011,7 +2028,7 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     if args.sequence not in ("balanced", "fixed"):
         parser.error("DEFAULT_SEQUENCE配置无效")
     if args.execution_mode == "sequential" and len(args.schedulers) > 1:
-        parser.error("多个聚合算法共用每轮单链路基线时，请使用 --execution-mode round-robin")
+        parser.error("多个聚合算法共用相邻基线时，请使用 --execution-mode round-robin")
     if args.warmup_cycles < 0:
         parser.error("预热周期数不能小于0")
     if not math.isfinite(args.algorithm_cooldown_s) or args.algorithm_cooldown_s < 0:
@@ -2116,6 +2133,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None):
     return args
 
 
+def get_download_path(args, filename: str) -> str:
+    directory = getattr(args, "download_dir", None)
+    return posixpath.join(directory, filename) if directory else filename
+
+
 def validate_server_scheduler_support(server: SSHRemote, args) -> None:
     """Read usage only; the legacy server may print it with exit code 1."""
     result = server.run(
@@ -2155,6 +2177,8 @@ def start_server_quiet(
         f"cd -- {q(args.server_dir)} || exit 90; "
         f"mkdir -p {q(state_dir)} || exit 91; "
         f"chmod 700 {q(state_dir)} || exit 92; "
+        + (f"mkdir -p {q(arrival_benchmark.directory(state_dir))} || exit 92; " if scheduler == "adaptive-v2" else "")
+        +
         "if ss -H -lunp 2>/dev/null "
         f"| grep -Eq {q(port_pattern)}; then "
         "printf '__MINI_SERVER_PORT_IN_USE__\\n' >&2; exit 93; fi; "
@@ -2167,6 +2191,7 @@ def start_server_quiet(
         f"--serve-timeout-ms {int(args.serve_timeout_ms)} "
         f"--max-connections {int(max_connections)} "
         f"--scheduler {q(scheduler)} "
+        + arrival_benchmark.server_arguments(args, scheduler, state_dir)
         + (observe(args, "server_arguments") or "")
         + f"> {q(startup_file)} 2> {q(startup_error_file)} < /dev/null & "
         "server_pid=$!; "
@@ -2209,15 +2234,28 @@ def start_server_quiet(
                 if startup.timed_out or startup.truncated or startup.exit_code not in (0, 1):
                     raise RuntimeError("无法完整读取服务端启动信息，拒绝开始传输")
                 match = re.search(
-                    r"^listening address=[^\r\n]*\bscheduler=([a-z0-9_]+)[ \t]*\r?\n",
+                    r"^listening address=[^\r\n]*\bscheduler=([a-z0-9_-]+)[ \t]*\r?\n",
                     startup.output, re.MULTILINE,
                 )
                 if match is not None:
                     actual_scheduler = match.group(1)
+                    if scheduler == "adaptive-v2":
+                        expected_mode = getattr(args, "adaptive_arrival_mode", "off")
+                        if f"adaptive_arrival scheduler=adaptive-v2 mode={expected_mode} " not in startup.output:
+                            raise RuntimeError("adaptive-v2 mode was not confirmed in server startup")
                     if actual_scheduler != scheduler:
                         raise RuntimeError(
                             f"服务端算法不匹配：计划={scheduler}，启动输出={actual_scheduler}"
                         )
+                    args._arrival_server_build = {}
+                    if scheduler == "adaptive-v2":
+                        source = re.search(r"^source_build_id=(\S+)$", startup.output, re.MULTILINE)
+                        digest = server.run(f"sha256sum -- /proc/{pid}/exe", timeout_s=5)
+                        tokens = digest.output.split()
+                        if not source or digest.exit_code or digest.timed_out or digest.truncated or not tokens or len(tokens[0]) != 64:
+                            raise RuntimeError("Cannot confirm adaptive-v2 source/build identity")
+                        args._arrival_server_build = dict(source_build_id=source.group(1), binary_sha256=tokens[0],
+                            adaptive_arrival_mode=expected_mode, resolved_scheduler=scheduler)
                     LOG.info(
                         "云端API服务端已就绪: pid=%s udp=%s scheduler=%s max_connections=%s",
                         pid, args.quic_port, actual_scheduler, max_connections,
@@ -2739,6 +2777,7 @@ def cleanup_current_session_remote_artifacts(
     complete = True
 
     if board.is_connected():
+        download_dir = getattr(args, "download_dir", None) or args.board_dir
         board_output_patterns = (
             f"\\( -name {q('get-rmnet-' + session + '-*.bin')} "
             f"-o -name {q('get-usb-' + session + '-*.bin')} "
@@ -2747,10 +2786,10 @@ def cleanup_current_session_remote_artifacts(
         board_command = (
             "set -e; "
             f"find /tmp -maxdepth 1 -type f {control_patterns} -delete; "
-            f"find {q(args.board_dir)} -maxdepth 1 -type f {board_output_patterns} -delete; "
+            f"find {q(download_dir)} -maxdepth 1 -type f {board_output_patterns} -delete; "
             f"remaining=$(find /tmp -maxdepth 1 -type f {control_patterns} -print); "
             'test -z "$remaining"; '
-            f"remaining=$(find {q(args.board_dir)} -maxdepth 1 -type f "
+            f"remaining=$(find {q(download_dir)} -maxdepth 1 -type f "
             f"{board_output_patterns} -print); "
             'test -z "$remaining"'
         )
@@ -2827,10 +2866,12 @@ def write_speed_log(
     fallback_start: str,
     fallback_end: str,
     get_metrics: Dict[str, object],
+    baseline_position: str = "",
 ) -> Path:
     timestamp = datetime.now().strftime("%H%M%S_%f")
+    position_suffix = f"_{baseline_position}" if baseline_position else ""
     path = log_root / (
-        f"{display_mode}_summary_{direction}_iter{iteration:02d}_{timestamp}.log"
+        f"{display_mode}_summary_{direction}_iter{iteration:02d}{position_suffix}_{timestamp}.log"
     )
     if speed_row is None:
         row = {
@@ -3132,72 +3173,74 @@ def write_aggregation_summary(
     records: Sequence[Dict[str, object]],
     planned_iterations: int,
     direction: str,
+    *,
+    paired_baselines: bool = False,
+    baseline_pairs: Optional[Dict[int, Tuple[str, str]]] = None,
 ) -> Path:
-    fields = [
-        "round", "5G1_mbps", "5G2_mbps", "Agg_mbps",
-        "best_single_mbps", "sum_single_mbps", "gain_vs_best_single_pct",
-        "aggregation_efficiency_pct", "status", "missing_modes",
+    single_link_positions = BASELINE_POSITIONS if paired_baselines or baseline_pairs else ("",)
+    groups = (("rmnet", "5G1", single_link_positions), ("usb", "5G2", single_link_positions),
+              ("agg", "Agg", ("",)))
+    labels = [label for _, label, _ in groups]
+    sample_labels = [f"{label}_{position}" for _, label, positions in groups
+                     for position in positions if position]
+    rate_fields = [
+        *(f"{label}_mbps" for label in labels),
+        "best_single_mbps", "sum_single_mbps", "gain_vs_best_single_pct", "aggregation_efficiency_pct",
     ]
-    fct_columns = ("5G1_fct_ms", "5G2_fct_ms", "Agg_fct_ms") if direction == "get" else ()
-    fields.extend(fct_columns)
+    fct_fields = [f"{label}_fct_ms" for label in labels] if direction == "get" else []
+    detail_fields = [f"{label}_mbps" for label in sample_labels]
+    if direction == "get":
+        detail_fields.extend(f"{label}_fct_ms" for label in sample_labels)
+    fields = ["round", *rate_fields, "status", "missing_modes", *fct_fields, *detail_fields]
+    if baseline_pairs:
+        fields.extend(("baseline_before", "baseline_after"))
+    numeric_fields = [*rate_fields, *fct_fields, *detail_fields]
     path = log_root / f"aggregation_summary_{direction}_{session}.csv"
     rows: List[Dict[str, object]] = []
     complete_rows: List[Dict[str, object]] = []
     successful = {
-        (int(record["round"]), str(record["mode"])): record
+        (int(record["round"]), record["mode"], record.get("baseline_position", "")): record
         for record in records
         if record["success"] and record["direction"] == direction and record["mbps"] is not None
     }
-    labels = (("rmnet", "5G1"), ("usb", "5G2"), ("agg", "Agg"))
     for round_index in range(1, planned_iterations + 1):
-        samples = {
-            mode: successful.get((round_index, mode))
-            for mode, _label in labels
-        }
-        missing = [label for mode, label in labels if samples[mode] is None]
-        row: Dict[str, object] = {
-            "round": round_index,
-            "5G1_mbps": (
-                f"{float(samples['rmnet']['mbps']):.3f}"
-                if samples["rmnet"] is not None else ""
-            ),
-            "5G2_mbps": (
-                f"{float(samples['usb']['mbps']):.3f}"
-                if samples["usb"] is not None else ""
-            ),
-            "Agg_mbps": (
-                f"{float(samples['agg']['mbps']):.3f}"
-                if samples["agg"] is not None else ""
-            ),
-            "best_single_mbps": "",
-            "sum_single_mbps": "",
-            "gain_vs_best_single_pct": "",
-            "aggregation_efficiency_pct": "",
-            "status": "INCOMPLETE" if missing else "COMPLETE",
-            "missing_modes": ";".join(missing),
-        }
-        for mode, label in labels:
-            if fct_columns and samples[mode] is not None:
-                row[f"{label}_fct_ms"] = f"{samples[mode]['time_ms']:.3f}"
+        row: Dict[str, object] = {"round": round_index}
+        positions_for_round = {}
+        if baseline_pairs and round_index in baseline_pairs:
+            before, after = baseline_pairs[round_index]
+            positions_for_round = dict(zip(BASELINE_POSITIONS, (before, after)))
+            row.update(baseline_before=before, baseline_after=after)
+        missing = []
+        rates = {}
+        for mode, label, positions in groups:
+            samples = []
+            for position in positions:
+                actual_position = positions_for_round.get(position, position)
+                sample = successful.get((round_index, mode, actual_position))
+                sample_label = f"{label}_{position}" if position else label
+                if sample is None:
+                    missing.append(sample_label)
+                    continue
+                samples.append(sample)
+                if position:
+                    row[f"{sample_label}_mbps"] = f"{float(sample['mbps']):.3f}"
+                    if direction == "get" and sample.get("time_ms") is not None:
+                        row[f"{sample_label}_fct_ms"] = f"{float(sample['time_ms']):.3f}"
+            if len(samples) == len(positions):
+                rates[mode] = statistics.mean(float(sample["mbps"]) for sample in samples)
+                row[f"{label}_mbps"] = f"{rates[mode]:.3f}"
+                if direction == "get" and all(sample.get("time_ms") is not None for sample in samples):
+                    fct_ms = statistics.mean(float(sample["time_ms"]) for sample in samples)
+                    row[f"{label}_fct_ms"] = f"{fct_ms:.3f}"
+        row.update(status="INCOMPLETE" if missing else "COMPLETE", missing_modes=";".join(missing))
         if not missing:
-            rmnet_mbps = float(samples["rmnet"]["mbps"])
-            usb_mbps = float(samples["usb"]["mbps"])
-            agg_mbps = float(samples["agg"]["mbps"])
-            best = max(rmnet_mbps, usb_mbps)
-            total = rmnet_mbps + usb_mbps
+            best = max(rates["rmnet"], rates["usb"])
+            total = rates["rmnet"] + rates["usb"]
             row.update(
-                {
-                    "best_single_mbps": f"{best:.3f}",
-                    "sum_single_mbps": f"{total:.3f}",
-                    "gain_vs_best_single_pct": (
-                        f"{((agg_mbps / best - 1.0) * 100.0):.3f}"
-                        if best > 0 else ""
-                    ),
-                    "aggregation_efficiency_pct": (
-                        f"{(agg_mbps / total * 100.0):.3f}"
-                        if total > 0 else ""
-                    ),
-                }
+                best_single_mbps=f"{best:.3f}",
+                sum_single_mbps=f"{total:.3f}",
+                gain_vs_best_single_pct=f"{(rates['agg'] / best - 1.0) * 100.0:.3f}" if best > 0 else "",
+                aggregation_efficiency_pct=f"{rates['agg'] / total * 100.0:.3f}" if total > 0 else "",
             )
             complete_rows.append(row)
         rows.append(row)
@@ -3207,18 +3250,11 @@ def write_aggregation_summary(
         writer.writeheader()
         writer.writerows(rows)
         if complete_rows:
-            numeric_fields = [
-                "5G1_mbps", "5G2_mbps", "Agg_mbps",
-                "best_single_mbps", "sum_single_mbps",
-                "gain_vs_best_single_pct", "aggregation_efficiency_pct", *fct_columns,
-            ]
-            average_row: Dict[str, object] = {
-                "round": "AVERAGE",
-                "status": "COMPLETE_ROUNDS_ONLY",
-                "missing_modes": "",
-            }
+            average_row: Dict[str, object] = {"round": "AVERAGE", "status": "COMPLETE_ROUNDS_ONLY"}
             for field in numeric_fields:
-                average_row[field] = f"{statistics.mean(float(row[field]) for row in complete_rows):.3f}"
+                values = [float(row[field]) for row in complete_rows if row.get(field) not in ("", None)]
+                if values:
+                    average_row[field] = f"{statistics.mean(values):.3f}"
             writer.writerow(average_row)
     return path
 
@@ -3228,8 +3264,8 @@ def write_aggregation_summary(
 # 实验计划：纯函数，可离线审阅；每个测试项独立记录，重试不增加样本数。
 # =============================================================================
 SUPPORTED_SCHEDULERS = (
-    "default", "minrtt", "backup", "balanced", "rap", "act", "bandwidth",
-    "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive", "peekaboo",
+    "default", "minrtt", "original_minrtt", "backup", "balanced", "rap", "act", "bandwidth",
+    "fastprobe", "fastprobe5", "fastprobe10", "fastprobe20", "fastonly", "adaptive", "adaptive-v2", "peekaboo",
     "blest", "ecf",
 )
 SUPPORTED_CC = ("default", "cubic", "bbr")
@@ -3262,6 +3298,11 @@ class TestCase:
     client_cc: str
     server_scheduler: str
     server_cc: str
+    baseline_position: str = ""
+    baseline_before: str = ""
+    baseline_after: str = ""
+    adaptive_arrival_mode: str = "off"
+    scheduler_label: str = ""
 
 
 def balanced_algorithm_order(profiles: Sequence[str], cycle: int) -> List[str]:
@@ -3275,34 +3316,47 @@ def balanced_algorithm_order(profiles: Sequence[str], cycle: int) -> List[str]:
 
 
 def build_test_plan(args) -> List[TestCase]:
+    arrival_benchmark.configuration(args)  # validate before opening SSH or starting a server
     directions = ("get", "post") if args.direction == "both" else (args.direction,)
     profiles = list(args.schedulers) if args.schedulers else ["legacy"]
+    single_link_order = [mode for mode in args.order if mode != "agg"]
     plan: List[TestCase] = []
     for phase, cycles in (("warmup", args.warmup_cycles), ("measured", args.iterations)):
         for cycle in range(1, cycles + 1):
             rotate = args.sequence == "balanced"
             reverse = rotate and cycle % 2 == 0
             direction_order = tuple(reversed(directions)) if reverse else directions
-            mode_order = list(reversed(args.order)) if reverse else args.order
             aggregate_order = balanced_algorithm_order(profiles, cycle) if rotate else profiles
+            baseline_positions = [
+                BASELINE_POSITIONS[0],
+                *(f"between_{index}" for index in range(1, len(aggregate_order))),
+                BASELINE_POSITIONS[1],
+            ]
             for direction in direction_order:
                 default_scheduler, cc = transfer_algorithms_for_direction(args, direction)
                 if args.schedulers:
                     cc = args.cc or DEFAULT_CC
-                for mode in mode_order:
-                    if mode == "agg":
-                        cases = [(p, p if args.schedulers else default_scheduler) for p in aggregate_order]
-                    else:
-                        cases = [(SINGLE_LINK_PROFILE, SINGLE_LINK_SCHEDULER)]
-                    for profile, scheduler in cases:
-                        block_id = f"{phase}_{profile}_r{cycle:04d}"
-                        client_scheduler = "adaptive" if direction == "get" else scheduler
-                        server_scheduler = scheduler if direction == "get" else "adaptive"
-                        plan.append(TestCase(
-                            f"{block_id}_{direction}_{mode}", profile, phase, block_id,
-                            cycle, scheduler, cc, direction, mode,
-                            client_scheduler, cc, server_scheduler, "unchanged",
-                        ))
+                cases = []
+                for index, position in enumerate(baseline_positions):
+                    cases.extend((mode, SINGLE_LINK_PROFILE, SINGLE_LINK_SCHEDULER, position, "", "")
+                                 for mode in single_link_order)
+                    if index < len(aggregate_order):
+                        profile = aggregate_order[index]
+                        scheduler = profile if args.schedulers else default_scheduler
+                        cases.append(("agg", profile, scheduler, "", position, baseline_positions[index + 1]))
+                for mode, profile, scheduler, position, before, after in cases:
+                    block_id = f"{phase}_{profile}_r{cycle:04d}"
+                    if position:
+                        block_id += f"_{position}"
+                    client_scheduler = "adaptive" if direction == "get" else scheduler
+                    server_scheduler = scheduler if direction == "get" else "adaptive"
+                    plan.append(TestCase(
+                        f"{block_id}_{direction}_{mode}", profile, phase, block_id,
+                        cycle, scheduler, cc, direction, mode,
+                        client_scheduler, cc, server_scheduler, "unchanged", position, before, after,
+                        getattr(args, "adaptive_arrival_mode", "off") if scheduler == "adaptive-v2" and direction == "get" else "off",
+                        f"adaptive-v2({getattr(args, 'adaptive_arrival_mode', 'off') if direction == 'get' else 'off'})" if scheduler == "adaptive-v2" else scheduler,
+                    ))
     return plan
 
 
@@ -3361,13 +3415,17 @@ def write_experiment_plan(root: Path, session: str, args, plan: Sequence[TestCas
         "iterations_per_algorithm": args.iterations, "warmup_cycles": args.warmup_cycles,
         "direction": args.direction, "base_mode_order": args.order,
         "single_link_scheduler": SINGLE_LINK_SCHEDULER,
-        "single_link_scope": "one sample per interface, direction and round, shared across aggregate profiles",
+        "single_link_order": [mode for mode in args.order if mode != "agg"],
+        "single_link_scope": "start, between adjacent aggregate cases, and end of each direction and round",
+        "single_link_comparison_statistic": "mean_of_complete_adjacent_before_and_after_pair",
         "retries": args.retries, "cooldown_s": args.cooldown_s,
         "algorithm_cooldown_s": args.algorithm_cooldown_s,
         "verify_sha256": args.verify_sha256, "dry_run": args.dry_run,
         "scheduler_scope": "sender algorithm; GET server / POST client; receiver scheduler=adaptive",
+        "adaptive_arrival": arrival_benchmark.configuration(args),
         "get_repeat_per_connection": args.get_repeat,
         "get_fct_case_statistic": "mean_of_complete_connection",
+        "get_rate_case_statistic": "arithmetic_mean_of_per_file_fct_throughput",
         "get_sha256_scope": "final_download_on_connection",
         "get_confirm_timeout_ms": args.get_confirm_timeout_ms,
         "client_timeout_ms": args.client_timeout_ms,
@@ -3422,6 +3480,7 @@ def write_experiment_results(root, session, args, plan, records, started_cases):
                 row["status"] = "ABORTED" if case.case_id in started_cases else "NOT_RUN"
             writer.writerow(row)
     global_rows = []
+    paired_baselines = any(case.baseline_position for case in plan)
     shared_baselines = [r for r in records if r["profile"] == SINGLE_LINK_PROFILE and r["phase"] == "measured"]
     for profile in dict.fromkeys(c.profile for c in plan):
         profile_root = root / profile
@@ -3430,8 +3489,13 @@ def write_experiment_results(root, session, args, plan, records, started_cases):
         measured = [r for r in records if r["profile"] == profile and r["phase"] == "measured"]
         summary = write_gx_final_summary(profile_root, session, measured, planned)
         for direction in dict.fromkeys(c.direction for c in planned if c.mode == "agg"):
+            baseline_pairs = {
+                case.round: (case.baseline_before, case.baseline_after)
+                for case in planned if case.direction == direction and case.mode == "agg" and case.baseline_before
+            }
             write_aggregation_summary(
-                profile_root, session, [*measured, *shared_baselines], args.iterations, direction)
+                profile_root, session, [*measured, *shared_baselines], args.iterations, direction,
+                paired_baselines=paired_baselines, baseline_pairs=baseline_pairs)
         with summary.open(encoding="utf-8-sig", newline="") as handle:
             for row in csv.DictReader(handle):
                 matching = [c for c in planned if c.direction == row["direction"]
@@ -3594,6 +3658,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             if server_started and current_server_scheduler != case.server_scheduler:
                 if not stop_server(server, server_pid, args.server_executable, remote_pidfile, session):
                     raise RuntimeError("无法确认原服务端已停止，拒绝切换算法或开始传输")
+                arrival_benchmark.collect(server, remote_state_dir, log_root)
                 observe(args, "archive_server_log", remote_state_dir)
                 observe(args, "collect")
                 server_started = False
@@ -3613,6 +3678,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 current_server_scheduler = case.server_scheduler
                 append_json_record(log_root / "server_starts.jsonl", {
                     **case_metadata(case, session), "server_pid": server_pid,
+                    **getattr(args, "_arrival_server_build", {}),
                     "started_at": datetime.now().isoformat(),
                     "verification": "startup_scheduler_and_listening_port",
                 })
@@ -3625,6 +3691,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
             last_end = ""
             get_count = args.get_repeat if direction == "get" else 1
             case_info = case_metadata(case, session)
+            position_suffix = f"-{case.baseline_position}" if case.baseline_position else ""
 
             for attempt in range(1, args.retries + 2):
                 run_tag = (
@@ -3645,7 +3712,9 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     else post_remote_path_for_mode(args, mode)
                 )
                 board_path = (
-                    f"get-{mode}-{session}-{case.phase}-{case.profile}-r{round_index:03d}-a{attempt:02d}.bin"
+                    get_download_path(args,
+                        f"get-{mode}-{session}-{case.phase}-{case.profile}{position_suffix}"
+                        f"-r{round_index:03d}-a{attempt:02d}.bin")
                     if direction == "get"
                     else args.post_local
                 )
@@ -3676,10 +3745,11 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     )
 
                 LOG.info(
-                    "开始测试: round=%s mode=%s direction=%s interfaces=%s "
+                    "开始测试: round=%s mode=%s baseline_position=%s direction=%s interfaces=%s "
                     "调度算法=%s 拥塞算法=%s 文件数=%s attempt=%s/%s",
                     round_index,
                     display_mode,
+                    case.baseline_position or "-",
                     direction,
                     ",".join(MODE_INTERFACES[mode]),
                     scheduler,
@@ -3916,6 +3986,10 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         }]
                         get_metrics.update(get_repeat_count=1, get_confirmed_file_count=0,
                                            get_valid_file_count=int(get_metrics["get_fct_status"] == "ok"))
+                        if get_metrics["get_fct_status"] != "ok":
+                            success = False
+                            error = "; ".join(item for item in
+                                (error, "GET FCT: " + get_metrics["get_fct_status"]) if item)
                     fct_us = get_metrics["get_fct_us"]
                     parsed.update(
                         transfer_elapsed_s=fct_us / 1_000_000 if fct_us is not None else None,
@@ -4016,6 +4090,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 first_start,
                 last_end,
                 get_metrics,
+                baseline_position=case.baseline_position,
             )
             record = successful_record or {
                 "round": round_index, "mode": mode, "direction": direction,
@@ -4077,6 +4152,8 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                         server, server_pid, args.server_executable, remote_pidfile, session)
                     return server_stop_confirmed
                 cleanup_step("停止API服务端", stop_current_server)
+            if server_stop_confirmed:
+                cleanup_step("Archive adaptive arrival events", lambda: arrival_benchmark.collect(server, remote_state_dir, log_root))
             cleanup_step("归档服务端日志", lambda: observe(args, "archive_server_log", remote_state_dir))
             cleanup_step("导出观测结果", lambda: observe(args, "finish"))
             # Retry independently even if finish/export or an earlier cleanup

@@ -1,0 +1,5 @@
+﻿family,schema_version,event,conn_uid,path_id,packet_uid,socket_attempt_id,actual_mono_us,result,expected,units,success
+adaptive_arrival_events,1,socket_attempt,14,23,1,1,1000000,-610,1000,bytes,False
+adaptive_arrival_events,1,socket_attempt,14,23,1,2,1000000,1000,1000,bytes,True
+adaptive_arrival_events,1,socket_attempt,21,10,,1,1000000,-610,1,datagrams,False
+adaptive_arrival_events,1,socket_attempt,21,10,,2,1000000,1,1,datagrams,True

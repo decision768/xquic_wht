@@ -1,5 +1,6 @@
 #include "mini_server.h"
 #include "mini_stream_backend.h"
+#include "../demo/netins_udp_telemetry_json.h"
 #include "src/transport/scheduler/xqc_scheduler_blest.h"
 #include "src/transport/scheduler/xqc_scheduler_ecf.h"
 #include "src/transport/scheduler/xqc_scheduler_peekaboo.h"
@@ -111,6 +112,7 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
             }
         } else if (strcmp(key, "mp_sched") == 0) {
             if (strcmp(value, "minrtt") == 0
+                || strcmp(value, "original_minrtt") == 0
                 || strcmp(value, "backup") == 0
                 || strcmp(value, "balanced") == 0
                 || strcmp(value, "rap") == 0
@@ -121,11 +123,17 @@ xqc_mini_svr_load_config_file(xqc_mini_svr_args_t *args, const char *path)
                 || strcmp(value, "fastprobe10") == 0
                 || strcmp(value, "fastprobe20") == 0
                 || strcmp(value, "fastonly") == 0
+                || strcmp(value, "adaptive-v2") == 0
                 || strcmp(value, "adaptive") == 0) {
                 memset(args->quic_cfg.mp_sched, 0, sizeof(args->quic_cfg.mp_sched));
                 strncpy(args->quic_cfg.mp_sched, value, sizeof(args->quic_cfg.mp_sched) - 1);
             }
 
+        } else if (strncmp(key, "adaptive_arrival_", 17) == 0) {
+            const char *arrival_key = strcmp(key, "adaptive_arrival_mode") == 0 ? "mode" : key + 17;
+            if (xqc_arrival_config_option(&args->arrival_config, arrival_key, value)) {
+                fclose(fp); return XQC_ERROR;
+            }
         } else if (strcmp(key, "mp_diag") == 0) {
             args->quic_cfg.mp_diag = (strcmp(value, "1") == 0
                 || strcasecmp(value, "true") == 0) ? 1 : 0;
@@ -255,6 +263,7 @@ xqc_mini_svr_init_args(xqc_mini_svr_args_t *args)
     args->quic_cfg.session_ticket_key_len = ret > 0 ? ret : 0;
     args->quic_cfg.cc = CC_TYPE_BBR;
     args->quic_cfg.multipath = 1;
+    xqc_arrival_config_init(&args->arrival_config);
     strncpy(args->quic_cfg.mp_sched, "adaptive", 32);
     args->quic_cfg.mp_diag = 1;
     args->quic_cfg.mp_diag_interval_ms = 250;
@@ -478,6 +487,9 @@ xqc_mini_svr_init_xquic_engine(xqc_mini_svr_ctx_t *ctx, xqc_mini_svr_args_t *arg
         return XQC_ERROR;
     }
 
+    if (xqc_engine_set_arrival_config(ctx->engine, &args->arrival_config)) {
+        return XQC_ERROR;
+    }
     ctx->ev_engine = event_new(ctx->eb, -1, 0, xqc_mini_svr_engine_cb, ctx);
     if (ctx->ev_engine == NULL) {
         printf("[error] create server engine event failed\n");
@@ -539,6 +551,7 @@ xqc_mini_svr_resolve_sched_name(xqc_mini_svr_args_t *args)
     const char *requested = args->quic_cfg.mp_sched;
 
     if (strcmp(requested, "minrtt") == 0
+        || strcmp(requested, "original_minrtt") == 0
         || strcmp(requested, "backup") == 0
         || strcmp(requested, "balanced") == 0
         || strcmp(requested, "rap") == 0
@@ -549,6 +562,7 @@ xqc_mini_svr_resolve_sched_name(xqc_mini_svr_args_t *args)
         || strcmp(requested, "fastprobe10") == 0
         || strcmp(requested, "fastprobe20") == 0
         || strcmp(requested, "fastonly") == 0
+        || strcmp(requested, "adaptive-v2") == 0
         || strcmp(requested, "adaptive") == 0
         || strcmp(requested, "peekaboo") == 0
         || strcmp(requested, "blest") == 0
@@ -567,6 +581,9 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
 
     if (strcmp(resolved, "minrtt") == 0) {
         sched = xqc_minrtt_scheduler_cb;
+
+    } else if (strcmp(resolved, "original_minrtt") == 0) {
+        sched = xqc_original_minrtt_scheduler_cb;
 
     } else if (strcmp(resolved, "backup") == 0) {
         sched = xqc_backup_scheduler_cb;
@@ -597,6 +614,9 @@ xqc_mini_svr_get_sched_cb(xqc_mini_svr_args_t *args)
     }
     else if(strcmp(resolved, "fastonly") == 0){
         sched = xqc_fastonly_scheduler_cb;
+    }
+    else if (strcmp(resolved, "adaptive-v2") == 0) {
+        sched = xqc_adaptive_v2_scheduler_cb;
     }
     else if(strcmp(resolved, "adaptive") == 0){
         sched = xqc_adaptive_scheduler_cb;
@@ -972,6 +992,10 @@ xqc_mini_svr_free_user_conn(xqc_mini_svr_user_conn_t *user_conn)
 {
     if (user_conn == NULL) {
         return;
+    }
+    if (user_conn->arrival_writer) {
+        xqc_arrival_attach_sink(user_conn->ctx->engine, &user_conn->cid, NULL, NULL);
+        netins_telemetry_close(user_conn->arrival_writer); user_conn->arrival_writer = NULL;
     }
     mini_observer_stop(&user_conn->observer);
     free(user_conn->get_task_streams);

@@ -1,0 +1,62 @@
+{
+  "source_build_id": "adaptive-arrival-v1-9fea161996d0534520c024b1772cc66ae1484e25f79f61302205d7b7d386d81a",
+  "production_slice_sha256": "868a5fbf1307ff1f3bfd965e94ba4ca852d09fd86892af0f3c2112b0c5a0703b",
+  "tests": [
+    {
+      "kind": "predictor",
+      "command": [
+        "C:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\toolchain\\ziglang\\zig.exe",
+        "cc",
+        "-std=gnu11",
+        "-DXQC_DISABLE_LOG",
+        "-Wall",
+        "-Werror",
+        "-Wno-unused",
+        "-Wno-pointer-sign",
+        "-Wno-format-security",
+        "-I.",
+        "-Iinclude",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-adaptive-v2-t4u7t7pp\\tests",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\windows-test-include",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\deps\\usr\\include",
+        "-DXQC_ARRIVAL_BUILD_ID=\"adaptive-arrival-v1-9fea161996d0534520c024b1772cc66ae1484e25f79f61302205d7b7d386d81a\"",
+        "tests/test_adaptive_arrival_predictor.c",
+        "src/transport/scheduler/adaptive_arrival_predictor.c",
+        "-o",
+        "C:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-adaptive-v2-t4u7t7pp\\tests\\test_predictor.exe"
+      ],
+      "build_exit": 0,
+      "test_exit": 0,
+      "output": "PASS T02/T27: readonly repeatable prediction\nPASS T03: checked arithmetic and zero inputs\nPASS T04: draining Z does not free occupied window\nPASS T05: Z draining overlaps ACK wait\nPASS T06: positive batches, same-time merge, one valid sample per ACK\nPASS T07: invalid data, overdue ACK and event bound\nPASS T08: timer precedence, pending budget, disabled pacing and 1 ms minimum\nPASS T09/T10/T11/T18: strict signed gain and remaining budgets\nPASS T27: bounded queue simulation\n",
+      "binary_sha256": "07b87a03b117888fb31050d00f48ef4893f254d5031944fba9387d0ba3d4d5c4"
+    },
+    {
+      "kind": "runtime",
+      "command": [
+        "C:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\toolchain\\ziglang\\zig.exe",
+        "cc",
+        "-std=gnu11",
+        "-DXQC_DISABLE_LOG",
+        "-Wall",
+        "-Werror",
+        "-Wno-unused",
+        "-Wno-pointer-sign",
+        "-Wno-format-security",
+        "-I.",
+        "-Iinclude",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-adaptive-v2-t4u7t7pp\\tests",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\windows-test-include",
+        "-IC:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-original-minrtt-s12wl537\\deps\\usr\\include",
+        "-DXQC_ARRIVAL_BUILD_ID=\"adaptive-arrival-v1-9fea161996d0534520c024b1772cc66ae1484e25f79f61302205d7b7d386d81a\"",
+        "tests/test_adaptive_arrival_runtime.c",
+        "src/transport/scheduler/adaptive_arrival_predictor.c",
+        "-o",
+        "C:\\Users\\ZZ\\AppData\\Local\\Temp\\codex-adaptive-v2-t4u7t7pp\\tests\\test_runtime.exe"
+      ],
+      "build_exit": 0,
+      "test_exit": 0,
+      "output": "PASS T09/T17: enforce, fixed deadline and elapsed-time accounting\nPASS T16/T18: no-input GP timer, lateness, exit and legacy-once\nPASS T02: shadow keeps transport and timers unchanged\nPASS T01/T02/T26/T29: actual off/shadow/original choices and old counters match\nPASS T13: DEFER survives all fallbacks without changing I/Z or blocking counts\nPASS T14/T15: another stream progresses beyond 512 skipped packets\nPASS T14/T17: recovery restarts ordered scanning before later offsets\nPASS T19/T23: packet reuse, stream cancellation and path reset clean up waits\nPASS T20/T21/T25: mixed, framing, specified-path and recovery bypass, no observer dependency\nPASS T28: unsampled totals distinguish lifecycle drops\nPASS T12/T19: physical role change cancels the old episode\nPASS T23/T29: switching off cancels waits and active timers\nPASS T19: timer allocation failure takes the legacy path\nPASS T19/T20: full table falls back; mixed packets cancel and retry head first\nPASS T18/T22: exhausted stream does not spend another transfer's budget; rate history persists\nPASS T24: real single/batch completion paths log only successful sends\nPASS shared pacing regression: ACK-only batch does not debit the pacer\nPASS T20/T25: HTTP/3 framing merged into STREAM data is never marked body-only\nPASS T23: production packet allocation/copy/reuse assigns independent stable UIDs\nPASS T08/T23: modified head ranges invalidate an existing wait\nPASS T28: prediction sampling preserves unsampled counters\nPASS T06: actual in-flight flag prevents duplicate or late ACK window release\nPASS T29: public CLI parsing and API name resolution retain the hyphenated name\nPASS T16: an early positive ACK rechecks a head immediately without busy polling\nPASS T20/T21: priority promotion cancels waits and queues the old head before control data\nPASS T12/T21: reverse physical roles still fall back to the faster secondary; reinjection bypasses waiting\nruntime_context_bytes=12024 stream_metadata_bytes=424 packet_out_bytes=600\nPASS T24: known socket backpressure invalidates prediction until a successful write\nPASS T07: a BBR-like callback does not silently enable an unsupported CC model\nPASS T01/T13: enforce without a qualifying wait preserves the original unthrottled send loop\n",
+      "binary_sha256": "413c1179031bc1fc7a9e83f3ac453ab8eab31aac415c2ca40f51351530764a1c"
+    }
+  ]
+}

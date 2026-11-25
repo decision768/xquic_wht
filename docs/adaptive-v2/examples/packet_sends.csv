@@ -1,0 +1,4 @@
+﻿family,schema_version,event,conn_uid,packet_uid,decision_id,path_id,pns,packet_number,send_time_us,stream_id,offset,length,W_error_us
+adaptive_arrival_events,1,packet_sent,8,1,1,10,2,7,1003000,0,0,950,0
+adaptive_arrival_events,1,packet_sent,14,1,1,23,0,0,1000000,0,0,950,0
+adaptive_arrival_events,1,packet_sent,14,2,0,23,0,0,1000000,0,0,950,

@@ -394,6 +394,8 @@ struct xqc_connection_s {
     const
     xqc_scheduler_callback_t       *scheduler_callback;
     void                           *scheduler;
+    struct xqc_arrival_s           *arrival;
+    uint64_t                        arrival_next_packet_uid;
     xqc_observer_t                 *observer;
 
     const

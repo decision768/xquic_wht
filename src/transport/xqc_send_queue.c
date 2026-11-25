@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 #include "src/transport/xqc_send_queue.h"
 #include "src/transport/xqc_packet.h"
 #include "src/transport/xqc_packet_out.h"
@@ -236,6 +237,7 @@ xqc_send_queue_remove_lost(xqc_list_head_t *pos)
 void
 xqc_send_queue_insert_free(xqc_packet_out_t *po, xqc_list_head_t *head, xqc_send_queue_t *send_queue)
 {
+    xqc_arrival_packet_gone(send_queue->sndq_conn, po);
     if (po->po_pr) {
         if (po->po_pr->ref_cnt <= 1) {
             xqc_conn_destroy_ping_record(po->po_pr);
@@ -349,6 +351,8 @@ xqc_send_queue_move_to_tail(xqc_list_head_t *pos, xqc_list_head_t *head)
 void
 xqc_send_queue_move_to_high_pri(xqc_list_head_t *pos, xqc_send_queue_t *send_queue)
 {
+    xqc_arrival_priority_promote(send_queue->sndq_conn,
+        xqc_list_entry(pos, xqc_packet_out_t, po_list), &send_queue->sndq_send_packets_high_pri);
     xqc_list_del_init(pos);
     xqc_list_add_tail(pos, &send_queue->sndq_send_packets_high_pri);
 }

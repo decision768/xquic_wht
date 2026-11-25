@@ -1,3 +1,4 @@
+#include "src/transport/scheduler/xqc_scheduler_adaptive_v2.h"
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
@@ -56,6 +57,7 @@ xqc_path_destroy(xqc_path_ctx_t *path)
         return;
     }
 
+    xqc_arrival_path_reset(path->parent_conn, path->path_id);
     if (path->path_send_ctl != NULL) {
         xqc_send_ctl_destroy(path->path_send_ctl);
         path->path_send_ctl = NULL;

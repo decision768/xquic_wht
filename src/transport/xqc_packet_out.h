@@ -56,6 +56,7 @@ typedef struct xqc_po_stream_frame_s {
     unsigned int            ps_type_offset;
     unsigned int            ps_length_offset;
     unsigned char           ps_is_used;
+    unsigned char           ps_arrival_body;
     unsigned char           ps_has_fin;     /* whether fin flag from stream frame is set  */
     unsigned char           ps_is_reset;    /* whether frame is RESET_STREAM */
 } xqc_po_stream_frame_t;
@@ -127,6 +128,12 @@ typedef struct xqc_packet_out_s {
 
     uint64_t                po_new_cid_seq;
     uint32_t                po_new_cid_path;
+    xqc_connection_t *po_arrival_owner;
+    uint64_t po_arrival_uid, po_arrival_decision_us;
+    uint64_t po_arrival_prediction_path, po_arrival_prediction_W;
+    uint64_t po_arrival_decision_id, po_arrival_candidate_secondary;
+    unsigned char po_arrival_eligible;
+    unsigned char po_arrival_trace, po_arrival_legacy, po_arrival_prediction_valid;
 } xqc_packet_out_t;
 
 xqc_bool_t xqc_packet_out_on_specific_path(xqc_connection_t *conn, 

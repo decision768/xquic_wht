@@ -441,6 +441,7 @@ mini_backend_server_apply_config(xqc_mini_svr_args_t *args,
         args->env_cfg.disable_file_logging = 1;
     }
     args->observer_config = config->observer;
+    args->arrival_config = config->arrival_config;
     args->stream_api_enabled = config->stream_mode != 0;
     if (config->has_zlog) {
         args->env_cfg.use_zlog = config->zlog_enabled;

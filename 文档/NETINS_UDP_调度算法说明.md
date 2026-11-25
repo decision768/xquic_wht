@@ -71,6 +71,16 @@ MinRTT 的选择依据明确，调度结果容易理解：在链路状态和优�
 
 MinRTT 先确认链路可用并具备发送条件，再优先选择当前 SRTT 较低的路径，并随着网络状态变化持续更新后续数据的发送选择。整体而言，它体现的是清晰、直观的低时延优先思路。
 
+### 2.7 Original MinRTT：原版对照算法
+
+`original_minrtt` 移植自 [Awstme/xquic 的 dev/peekaboo-scheduler 分支](https://github.com/Awstme/xquic/tree/dev/peekaboo-scheduler)。它保留该分支的路径质量分级、同等级最低 SRTT 选路和原版日志，使用独立回调，不替换现有 `minrtt`。
+
+选择 `original_minrtt` 时，在创建连接、创建路径发送控制器之前固定原版对照参数：初始 RTT 为 **250ms**，PTO 质量降级阈值为 **2**，并跳过本项目额外的 RTT 启动探测和空闲探测入口。正常的 PTO 超时恢复机制继续运行。其余 TLS、拥塞控制、ACK 处理和数据面仍使用本项目实现，因此它是原版调度器的本地对照模式，不是整个外部仓库的复刻。
+
+Mini API 文件传输客户端和服务端均支持 `--scheduler original_minrtt`，配置文件支持 `mp_sched=original_minrtt`，C API 可使用 `NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT`。GET 下载的发送算法应在服务端设置；POST 上传在客户端设置。文件传输 Demo 的 GET 客户端仍按现有规则使用 `adaptive`，上述原版参数只应用于实际选择 `original_minrtt` 的端点。观测日志将其标记为 `original_minrtt`，不赋予固定主副路角色。
+
+100 MiB 轮测可通过 `--schedulers minrtt,original_minrtt` 比较两种模式；本次没有改变脚本默认算法列表。现有 `minrtt` 及其他调度算法继续使用各自原有参数和探测行为。
+
 ## 3. Backup：主路径锁定与故障接替策略
 
 ### 3.1 算法定位

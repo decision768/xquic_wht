@@ -1,5 +1,21 @@
 # Third-party notices
 
+## Original MinRTT from XQUIC
+
+`src/transport/scheduler/xqc_scheduler_original_minrtt.c` adapts the MinRTT
+scheduler and its sendability helper from Awstme/xquic's
+`dev/peekaboo-scheduler` branch, retrieved on 2026-11-25:
+
+https://github.com/Awstme/xquic/blob/dev/peekaboo-scheduler/src/transport/scheduler/xqc_scheduler_minrtt.c
+
+Copyright (c) 2022, Alibaba Group Holding Limited.
+
+The code is distributed under the Apache License, Version 2.0, included in
+this repository's `LICENSE`. Local adaptations rename the scheduler symbols,
+isolate its sendability helper, and restore the original comparison settings
+(250ms initial RTT, PTO quality threshold 2, no additional local RTT probes).
+The upstream file SHA-256 is recorded in the source header.
+
 ## Peekaboo public source artifact
 
 The Peekaboo, BLEST and ECF implementations in `src/transport/scheduler/`

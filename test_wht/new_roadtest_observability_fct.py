@@ -128,7 +128,9 @@ class RoadtestObserver:
             suffix = (r"_(?:resource\.stop|resource_monitor\.log|client\.start)" if endpoint == "board"
                       else r"_server_memory\.(?:stop|status)")
             allowed = allowed or re.fullmatch(token + suffix, name)
-        if endpoint == "board" and parent == self.args.board_dir.rstrip("/"):
+        download_dir = getattr(self.args, "download_dir", None) or getattr(self.args, "board_dir", "")
+        if endpoint == "board" and parent in {
+                self.args.board_dir.rstrip("/"), download_dir.rstrip("/")}:
             allowed = allowed or re.fullmatch(
                 r"get-(?:rmnet|usb|agg)-" + re.escape(self.session) + r"-[A-Za-z0-9_.-]+\.bin", name)
         if endpoint == "server" and parent == "/tmp/mini_api_gx_" + self.session:
@@ -327,6 +329,10 @@ class RoadtestObserver:
                 info["source_build_id"] = None
                 version = remote.run(command + " --version", timeout_s=5)
                 info["version_output"] = version.output if version.exit_code == 0 else None
+                if info["version_output"]:
+                    source_id = re.search(r"^source_build_id=(\S+)$", info["version_output"], re.MULTILINE)
+                    if source_id:
+                        info["source_build_id"] = source_id.group(1)
                 digest = remote.run("cd -- " + shlex.quote(directory) + " && sha256sum -- "
                                     + shlex.quote(executable), timeout_s=10)
                 token = digest.output.strip().split()

@@ -42,7 +42,7 @@ usage(const char *program)
         "  --port PORT             Server port (default 8443)\n"
         "  --interface NAME        Client interface; repeat up to 8 times\n"
         "  --server-name NAME      TLS SNI name\n"
-        "  --scheduler NAME        POST scheduler: default|minrtt|backup|balanced|rap|act|\n"
+        "  --scheduler NAME        POST scheduler: default|minrtt|original_minrtt|backup|balanced|rap|act|\n"
         "                          bandwidth|fastprobe|fastprobe5|fastprobe10|\n"
         "                          fastprobe20|fastonly|adaptive|peekaboo|blest|ecf;\n"
         "                          default balanced;\n"
@@ -83,6 +83,7 @@ parse_scheduler(const char *name, int *out)
     } schedulers[] = {
         {"default", NETINS_UDP_SCHEDULER_DEFAULT},
         {"minrtt", NETINS_UDP_SCHEDULER_MINRTT},
+        {"original_minrtt", NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT},
         {"backup", NETINS_UDP_SCHEDULER_BACKUP},
         {"balanced", NETINS_UDP_SCHEDULER_BALANCED},
         {"rap", NETINS_UDP_SCHEDULER_RAP},
@@ -94,6 +95,7 @@ parse_scheduler(const char *name, int *out)
         {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
         {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
+        {"adaptive-v2", NETINS_UDP_SCHEDULER_ADAPTIVE_V2},
         {"peekaboo", NETINS_UDP_SCHEDULER_PEEKABOO},
         {"blest", NETINS_UDP_SCHEDULER_BLEST},
         {"ecf", NETINS_UDP_SCHEDULER_ECF},
@@ -497,6 +499,7 @@ main(int argc, char **argv)
         return EXIT_SUCCESS;
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        printf("source_build_id=%s\n", xqc_arrival_source_build_id());
         return EXIT_SUCCESS;
     }
 

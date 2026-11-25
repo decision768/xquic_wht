@@ -50,7 +50,7 @@ stream_demo_usage(const char *program)
         "  direction defaults to POST (client sends); GET makes the client receive\n"
         "  write chunk defaults to %u bytes\n"
         "  --write-chunk-size and --callback-delay-ms are test-only\n"
-        "  POST scheduler: default|minrtt|backup|balanced|rap|act|bandwidth|"
+        "  POST scheduler: default|minrtt|original_minrtt|backup|balanced|rap|act|bandwidth|"
         "fastprobe|fastprobe5|fastprobe10|fastprobe20|fastonly|adaptive"
         " (default balanced); GET uses adaptive\n",
         program, NETINS_UDP_STREAM_DEMO_LANE_COUNT,
@@ -83,6 +83,7 @@ stream_demo_parse_scheduler(const char *name, int *out)
     } schedulers[] = {
         {"default", NETINS_UDP_SCHEDULER_DEFAULT},
         {"minrtt", NETINS_UDP_SCHEDULER_MINRTT},
+        {"original_minrtt", NETINS_UDP_SCHEDULER_ORIGINAL_MINRTT},
         {"backup", NETINS_UDP_SCHEDULER_BACKUP},
         {"balanced", NETINS_UDP_SCHEDULER_BALANCED},
         {"rap", NETINS_UDP_SCHEDULER_RAP},
@@ -94,6 +95,7 @@ stream_demo_parse_scheduler(const char *name, int *out)
         {"fastprobe20", NETINS_UDP_SCHEDULER_FASTPROBE20},
         {"fastonly", NETINS_UDP_SCHEDULER_FASTONLY},
         {"adaptive", NETINS_UDP_SCHEDULER_ADAPTIVE},
+        {"adaptive-v2", NETINS_UDP_SCHEDULER_ADAPTIVE_V2},
     };
     size_t i;
 
@@ -112,7 +114,8 @@ stream_demo_scheduler_name(int scheduler)
     static const char *names[] = {
         "default", "minrtt", "backup", "balanced", "rap", "act",
         "bandwidth", "fastprobe", "adaptive", "fastprobe5",
-        "fastprobe10", "fastprobe20", "fastonly"
+        "fastprobe10", "fastprobe20", "fastonly", "peekaboo", "blest", "ecf",
+        "original_minrtt"
     };
     return scheduler >= NETINS_UDP_SCHEDULER_DEFAULT
             && (size_t)scheduler < sizeof(names) / sizeof(names[0])
