@@ -17,10 +17,10 @@
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_BATCH_CAPACITY       16
-#define CLIENT_RX_SINGLE_PATH_PACKETS  16
-#define CLIENT_RX_DUAL_PATH_PACKETS    16
-#define CLIENT_RX_MULTI_PATH_PACKETS   16
+#define CLIENT_RX_BATCH_CAPACITY       64
+#define CLIENT_RX_SINGLE_PATH_PACKETS  64
+#define CLIENT_RX_DUAL_PATH_PACKETS    64
+#define CLIENT_RX_MULTI_PATH_PACKETS   64
 #define CLIENT_PATH_QUALITY_PTO_THRESHOLD        3
 
 struct xqc_mini_cli_rx_batch_s {
@@ -3207,6 +3207,7 @@ xqc_mini_cli_maybe_finish_transfer(
     xqc_mini_cli_user_conn_t *user_conn)
 {
     if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL
         || !user_conn->ctx->args->defer_transfer_setup
         || !user_conn->transfer_active)
     {
@@ -3228,6 +3229,33 @@ xqc_mini_cli_maybe_finish_transfer(
     user_conn->transfer_active = 0;
     user_conn->auto_start_requests = 0;
     user_conn->transfer_end_time = xqc_now();
+}
+
+int
+xqc_mini_cli_finish_transfer_observation(xqc_mini_cli_user_conn_t *user_conn,
+    int error_code)
+{
+    if (user_conn == NULL || user_conn->ctx == NULL
+        || user_conn->ctx->args == NULL
+        || !user_conn->ctx->args->defer_transfer_setup
+        || user_conn->transfer_observer_start_us == 0)
+    {
+        return 0;
+    }
+    if (user_conn->transfer_observer_terminal_recorded) {
+        return user_conn->transfer_observer_checkpoint_result;
+    }
+
+    user_conn->transfer_observer_terminal_recorded = 1;
+    /* Call after request/transport close callbacks have returned, or from the
+     * H3 connection close callback after stream_end records are available. */
+    xqc_observer_phase(user_conn->ctx->engine, &user_conn->cid,
+        error_code == 0 ? "client_confirmed" : "client_failed", 0, 0,
+        xqc_observer_elapsed_us(user_conn->transfer_observer_start_us,
+            xqc_observer_clock_us()));
+    user_conn->transfer_observer_checkpoint_result =
+        mini_observer_finish(user_conn->observer);
+    return user_conn->transfer_observer_checkpoint_result;
 }
 
 int

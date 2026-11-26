@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""1GB GET 压测：每个客户端进程/QUIC连接只下载一份完整文件。
+"""GET 压测：聚合传500MiB，单链路基线传100MiB，每个QUIC连接只下载一份文件。
 
-本脚本的 1GB 延续之前的创建口径：1 GiB = 1024 MiB = 1,073,741,824 字节。
-云端预先创建：/root/test_xquic_server/upload/1-1GiB
+沿用原“压测_1GB_GET_FCT.py”文件名；当前聚合文件大小为500MiB = 524,288,000字节。
+云端预先创建聚合源文件：/root/test_xquic_server/upload/1-500MiB
+云端预先创建单链路源文件：/root/test_xquic_server/upload/1-100MiB
 板端程序目录：/oemdata/gx/xquic_file/
 板端接收文件：/userdata/get-<本次用例的唯一名称>.bin
 
 复用同目录“压测_100MB_FCT.py”的SSH、算法轮换、FCT统计和清理流程；
 旧脚本仍默认100MiB/每连接三次，本入口固定GET/每连接一次，不生成云端源文件。
 底层原有的文件分片与并发方式保留；“一次”指一份完整文件，不是一个分片。
-单次速率 = 1073741824 * 8 / GET_FCT_us（Mbps），跨轮汇总仍取各次速率的算术平均。
-下载文件每次尝试后清理，支持中断后的会话清理，避免累积1GB文件。
+5G1/5G2单链路发送端统一使用original_minrtt。
+单次速率 = 该模式文件字节数 * 8 / GET_FCT_us（Mbps），跨轮取各次速率的算术平均。
+聚合率仍按聚合Mbps / (5G1基线Mbps + 5G2基线Mbps)计算；不同大小文件的FCT不直接比较。
+下载文件每次尝试后清理，支持中断后的会话清理，避免累积500MiB文件。
 
 先在控制机检查计划（不连接SSH）：
   python 压测_1GB_GET_FCT.py --iterations 1 --dry-run
@@ -19,7 +22,9 @@
   python 压测_1GB_GET_FCT.py --iterations 1
 仅选一个聚合调度器：
   python 压测_1GB_GET_FCT.py --scheduler original_minrtt --iterations 1
-测试新策略时显式指定模式，先off/shadow，再安排enforce：
+adaptive-v2默认启用enforce模式：
+  python 压测_1GB_GET_FCT.py --scheduler adaptive-v2 --iterations 1
+需要只观测、不执行等待策略时，显式切换shadow：
   python 压测_1GB_GET_FCT.py --scheduler adaptive-v2 --adaptive-arrival-mode shadow --iterations 1
 
 依赖和辅助模块沿用同目录原脚本；实际运行依赖见 requirements-telemetry.txt。
@@ -46,12 +51,13 @@ DEFAULT_DOWNLOAD_DIR = "/userdata"
 DEFAULT_BOARD_RESOURCE_DIR = "/userdata/gx_resource_monitor"
 DEFAULT_SERVER_DIR = "/root/test_xquic_server"
 DEFAULT_SERVER_EXECUTABLE = "./netins_udp_mini_api_server"
-DEFAULT_REMOTE_PATH = "/upload/1-1GiB"
-DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent / "log_1GB_GET")
+DEFAULT_REMOTE_PATH = "/upload/1-500MiB"
+DEFAULT_SINGLE_LINK_REMOTE_PATH = "/upload/1-100MiB"
+DEFAULT_OUTPUT_ROOT = str(Path(__file__).resolve().parent / "log_500MB_GET")
 
 # 沿用现有脚本的算法列表和500轮设置；试跑用 --iterations 1。
-# original_minrtt、adaptive-v2 等已注册算法可用 --scheduler/--schedulers 选择。
-DEFAULT_SCHEDULERS = ("adaptive", "minrtt", "balanced", "blest", "ecf")
+# minrtt 等其他已注册算法可用 --scheduler/--schedulers 选择。
+DEFAULT_SCHEDULERS = ("adaptive", "adaptive-v2", "original_minrtt", "blest", "ecf")
 DEFAULT_ITERATIONS = 500
 DEFAULT_CC = "bbr"
 DEFAULT_CLIENT_TIMEOUT_MS = 600000
@@ -59,10 +65,12 @@ DEFAULT_SERVE_TIMEOUT_MS = 600000
 DEFAULT_COMMAND_TIMEOUT_S = 690.0
 # SSH密码继续读取 MINI_BENCH_BOARD_PASSWORD / MINI_BENCH_SERVER_PASSWORD，或传入原有SSH选项。
 
-FILE_BYTES = 1024 * 1024 * 1024
+FILE_MIB = 500
+FILE_BYTES = FILE_MIB * 1024 * 1024
+SINGLE_LINK_FILE_BYTES = 100 * 1024 * 1024
 FILES_PER_CONNECTION = 1
 DESCRIPTION = (
-    "1GB GET压测：每个QUIC连接只传一份1GiB文件，保留5G1/5G2相邻基线和多算法轮换；"
+    "GET压测：聚合每连接传一份500MiB文件，5G1/5G2单链路每连接传一份100MiB文件；"
     "默认程序在/oemdata/gx/xquic_file，文件下载到/userdata。仅GET，固定repeat=1。"
 )
 
@@ -75,7 +83,7 @@ def _load_engine():
         raise RuntimeError(f"缺少共用压测引擎: {source}；请保留同目录原脚本及辅助模块")
     if str(directory) not in sys.path:
         sys.path.insert(0, str(directory))
-    name = "xquic_one_gib_get_engine"
+    name = "xquic_500mib_get_engine"
     spec = importlib.util.spec_from_file_location(name, source)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -96,7 +104,7 @@ def _apply_defaults():
     engine.DEFAULT_RUN_GET = True
     engine.DEFAULT_RUN_POST = False
     engine.DEFAULT_GET_REPEAT = FILES_PER_CONNECTION
-    engine.DEFAULT_GET_MIB = 1024
+    engine.DEFAULT_GET_MIB = FILE_MIB
     engine.DEFAULT_GET_BYTES = FILE_BYTES
 
 
@@ -104,19 +112,22 @@ def parse_args(argv=None):
     _apply_defaults()
     args = _parse_base_args(
         argv, get_only=True, description=DESCRIPTION,
-        remote_path_help=(f"已预先创建的1GiB文件URL；默认 {DEFAULT_REMOTE_PATH}，"
-                          "所有源文件均须恰好1073741824字节；不会自动生成或截取副本"),
+        remote_path_help=(f"聚合{FILE_MIB}MiB文件URL；默认 {DEFAULT_REMOTE_PATH}，"
+                          f"须恰好{FILE_BYTES}字节；不会自动生成或截取副本"),
+        single_link_remote_path=DEFAULT_SINGLE_LINK_REMOTE_PATH,
     )
     # These values also appear in the reviewable experiment manifest.
-    args.benchmark_profile = "1GiB_GET_once_per_connection"
-    args.file_bytes = FILE_BYTES
+    args.benchmark_profile = "GET_500MiB_aggregate_100MiB_single_link_once_per_connection"
+    args.get_file_bytes_by_mode = {
+        "agg": FILE_BYTES, "rmnet": SINGLE_LINK_FILE_BYTES, "usb": SINGLE_LINK_FILE_BYTES,
+    }
     return args
 
 
 def server_preflight(server, server_dir, server_executable, remote_path,
-                     require_get_source=True):
+                     require_get_source=True, *, expected_bytes=FILE_BYTES):
     # Check the existing executable/TLS prerequisites without invoking the
-    # 100MB script's source-copy generator, then check this exact source size.
+    # 100MB script's source-copy generator, then check the mode-specific size.
     source, _ = _check_server_base(server, server_dir, server_executable,
                                    remote_path, require_get_source=False)
     q = engine.q
@@ -128,13 +139,13 @@ def server_preflight(server, server_dir, server_executable, remote_path,
     match = re.search(r"__MINI_SOURCE_SIZE__=(\d+)", result.output)
     if result.exit_code or result.timed_out or result.truncated or not match:
         raise RuntimeError(
-            f"1GB GET源文件预检失败: {source}。请先创建可读的普通1GiB文件；"
+            f"GET源文件预检失败: {source}。请先创建可读的普通文件，要求{expected_bytes}字节；"
             "脚本不会生成、覆盖或裁剪源文件。\n" + result.diagnostic_output
         )
     size = int(match.group(1))
-    if size != FILE_BYTES:
-        raise RuntimeError(f"1GB GET源文件大小不符: {source}，实际{size}字节，要求{FILE_BYTES}字节")
-    engine.LOG.info("1GB GET源文件: %s bytes=%s，每连接完整文件数=1", source, size)
+    if size != expected_bytes:
+        raise RuntimeError(f"GET源文件大小不符: {source}，实际{size}字节，要求{expected_bytes}字节")
+    engine.LOG.info("GET源文件: %s bytes=%s，每连接完整文件数=1", source, size)
     return source, size
 
 
@@ -145,11 +156,18 @@ def write_experiment_plan(root, session, args, plan):
     config.update(
         benchmark_profile=args.benchmark_profile,
         script_entrypoint=Path(__file__).name,
-        file_bytes=FILE_BYTES,
-        file_size_label="1GiB (1024MiB)",
+        file_bytes=None,
+        aggregate_file_bytes=FILE_BYTES,
+        single_link_file_bytes=SINGLE_LINK_FILE_BYTES,
+        file_bytes_by_mode=args.get_file_bytes_by_mode,
+        file_size_label=f"aggregate: {FILE_MIB}MiB; single_link: 100MiB",
         files_per_connection=FILES_PER_CONNECTION,
         remote_path=args.remote_path,
         server_source_path=posixpath.join(args.server_dir, args.remote_path.lstrip("/")),
+        single_link_remote_path=args.single_link_remote_path,
+        single_link_server_source_path=posixpath.join(args.server_dir, args.single_link_remote_path.lstrip("/")),
+        measured_planned_get_bytes=sum(c.file_bytes for c in plan if c.phase == "measured"),
+        aggregation_comparison="per_case_file_bytes_over_fct_then_rate_ratio",
         source_policy="existing_regular_file_exact_size_no_generation",
         board_program_dir=args.board_dir,
         board_download_dir=args.download_dir,
@@ -161,7 +179,7 @@ def write_experiment_plan(root, session, args, plan):
     path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# Only this private engine instance gets the fixed-size GET profile.
+# Only this private engine instance gets the mixed-size GET profile.
 engine.parse_gx_args = parse_args
 engine.server_preflight = server_preflight
 engine.write_experiment_plan = write_experiment_plan

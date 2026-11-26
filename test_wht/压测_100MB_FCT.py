@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import csv
 import getpass
+import hashlib
 import json
 import logging
 import math
@@ -98,8 +99,8 @@ DEFAULT_GET_CONFIRM_TIMEOUT_MS = 15000  # 单份文件等待云端收尾确认�
 
 # 多算法实验配置：直接修改这里，然后在编辑器里运行本文件，无须命令行参数。
 # 这里设置聚合算法。留空 () 时聚合使用 DEFAULT_GET/POST_SCHEDULER。
-# 单链路发送算法统一使用 minrtt。
-DEFAULT_SCHEDULERS = ("adaptive", "minrtt", "balanced", "blest", "ecf")
+# 单链路发送算法统一使用 original_minrtt。
+DEFAULT_SCHEDULERS = ("adaptive", "adaptive-v2", "original_minrtt", "blest", "ecf")
 DEFAULT_EXECUTION_MODE = "round-robin"
 DEFAULT_SEQUENCE = "balanced"  # 多轮轮换聚合算法位置，fixed 保持固定顺序。
 DEFAULT_DRY_RUN = False  # True=只保存计划，不连接SSH；False=实际测试
@@ -173,7 +174,7 @@ MODE_INTERFACES = {
 }
 
 SINGLE_LINK_PROFILE = "single_link"
-SINGLE_LINK_SCHEDULER = "minrtt"
+SINGLE_LINK_SCHEDULER = "original_minrtt"
 BASELINE_POSITIONS = ("before", "after")
 
 TRANSFER_RECORD_RE = re.compile(r"transfer\s+iteration=", re.IGNORECASE)
@@ -392,13 +393,7 @@ class SSHRemote:
     ) -> CommandResult:
         if not self.is_connected():
             raise RuntimeError(f"{self.label} SSH未连接")
-        transport = self.client.get_transport()
-        channel = transport.open_session(timeout=min(float(timeout_s), 30.0))
-        channel.set_combine_stderr(False)
-        channel.exec_command(command)
-
-        started = time.monotonic()
-        deadline = started + float(timeout_s)
+        channel = None
         captured = bytearray()
         stderr_captured = bytearray()
         truncated = False
@@ -406,11 +401,30 @@ class SSHRemote:
         sink = None
         stderr_sink = None
         stable_after_exit = None
+
+        def open_capture(path):
+            if path is None:
+                return None
+            path = Path(path)
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                return path.open("wb")
+            except OSError as exc:
+                raise RuntimeError(
+                    f"创建本地原始日志失败: {path}（绝对路径{len(str(path.absolute()))}字符）: {exc}；"
+                    "Windows路径过长时可使用 --output-root C:\\xqlog"
+                ) from exc
+
         try:
-            sink = output_path.open("wb") if output_path is not None else None
-            stderr_sink = (
-                stderr_path.open("wb") if stderr_path is not None else None
-            )
+            # Validate local capture files before dispatching a remote transfer.
+            sink = open_capture(output_path)
+            stderr_sink = open_capture(stderr_path)
+            transport = self.client.get_transport()
+            channel = transport.open_session(timeout=min(float(timeout_s), 30.0))
+            channel.set_combine_stderr(False)
+            channel.exec_command(command)
+            started = time.monotonic()
+            deadline = started + float(timeout_s)
             while True:
                 made_progress = False
                 while channel.recv_ready():
@@ -468,7 +482,8 @@ class SSHRemote:
                 sink.close()
             if stderr_sink is not None:
                 stderr_sink.close()
-            channel.close()
+            if channel is not None:
+                channel.close()
 
         elapsed = time.monotonic() - started
         return CommandResult(
@@ -525,6 +540,11 @@ class SSHRemote:
 
 def q(value: str) -> str:
     return shlex.quote(str(value))
+
+
+def local_attempt_basename(run_tag: str) -> str:
+    """Full attempt IDs remain in JSON/CSV; compact only local artifact names."""
+    return hashlib.sha256(run_tag.encode("utf-8")).hexdigest()[:24]
 
 
 
@@ -596,6 +616,7 @@ def server_preflight(
     server_executable: str,
     remote_path: str,
     require_get_source: bool = True,
+    *, expected_bytes: Optional[int] = None,
 ) -> Tuple[str, int]:
     source_path = posixpath.join(server_dir, remote_path.lstrip("/"))
     source_check = ""
@@ -608,29 +629,37 @@ def server_preflight(
             f" && printf '__MINI_SOURCE_SIZE__=%s\\n' "
             f"\"$(wc -c < {q(source_path)})\""
         )
-    command = (
-        f"cd -- {q(server_dir)}"
-        f" && test -x {q(server_executable)}"
-        " && test -r server.crt"
-        " && test -r server.key"
-        " && command -v nohup >/dev/null"
-        " && command -v env >/dev/null"
-        " && command -v awk >/dev/null"
-        " && command -v tr >/dev/null"
-        " && command -v grep >/dev/null"
-        " && command -v wc >/dev/null"
-        " && command -v ss >/dev/null"
-        + source_check
-    )
+    checks = [
+        (f"云端程序目录不存在或无法进入: {server_dir}", f"cd -- {q(server_dir)}"),
+        (f"服务端程序不存在或不是普通文件: {server_executable}",
+         f"test -f {q(server_executable)}"),
+        (f"服务端程序没有执行权限: {server_executable}",
+         f"test -x {q(server_executable)}"),
+        (f"服务端证书不存在或不可读: {posixpath.join(server_dir, 'server.crt')}",
+         "test -r server.crt"),
+        (f"服务端私钥不存在或不可读: {posixpath.join(server_dir, 'server.key')}",
+         "test -r server.key"),
+    ]
+    checks.extend((f"云端缺少命令或 SSH 非交互环境 PATH 不包含该命令: {tool}",
+                   f"command -v {tool} >/dev/null")
+                  for tool in ("nohup", "env", "awk", "tr", "grep", "wc", "ss"))
+    command = "; ".join(
+        f"{{ {check}; }} || {{ printf '%s\\n' {q(message)} >&2; exit 1; }}"
+        for message, check in checks
+    ) + source_check
     result = server.run(command, timeout_s=20)
-    if result.exit_code != 0:
+    if result.exit_code != 0 or result.timed_out or result.truncated:
         hint = (
             f"；若 {source_path} 尚未生成，请确认 {original_path} 可读、"
             f"大小至少为 {DEFAULT_GET_BYTES} 字节，且目标目录可写"
             if require_get_source and remote_path == DEFAULT_REMOTE_PATH
             else ""
         )
-        raise RuntimeError(f"云端服务端预检失败{hint}:\n{result.diagnostic_output}")
+        raise RuntimeError(
+            f"云端服务端预检失败{hint}（退出码={result.exit_code}，超时={result.timed_out}，"
+            f"输出截断={result.truncated}）:\n"
+            + (result.diagnostic_output.strip() or "远端没有返回诊断输出，请检查 SSH 命令执行环境")
+        )
     if not require_get_source:
         return source_path, 0
     size_match = re.search(r"__MINI_SOURCE_SIZE__=(\d+)", result.output)
@@ -639,6 +668,8 @@ def server_preflight(
     source_size = int(size_match.group(1))
     if source_size <= 0:
         raise RuntimeError("云端GET源文件为空，拒绝进行无效吞吐测试")
+    if expected_bytes is not None and source_size != expected_bytes:
+        raise RuntimeError(f"GET源文件大小不符: {source_path}，实际{source_size}字节，要求{expected_bytes}字节")
     if remote_path == DEFAULT_REMOTE_PATH and source_size != DEFAULT_GET_BYTES:
         raise RuntimeError(
             f"默认GET文件大小不符: {source_path} 为 {source_size} 字节，"
@@ -737,7 +768,9 @@ def board_preflight(
     planned_attempts = getattr(args, "planned_get_attempts", len(args.order) * args.iterations * (args.retries + 1))
     retained_copies = planned_attempts if args.keep_downloads else 1
     safety_margin = max(16 * 1024 * 1024, source_size // 10)
-    required_bytes = source_size * retained_copies + safety_margin
+    retained_bytes = (getattr(args, "planned_get_download_bytes", source_size * retained_copies)
+                      if args.keep_downloads else source_size)
+    required_bytes = retained_bytes + safety_margin
     if free_bytes < required_bytes:
         raise RuntimeError(
             "板卡空间不足: "
@@ -1807,7 +1840,7 @@ def configure_console_logging() -> None:
 
 
 def parse_gx_args(argv: Optional[Sequence[str]] = None, *, get_only=False,
-                  description=None, remote_path_help=None):
+                  description=None, remote_path_help=None, single_link_remote_path=None):
     script_dir = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(
         description=description or (
@@ -1863,6 +1896,11 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None, *, get_only=False,
         default=DEFAULT_REMOTE_PATH,
         help=remote_path_help or f"GET源文件URL路径；默认 {DEFAULT_REMOTE_PATH}，缺失时从 {DEFAULT_GET_ORIGINAL_PATH} 自动生成",
     )
+    if single_link_remote_path is not None:
+        parser.add_argument(
+            "--single-link-remote-path", type=validate_remote_path, default=single_link_remote_path,
+            help="单链路100MiB源文件URL；默认 %(default)s，聚合使用 --remote-path 指定的1GiB文件",
+        )
     if not get_only:
         parser.add_argument(
             "--post-local",
@@ -2006,6 +2044,8 @@ def parse_gx_args(argv: Optional[Sequence[str]] = None, *, get_only=False,
     # 高延迟链路的发送端可能在文件收完后继续收尾。
     parser.set_defaults(observer_checkpoint_timeout_s=120.0)
     args = parser.parse_args(argv)
+    if single_link_remote_path is not None and args.remote_path == args.single_link_remote_path:
+        parser.error("单链路100MiB和聚合1GiB必须指定不同的源文件URL")
     if not 1 <= args.observer_interval_ms <= 60000:
         parser.error("--observer-interval-ms 必须在 1 到 60000 之间")
     try:
@@ -2240,7 +2280,7 @@ def start_server_quiet(
                 if match is not None:
                     actual_scheduler = match.group(1)
                     if scheduler == "adaptive-v2":
-                        expected_mode = getattr(args, "adaptive_arrival_mode", "off")
+                        expected_mode = arrival_benchmark.configuration(args)["mode"]
                         if f"adaptive_arrival scheduler=adaptive-v2 mode={expected_mode} " not in startup.output:
                             raise RuntimeError("adaptive-v2 mode was not confirmed in server startup")
                     if actual_scheduler != scheduler:
@@ -2650,7 +2690,7 @@ def collect_server_resource(
             monitor_stop_status=stop_status,
         )
     temp_dir.mkdir(parents=True, exist_ok=True)
-    local_temp = temp_dir / f"{run_tag}_server_memory.csv"
+    local_temp = temp_dir / f"{local_attempt_basename(run_tag)}_server_memory.csv"
     download_ok, _ = download_remote_with_retry(
         server,
         remote_csv,
@@ -3303,6 +3343,8 @@ class TestCase:
     baseline_after: str = ""
     adaptive_arrival_mode: str = "off"
     scheduler_label: str = ""
+    remote_path: str = ""
+    file_bytes: Optional[int] = None
 
 
 def balanced_algorithm_order(profiles: Sequence[str], cycle: int) -> List[str]:
@@ -3316,7 +3358,7 @@ def balanced_algorithm_order(profiles: Sequence[str], cycle: int) -> List[str]:
 
 
 def build_test_plan(args) -> List[TestCase]:
-    arrival_benchmark.configuration(args)  # validate before opening SSH or starting a server
+    arrival_mode = arrival_benchmark.configuration(args)["mode"]  # validate before opening SSH or starting a server
     directions = ("get", "post") if args.direction == "both" else (args.direction,)
     profiles = list(args.schedulers) if args.schedulers else ["legacy"]
     single_link_order = [mode for mode in args.order if mode != "agg"]
@@ -3354,8 +3396,11 @@ def build_test_plan(args) -> List[TestCase]:
                         f"{block_id}_{direction}_{mode}", profile, phase, block_id,
                         cycle, scheduler, cc, direction, mode,
                         client_scheduler, cc, server_scheduler, "unchanged", position, before, after,
-                        getattr(args, "adaptive_arrival_mode", "off") if scheduler == "adaptive-v2" and direction == "get" else "off",
-                        f"adaptive-v2({getattr(args, 'adaptive_arrival_mode', 'off') if direction == 'get' else 'off'})" if scheduler == "adaptive-v2" else scheduler,
+                        arrival_mode if scheduler == "adaptive-v2" and direction == "get" else "off",
+                        f"adaptive-v2({arrival_mode if direction == 'get' else 'off'})" if scheduler == "adaptive-v2" else scheduler,
+                        (getattr(args, "single_link_remote_path", getattr(args, "remote_path", ""))
+                         if mode != "agg" else getattr(args, "remote_path", "")) if direction == "get" else "",
+                        getattr(args, "get_file_bytes_by_mode", {}).get(mode) if direction == "get" else None,
                     ))
     return plan
 
@@ -3606,13 +3651,22 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
         connect_ssh_with_optional_prompt(server, "云端")
         connect_ssh_with_optional_prompt(board, "板卡")
         recover_pending_cleanup(args, log_parent, board, server, session)
-        source_path, get_expected_size = server_preflight(
-            server,
-            args.server_dir,
-            args.server_executable,
-            args.remote_path,
-            "get" in directions,
-        )
+        get_sources = {}
+        for planned in plan:
+            if planned.direction != "get" or planned.remote_path in get_sources:
+                continue
+            source_path, source_size = server_preflight(
+                server, args.server_dir, args.server_executable, planned.remote_path,
+                expected_bytes=planned.file_bytes,
+            )
+            get_sources[planned.remote_path] = (source_path, source_size, "")
+        if not get_sources:
+            server_preflight(server, args.server_dir, args.server_executable,
+                             args.remote_path, require_get_source=False)
+        get_expected_size = max((item[1] for item in get_sources.values()), default=0)
+        args.planned_get_download_bytes = sum(
+            get_sources[c.remote_path][1] for c in plan if c.direction == "get"
+        ) * (args.retries + 1)
         validate_server_scheduler_support(server, args)
         board_preflight(
             board,
@@ -3632,11 +3686,14 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 args.verify_sha256,
             )
         if "get" in directions and args.verify_sha256:
-            get_expected_sha = get_server_sha256(server, source_path)
+            for remote_path, (source_path, source_size, _) in get_sources.items():
+                get_sources[remote_path] = (source_path, source_size, get_server_sha256(server, source_path))
 
         observe(args, "start")
         for case in plan:
             round_index, direction, mode = case.round, case.direction, case.mode
+            if direction == "get":
+                _, get_expected_size, get_expected_sha = get_sources[case.remote_path]
             scheduler, cc = case.scheduler, case.cc
             profile_root = log_root / case.profile
             if case.phase == "warmup":
@@ -3703,11 +3760,12 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                     "expected_sha256": get_expected_sha if direction == "get" else post_expected_sha,
                     "interfaces": MODE_INTERFACES[mode], "verify_sha256": args.verify_sha256},
                     get_count)
-                raw_stdout_path = raw_client_dir / f"{run_tag}.stdout.log"
-                raw_stderr_path = raw_client_dir / f"{run_tag}.stderr.log"
+                local_name = local_attempt_basename(run_tag)
+                raw_stdout_path = raw_client_dir / f"{local_name}.stdout.log"
+                raw_stderr_path = raw_client_dir / f"{local_name}.stderr.log"
                 attempt_token = run_tag
                 remote_path = (
-                    args.remote_path
+                    case.remote_path
                     if direction == "get"
                     else post_remote_path_for_mode(args, mode)
                 )
@@ -3725,7 +3783,7 @@ def gx_main(argv: Optional[Sequence[str]] = None) -> int:
                 )
                 remote_board_stop = f"/tmp/{run_tag}_resource.stop" if args.resource_monitor else ""
                 remote_board_monitor_log = f"/tmp/{run_tag}_resource_monitor.log"
-                local_board_csv = board_resource_local_dir / f"{run_tag}_resource.csv"
+                local_board_csv = board_resource_local_dir / f"{local_name}_resource.csv"
                 board_temporary = [f"/tmp/{run_tag}_client.start"]
                 if args.resource_monitor:
                     board_temporary.extend((remote_board_csv, remote_board_stop, remote_board_monitor_log))

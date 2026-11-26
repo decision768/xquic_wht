@@ -6,6 +6,8 @@ from pathlib import Path
 import posixpath
 import shlex
 
+DEFAULT_MODE = "enforce"
+
 DEFAULTS = dict(predict_horizon_us=20000, max_defer_episode_us=5000,
     max_defer_stream_us=20000, recheck_interval_us=1000, gain_margin_floor_us=2000,
     gain_margin_rtt_ratio=0.10, min_valid_rate_samples=8, rate_sample_capacity=16,
@@ -14,8 +16,8 @@ DEFAULTS = dict(predict_horizon_us=20000, max_defer_episode_us=5000,
 
 
 def add_arguments(parser):
-    parser.add_argument("--adaptive-arrival-mode", choices=("off", "shadow", "enforce"), default="off",
-                        help="adaptive-v2 GET sender mode; explicitly use enforce for treatment runs")
+    parser.add_argument("--adaptive-arrival-mode", choices=("off", "shadow", "enforce"), default=DEFAULT_MODE,
+                        help="adaptive-v2 GET sender mode (default: enforce); off/shadow remain available")
     parser.add_argument("--adaptive-arrival-option", action="append", default=[], metavar="KEY=VALUE",
                         help="Override an arrival v1 field; repeat for multiple fields")
 
@@ -40,7 +42,7 @@ def configuration(args):
         and all(v <= 0xFFFFFFFF for k, v in c.items() if k != "gain_margin_rtt_ratio"))
     if not valid:
         raise ValueError("Invalid adaptive arrival v1 limits")
-    return dict(result, mode=getattr(args, "adaptive_arrival_mode", "off"),
+    return dict(result, mode=getattr(args, "adaptive_arrival_mode", DEFAULT_MODE),
                 model_version="arrival_proxy_v1", schema_version=1)
 
 

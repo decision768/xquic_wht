@@ -407,6 +407,9 @@ mini_backend_client_transfer(mini_backend_client_t *client,
         conn->observer = mini_observer_start(client->ctx.engine, &conn->cid,
             client->ctx.eb, &observer_config, "board", xqc_mini_cli_observer_extra, conn);
     }
+    conn->transfer_observer_start_us = observer_task_start_us;
+    conn->transfer_observer_terminal_recorded = 0;
+    conn->transfer_observer_checkpoint_result = 0;
     int ret = XQC_OK;
     if (method == REQUEST_METHOD_GET
         && !xqc_mini_cli_paths_ready_for_requests(client->connection))
@@ -418,6 +421,7 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     }
     if (ret != XQC_OK) {
         mini_backend_client_abort_transfer(client, EIO);
+        (void)xqc_mini_cli_finish_transfer_observation(conn, EIO);
         return EIO;
     }
 
@@ -501,10 +505,7 @@ mini_backend_client_transfer(mini_backend_client_t *client,
     if (ret != XQC_OK) {
         mini_backend_client_abort_transfer(client, ret);
     }
-    xqc_observer_phase(client->ctx.engine, &client->connection->cid,
-        ret == XQC_OK ? "client_confirmed" : "client_failed", 0, 0,
-        xqc_observer_elapsed_us(observer_task_start_us, xqc_observer_clock_us()));
-    int checkpoint_result = mini_observer_finish(conn->observer);
+    int checkpoint_result = xqc_mini_cli_finish_transfer_observation(conn, ret);
     if (ret == XQC_OK && get_task_id) {
         conn->get_task_needs_confirmation = 1;
         conn->get_confirmation_result = client->args->observer_config.enabled

@@ -68,8 +68,8 @@
 #define XQC_MINI_PATH_WAIT_MAX_ROUNDS 5
 #define XQC_MINI_TRANSPORT_PATH_STATE_ACTIVE 2
 #define XQC_MINI_TIMEOUT_DEFER_CHECK_USEC 200000
-#define XQC_MINI_CLI_WRITE_QUEUE_MAX_TASKS 1024
-#define XQC_MINI_CLI_WRITE_QUEUE_MAX_BYTES (64 * 1024 * 1024)
+#define XQC_MINI_CLI_WRITE_QUEUE_MAX_TASKS 2048
+#define XQC_MINI_CLI_WRITE_QUEUE_MAX_BYTES (128ULL * 1024 * 1024)
 #define XQC_MINI_RX_HIST_BUCKETS 8
 #define SESSION_TICKET_FILE         "session_ticket"
 #define TRANSPORT_PARAMS_FILE       "transport_params"
@@ -389,6 +389,9 @@ typedef struct xqc_mini_cli_user_conn_s {
     int                     transfer_error_code;
     xqc_usec_t              transfer_start_time;
     xqc_usec_t              transfer_end_time;
+    uint64_t                transfer_observer_start_us;
+    int                     transfer_observer_terminal_recorded;
+    int                     transfer_observer_checkpoint_result;
 
 
 
@@ -556,6 +559,8 @@ void xqc_mini_cli_mark_transfer_io_complete(
     xqc_mini_cli_user_conn_t *user_conn);
 void xqc_mini_cli_maybe_finish_transfer(
     xqc_mini_cli_user_conn_t *user_conn);
+int xqc_mini_cli_finish_transfer_observation(
+    xqc_mini_cli_user_conn_t *user_conn, int error_code);
 void xqc_mini_cli_schedule_path_retry(xqc_mini_cli_user_conn_t *user_conn, xqc_usec_t delay_us);
 
 void xqc_mini_cli_release_path_io(xqc_mini_cli_user_path_t *path, const char *reason);

@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,9 +32,9 @@ class ArrivalTools(unittest.TestCase):
         wanted = {"TestCase", "build_test_plan", "balanced_algorithm_order"}
         selected = ast.Module(body=[n for n in source.body if isinstance(n, (ast.ClassDef, ast.FunctionDef))
                                    and n.name in wanted], type_ignores=[])
-        namespace = dict(dataclass=dataclass, List=List, Sequence=Sequence, arrival_benchmark=bench,
+        namespace = dict(dataclass=dataclass, List=List, Optional=Optional, Sequence=Sequence, arrival_benchmark=bench,
             transfer_algorithms_for_direction=lambda a, d: ("adaptive", "bbr"), DEFAULT_CC="bbr",
-            BASELINE_POSITIONS=("before", "after"), SINGLE_LINK_PROFILE="single_link", SINGLE_LINK_SCHEDULER="minrtt")
+            BASELINE_POSITIONS=("before", "after"), SINGLE_LINK_PROFILE="single_link", SINGLE_LINK_SCHEDULER="original_minrtt")
         exec(compile(selected, "benchmark-plan", "exec"), namespace)
         plan = namespace["build_test_plan"](args)
         treatment = next(c for c in plan if c.scheduler == "adaptive-v2")

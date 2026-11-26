@@ -198,8 +198,10 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
     }
     user_conn->last_error_code = connection_error;
     user_conn->h3_conn = NULL;
-    mini_observer_stop(&user_conn->observer);
     user_conn->connection_closed = 1;
+    if (connection_error == 0) {
+        xqc_mini_cli_maybe_finish_transfer(user_conn);
+    }
     if (user_conn->transfer_active) {
         xqc_mini_cli_set_transfer_error(user_conn,
             user_conn->last_error_code != 0
@@ -209,6 +211,19 @@ xqc_mini_cli_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, voi
         user_conn->auto_start_requests = 0;
         user_conn->transfer_end_time = xqc_now();
     }
+    if (user_conn->transfer_observer_start_us != 0
+        && !user_conn->transfer_observer_terminal_recorded)
+    {
+        if (!user_conn->transfer_finished
+            && user_conn->transfer_error_code == 0)
+        {
+            xqc_mini_cli_set_transfer_error(user_conn,
+                connection_error != 0 ? connection_error : ECONNRESET);
+        }
+        (void)xqc_mini_cli_finish_transfer_observation(user_conn,
+            user_conn->transfer_error_code);
+    }
+    mini_observer_stop(&user_conn->observer);
     if (user_conn->ctx != NULL && user_conn->ctx->eb != NULL) {
         event_base_loopbreak(user_conn->ctx->eb);
     }
