@@ -225,7 +225,12 @@ static xqc_arrival_history_t *history(xqc_arrival_t *a,uint64_t id)
 {
     arrival_path_t *empty=NULL;
     for(unsigned i=0;i<XQC_MAX_PATHS_COUNT;i++) { if(a->paths[i].used && a->paths[i].path_id==id)return &a->paths[i].history; if(!a->paths[i].used)empty=&a->paths[i]; }
-    if(!empty)return NULL; empty->used=1; empty->path_id=id; return &empty->history;
+    if (!empty) {
+        return NULL;
+    }
+    empty->used=1;
+    empty->path_id=id;
+    return &empty->history;
 }
 void xqc_arrival_path_reset(xqc_connection_t *c,uint64_t id)
 {
@@ -282,7 +287,10 @@ static int pure(xqc_connection_t *c,xqc_packet_out_t *p,xqc_stream_t **out)
     xqc_po_stream_frame_t *f=&p->po_stream_frames[0];
     if(!f->ps_is_used || !f->ps_length || f->ps_is_reset || !f->ps_arrival_body || p->po_stream_frames[1].ps_is_used)return 0;
     xqc_stream_t *s=getstream(c,f->ps_stream_id); if(!s || !s->arrival || s->arrival->cancelled || s->stream_priority==XQC_STREAM_PRI_HIGH)return 0;
-    if(out)*out=s; return 1;
+    if (out) {
+        *out=s;
+    }
+    return 1;
 }
 static xqc_arrival_prediction_t predict(xqc_connection_t *c,xqc_path_ctx_t *path,xqc_packet_out_t *p,uint64_t now)
 {
@@ -396,7 +404,12 @@ int xqc_arrival_fallback(xqc_connection_t *c,xqc_packet_out_t *p,xqc_path_ctx_t 
     xqc_arrival_prediction_t pp=predict(c,P,p,now),sp=predict(c,S,p,now);
     a->calls+=2;a->events+=pp.events+sp.events;a->cpu_us+=xqc_monotonic_timestamp()-before;
     if(pp.valid && sp.valid)a->pairs++;
-    if(!pp.valid)a->invalid[pp.reason]++;if(!sp.valid)a->invalid[sp.reason]++;
+    if (!pp.valid) {
+        a->invalid[pp.reason]++;
+    }
+    if (!sp.valid) {
+        a->invalid[sp.reason]++;
+    }
     uint64_t left=stream->arrival->spent_us>=a->config.max_defer_stream_us?0:a->config.max_defer_stream_us-stream->arrival->spent_us;
     uint64_t episode=w?w->deadline-now:a->config.max_defer_episode_us,margin;int64_t gain;
     int would=xqc_arrival_compare(&a->config,&pp,&sp,episode,left,&gain,&margin);
