@@ -17,10 +17,10 @@
 #define CLIENT_SEND_FILE "client_sent.txt"  //used for send file path
 #define CLIENT_RECV_FILE "client_received.bin" //used for receive file path
 #define XQC_MINI_DIAG_LOG_INTERVAL_US 1000000ULL
-#define CLIENT_RX_BATCH_CAPACITY       16
-#define CLIENT_RX_SINGLE_PATH_PACKETS  16
-#define CLIENT_RX_DUAL_PATH_PACKETS    16
-#define CLIENT_RX_MULTI_PATH_PACKETS   16
+#define CLIENT_RX_BATCH_CAPACITY       64
+#define CLIENT_RX_SINGLE_PATH_PACKETS  64
+#define CLIENT_RX_DUAL_PATH_PACKETS    64
+#define CLIENT_RX_MULTI_PATH_PACKETS   64
 #define CLIENT_PATH_QUALITY_PTO_THRESHOLD        3
 
 struct xqc_mini_cli_rx_batch_s {
